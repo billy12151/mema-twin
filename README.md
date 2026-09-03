@@ -96,7 +96,7 @@ MCP 配置见 `examples/zcode.mcp.json`。环境变量：
 | `MEMA_TWIN_PROMPTS_DIR` | `<项目>/prompts` | prompt 文件镜像目录 |
 | `MEMA_TWIN_DELIVERABLES_DIR` | `<项目>/deliverables` | 交付物文件目录 |
 | `MEMA_TWIN_MEMA_URL` | `http://127.0.0.1:8000/mcp` | mema HTTP MCP 端点 |
-| `MEMA_TWIN_CLIENT_ID` / `MEMA_TWIN_AGENT_ID` | `zcode` / `mema-twin` | mema 身份头（缺失会被拒） |
+| `MEMA_TWIN_CLIENT_ID` / `MEMA_TWIN_AGENT_ID` | `zcode` / `mema-twin` | mema 必需的身份头。`AGENT_ID` 建议配置成**宿主 Agent 自己的 mema 身份**（如 zcode-default），偏好记忆的写入归属落到真实 Agent；工具溯源由 `twin:*` 标签承担，不靠 agent_id。默认值 `mema-twin` 仅兜底未配置的安装 |
 | `MEMA_TWIN_WORKSPACE` | `mema-twin` | 偏好存储桶。画像默认**全局**（能力跟人不跟项目），此值仅用于在 mema 里与项目记忆隔离；一般不改，需单独画像的场景才用 `data.workspace` 显式分桶 |
 | `MEMA_TWIN_EMBED_MODEL` | mema 配置的模型 | embed 档 GGUF 路径；解析顺序：本变量 → mema 配置 `embedding.model_path` → 禁用（fail-open 走 pending） |
 
