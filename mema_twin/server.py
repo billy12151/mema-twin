@@ -77,7 +77,8 @@ def _memory_id_of(data) -> int | None:
 
 
 def _workspace(data: dict) -> str:
-    return _safe_ws_segment(str(data.get("workspace") or os.environ.get("MEMA_TWIN_WORKSPACE", "memory-arbiter-mcp")))
+    # 默认独立 workspace（不落 mema 项目自己的空间，偏好记忆与项目记忆互不污染）
+    return _safe_ws_segment(str(data.get("workspace") or os.environ.get("MEMA_TWIN_WORKSPACE", "mema-twin")))
 
 
 def _action_write(data: dict) -> dict:
