@@ -702,7 +702,8 @@ def _action_help(data: dict) -> dict:
     return {
         "ok": True,
         "actions": {
-            "write": "沉淀一条工作偏好。必填 content/work_type/audience/purpose（原始值即可，产品归一）；"
+            "write": "沉淀一条工作偏好。必填 content/work_type/audience/purpose"
+                     "（先 taxonomy 查清单选码；清单无合适项给原始值，进 pending 由用户裁定）；"
                      "可选 subject/tags/source_ref。",
             "status": "查看各 work_type 的 prompt 版本概况与 pending 数量。",
             "compile": "取编译素材包（当前版本 prompt + 未编译偏好证据 + 编译规则），"

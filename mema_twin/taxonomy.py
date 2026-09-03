@@ -2,8 +2,9 @@
 
 来源：ZCodeProject/docs/mema-avatar-design-2026-09-02.md 第 5 节（D9）。
 work_type 34 项（七域）/ audience 10 项 / purpose 9 项。
-别名只收常见精确写法；语义近似由 embed 档归一（已接入，见 embed.py /
-normalize.py），未命中进 pending 由用户治理裁定，绝不自动新建 canonical。
+别名只收常见精确写法；语义选码由调用方 Agent 对清单完成（SKILL 硬流程：
+先 taxonomy 查清单再写），清单都不合适给原始值进 pending 由用户治理裁定，
+绝不自动新建 canonical。
 """
 from __future__ import annotations
 
