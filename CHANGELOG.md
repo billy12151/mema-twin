@@ -2,7 +2,7 @@
 
 ## [0.2.0] — 2026-09-03
 
-M1 + M2 落地（mema-core 0.15.4 基线），37 测试绿：
+M1 + M2 落地（mema-core 0.15.4 基线），两轮 review（常规+对抗性）修复 28 项发现，61 测试绿：
 
 - **embed 近邻归一档（M1.1）**：别名 miss 后先语义近邻（阈值 0.75），命中映射
   canonical（matched_by=embed，不落别名）；复用 mema-core ManagedEmbedder（懒加载
