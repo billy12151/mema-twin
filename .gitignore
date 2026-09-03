@@ -8,3 +8,4 @@ build/
 twin.sqlite3*
 prompts/
 deliverables/
+.workbuddy/
