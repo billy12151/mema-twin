@@ -149,8 +149,8 @@ def _action_write(data: dict) -> dict:
                 active = store.get_active(conn, dims["work_type"]["code"])
                 if active and active.get("version") is not None:
                     out["hint"] = (f"{dims['work_type']['label_zh']} 已有 persona prompt v{active['version']}；"
-                                   "本次偏好已入池未编译，可 twin(action=\"compile\") 生成新版本"
-                                   f"（{templates.STRONG_MODEL_NOTE}）")
+                                   "本次偏好已入池未编译——无需立即整理，"
+                                   "由用户决定何时 compile，或等定时扫描统一处理")
                 else:
                     out["hint"] = (f"{dims['work_type']['label_zh']} 尚无 persona prompt，"
                                    "可 twin(action=\"compile\") 生成 v1"
