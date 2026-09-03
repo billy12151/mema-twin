@@ -8,7 +8,8 @@ version = "0.3.0"
 description = "Personal work twin: compiles versioned persona prompts from mema preference memories and injects them into plan workflows."
 readme = "README.md"
 requires-python = ">=3.11"
-# 许可证待阶段 2 收费形态拍板时定（open-core 需拆分），暂不声明
+license = {text = "Apache-2.0"}
+classifiers = ["License :: OSI Approved :: Apache Software License"]
 authors = [{ name = "张志维 (billy12151)" }]
 dependencies = [
   "mcp>=1.28.0,<2",  # 家族（mema/plan-mode）均在 1.x；2.x 将 FastMCP 改名 MCPServer，迁移另起
