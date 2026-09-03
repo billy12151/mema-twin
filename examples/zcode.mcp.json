@@ -5,7 +5,7 @@
       "env": {
         "MEMA_TWIN_MEMA_URL": "http://127.0.0.1:8000/mcp",
         "MEMA_TWIN_CLIENT_ID": "zcode",
-        "MEMA_TWIN_AGENT_ID": "zcode-default",
+        "MEMA_TWIN_AGENT_ID": "mema-twin",
         "MEMA_TWIN_WORKSPACE": "mema-twin"
       }
     }
