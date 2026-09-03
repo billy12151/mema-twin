@@ -34,13 +34,23 @@ live in twin's own SQLite with a file mirror for fallback and human review.
 
 设计要点（详见 `~/ZCodeProject/docs/mema-avatar-design-2026-09-02.md`）：
 
-- **Agent 抽象、产品归一**：三字段（工作性质/受众/用途）写入时强制语义归一；
-  映射不到的进 pending，由用户裁定 map / canonicalize / reject，绝不自动新建。
+- **Agent 抽象、产品归一**：三字段（工作性质/受众/用途）写入时强制语义归一，档位为
+  精确/别名 → embed 近邻（阈值 0.75，复用 mema-core 的 GGUF embedder，禁用或失败
+  自动跳过）→ pending 由用户裁定 map / canonicalize / reject，绝不自动新建。
 - **偏好本体存 mema**：经其 HTTP MCP 读写，复用 mema 的冲突检查、审计与治理；
-  twin 自有 `twin.sqlite3` 只存枚举注册表、待裁长尾、prompt 版本。
-- **DB 为准、文件镜像降级**：`prompts/<workspace>/<work_type>/vN.md` + `active.md`。
-- **编译执行者＝宿主 Agent**（mema 不自配模型）：compile 返回素材包，会话模型编译后
+  twin 自有 `twin.sqlite3` 存枚举注册表、待裁长尾、prompt 版本、证据指针索引
+  （twin_evidence 只存 mema 记忆 id 与维度标签，不存正文；compile 按 id 精确
+  read 取全文，召回无丢失）。
+- **DB 为准、文件镜像降级**：`prompts/<workspace>/<work_type>/vN.md` + `active.md`；
+  交付任务评审通过后交付稿落 `deliverables/<workspace>/task-N.md`。
+- **编译执行者＝宿主 Agent**（twin 不自配模型）：compile 返回素材包，会话模型编译后
   submit 回库，版本记录来源 memory ids 与编译模型。建议在强模型会话中执行编译。
+- **交付任务流（机制改造自 plan-mode）**：可审计（任务行不可变追加 + append-only
+  评审记录）、可中断（pending 搁置）、可继续（task_resume 恢复 todos 续作）；task_start /
+  task_resume 即 persona prompt 注入点。
+- **定时扫描挂 Agent 端**：twin 自身不起调度；status 里的 scan_notice 提醒 Agent
+  征询用户后在宿主平台建周任务调 `twin(action="scan")`，跑过 7 天内提醒自消失
+  （mema 首装提醒同款模式）。
 
 ## 工具（单工具动作式）
 
@@ -51,10 +61,18 @@ live in twin's own SQLite with a file mirror for fallback and human review.
 | `write` | 沉淀一条工作偏好。必填 content/work_type/audience/purpose |
 | `get` | 取某工作性质的 active persona prompt（开工前调用） |
 | `compile` | 取编译素材包（当前版本 + 未编译证据 + 编译规则） |
-| `submit` | 提交编译产物，落版本并写镜像 |
-| `status` | 版本概况与 pending 数量 |
+| `submit` | 提交编译产物，落版本并写镜像，回写证据编译标记 |
+| `status` | 版本概况、未编译统计、pending 数量、scan 安装提醒 |
 | `taxonomy` | 列枚举（kind ∈ work_type/audience/purpose） |
 | `pending` / `resolve` | 待裁长尾的查看与治理 |
+| `task_start` | 开工建档并注入 persona prompt（audience/purpose 可选） |
+| `task_submit` | 提交交付稿待评审 |
+| `task_review` | 评审裁定（approved 落交付文件 / changes_requested 走修订），append-only 审计 |
+| `task_pending` | 评审搁置（中断未决） |
+| `task_resume` / `task_revise` | 续作历史任务 / 修订进行中任务（lineage 追溯） |
+| `task_recent` / `task_get` | 任务列表 / 单任务全量（含评审历史） |
+| `todo` | 会话 todo 读写（plan-mode 同款语义） |
+| `scan` | 定时扫描：未编译偏好/pending 积压/开放任务汇总与建议 |
 
 ## 维度枚举 v1
 
@@ -76,9 +94,14 @@ MCP 配置见 `examples/zcode.mcp.json`。环境变量：
 |------|------|------|
 | `MEMA_TWIN_DB_PATH` | `<项目>/twin.sqlite3` | twin 自有库路径 |
 | `MEMA_TWIN_PROMPTS_DIR` | `<项目>/prompts` | prompt 文件镜像目录 |
+| `MEMA_TWIN_DELIVERABLES_DIR` | `<项目>/deliverables` | 交付物文件目录 |
 | `MEMA_TWIN_MEMA_URL` | `http://127.0.0.1:8000/mcp` | mema HTTP MCP 端点 |
 | `MEMA_TWIN_CLIENT_ID` / `MEMA_TWIN_AGENT_ID` | `zcode` / `mema-twin` | mema 身份头（缺失会被拒） |
 | `MEMA_TWIN_WORKSPACE` | `memory-arbiter-mcp` | 默认 workspace |
+| `MEMA_TWIN_EMBED_MODEL` | mema 配置的模型 | embed 档 GGUF 路径；解析顺序：本变量 → mema 配置 `embedding.model_path` → 禁用（fail-open 走 pending） |
+
+embed 档依赖：`uv pip install -e ".[core]"`（mema-core ≥0.15.4 提供 ManagedEmbedder；
+本地 embedder 还需 llama-cpp-python）。未安装时 embed 档自动跳过，不影响其余功能。
 
 Agent 引导：安装 `skill/SKILL.md` 到各 client 的 skills 目录。
 
@@ -87,10 +110,6 @@ Agent 引导：安装 `skill/SKILL.md` 到各 client 的 skills 目录。
 ```bash
 .venv/bin/python -m mema_twin.server   # 手动跑 server (stdio)
 ```
-
-阶段 0 待办：embed 近邻归一档（复用 mema-core embedder）；mema find 的 tag 精确
-召回（当前为语义召回+客户端标签过滤）；定时扫描建议（挂 scheduled-task）；
-plan-mode `plan_guide` 注入挂点。
 
 ## 路线图
 

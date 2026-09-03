@@ -74,8 +74,18 @@ def remember(content: str, subject: str, tags: list[str], workspace: str,
     return _call("memory", {"action": "remember", "data": data})
 
 
-def find(query: str, workspace: str | None = None) -> dict:
-    data: dict = {"query": query}
+def find(query: str, workspace: str | None = None, include_content: bool = True) -> dict:
+    """语义召回。0.15.4 起 find 默认是索引页（无 content），需要正文时必须
+    传 include_content=true——compile 兜底路径靠它取偏好全文。"""
+    data: dict = {"query": query, "include_content": include_content}
     if workspace:
         data["workspace"] = workspace
     return _call("memory", {"action": "find", "data": data})
+
+
+def read_memory(memory_id: int, workspace: str | None = None) -> dict:
+    """按 id 精确取单条全文（0.14+ read 始终返回完整原文）。"""
+    data: dict = {"memory_id": int(memory_id)}
+    if workspace:
+        data["workspace"] = workspace
+    return _call("memory", {"action": "read", "data": data})

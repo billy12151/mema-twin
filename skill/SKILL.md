@@ -1,6 +1,6 @@
 ---
 name: mema-twin
-description: 个人分身：工作类偏好沉淀与 persona prompt 编译。修改/产出工作文档后调 twin.write 沉淀偏好；开工前 twin.get 取该工作性质的分身 prompt；版本更新走 compile/submit。
+description: 个人分身：工作类偏好沉淀与 persona prompt 编译，经交付任务流注入执行。修改/产出工作文档后调 twin.write 沉淀偏好；开工前 task_start 取分身 prompt 并建档；版本更新走 compile/submit。
 ---
 
 # mema-twin 使用引导
@@ -10,10 +10,17 @@ description: 个人分身：工作类偏好沉淀与 persona prompt 编译。修
 - 用户修改/审阅了工作产物（PPT、文档、汇报、设计……），或显式要求沉淀工作偏好
   → `twin(action="write")`
 - 开始一件工作类产出任务（先于 plan、先于动手）
-  → `twin(action="get", data={"work_type": ...})` 取分身 prompt，严格按其中的偏好/结构/前置清单执行；
+  → `twin(action="task_start", data={"work_type": ..., "brief": ...})`：
+  建档并返回该工作性质的分身 prompt，严格按其中的偏好/结构/前置清单执行；
   材料不齐全按前置清单向用户确认或要求补齐
+- 交付稿完成 → `twin(action="task_submit")`；用户审阅后
+  → `twin(action="task_review", verdict=approved|changes_requested, notes=...)`
+  通过即收口；changes 的意见先 twin.write 沉淀再 `task_revise` 续作
+- 中断/隔日继续 → `twin(action="task_resume", data={"task_id": ...})`
 - write 响应提示"有偏好未编译"、或用户要求更新分身
   → `twin(action="compile")` 拿素材包 → 当前会话模型编译 → `twin(action="submit")` 落版本
+- `status` 返回 scan_notice 时：按其 agent_instruction 询问用户是否创建每周扫描任务
+  （宿主平台侧建，调用 `twin(action="scan")`）；用户同意后创建，之后不再重复问
 - 交付产出物时提醒用户：后续修改尽量交给 Agent 而非手动改，每次修改都是一次偏好沉淀机会
 
 ## write 的抽象口径
