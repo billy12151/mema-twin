@@ -55,6 +55,8 @@ def _call(name: str, arguments: dict) -> dict:
         # URLError 不覆盖读 body 途中超时/连接重置（review#4）
         raise SinkError(f"mema HTTP MCP 不可达（{_base_url()}）: {e}") from e
     msg = _parse_sse(body)
+    if isinstance(msg, list):
+        raise SinkError("unexpected JSON-RPC batch response")
     if "error" in msg:
         raise SinkError(f"mema JSON-RPC error: {msg['error']}")
     result = msg.get("result") or {}
@@ -65,7 +67,8 @@ def _call(name: str, arguments: dict) -> dict:
     try:
         return json.loads(text)
     except json.JSONDecodeError:
-        return {"raw": text}
+        # 对抗 review#9④：不可解析响应带错误码，别让调用方拿到裸 raw 无从归因
+        return {"ok": False, "error": "mema_unparsed_response", "raw_head": text[:200]}
 
 
 def remember(content: str, subject: str, tags: list[str], workspace: str,

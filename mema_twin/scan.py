@@ -97,7 +97,7 @@ def run_scan(workspace: str) -> dict:
         ids = ", ".join(f"#{t['id']}({t['status']})" for t in open_rows[:5])
         suggestions.append(
             f"有 {len(open_rows)} 个未收口的交付任务（{ids}）；"
-            "继续执行或评审收口（task_review），长期不动的考虑显式关闭")
+            "继续执行或评审收口（task_review），长期不动的用 task_close 显式关闭")
 
     flow.set_meta(_scan_key(workspace), db.now_iso())
     return {

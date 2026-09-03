@@ -15,8 +15,11 @@ description: 个人分身：工作类偏好沉淀与 persona prompt 编译，经
   材料不齐全按前置清单向用户确认或要求补齐
 - 交付稿完成 → `twin(action="task_submit")`；用户审阅后
   → `twin(action="task_review", verdict=approved|changes_requested, notes=...)`
-  通过即收口；changes 的意见先 twin.write 沉淀再 `task_revise` 续作
+  通过即收口；changes 的意见先 twin.write 沉淀，改稿后**同一任务再 task_submit**
+  提交下一轮（轮次递增，评审历史全量可审计）
 - 中断/隔日继续 → `twin(action="task_resume", data={"task_id": ...})`
+  （进行中、已提交、被搁置、已通过的任务都可续作）；长期不动的开放任务用
+  `twin(action="task_close")` 显式关闭
 - write 响应提示"有偏好未编译"、或用户要求更新分身
   → `twin(action="compile")` 拿素材包 → 当前会话模型编译 → `twin(action="submit")` 落版本
 - `status` 返回 scan_notice 时：按其 agent_instruction 询问用户是否创建每周扫描任务

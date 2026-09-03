@@ -48,10 +48,10 @@ def test_mark_compiled_and_idempotence(env):
     conn = twin_db.connect()
     twin_db.record_evidence(conn, "ws", 201, _dims())
     twin_db.record_evidence(conn, "ws", 202, _dims())
-    assert twin_db.mark_compiled(conn, "ws", [201, 202], version=3) == 2
+    assert twin_db.mark_compiled(conn, "ws", [201, 202], 3, "work_report") == 2
     assert twin_db.uncompiled_evidence(conn, "ws", "work_report") == []
     # 再标一次（幂等：只动 uncompiled 行）
-    assert twin_db.mark_compiled(conn, "ws", [201], version=4) == 0
+    assert twin_db.mark_compiled(conn, "ws", [201], 4, "work_report") == 0
     row = conn.execute("SELECT * FROM twin_evidence WHERE memory_id=201").fetchone()
     assert row["status"] == "compiled" and row["compiled_version"] == 3
 
@@ -68,4 +68,4 @@ def test_workspace_isolation(env):
     twin_db.record_evidence(conn, "ws-a", 401, _dims())
     twin_db.record_evidence(conn, "ws-b", 402, _dims())
     assert [r["memory_id"] for r in twin_db.uncompiled_evidence(conn, "ws-a", "work_report")] == [401]
-    assert twin_db.mark_compiled(conn, "ws-a", [402], version=1) == 0
+    assert twin_db.mark_compiled(conn, "ws-a", [402], 1, "work_report") == 0

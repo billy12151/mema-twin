@@ -18,7 +18,8 @@ from . import db, flow, normalize, scan, sink, store, taxonomy, templates
 mcp = FastMCP("mema-twin")
 
 _KIND_PREFIX = {"work_type": "wt", "audience": "au", "purpose": "pu"}
-_RAW_MAX_CHARS = 200
+_RAW_MAX_CHARS = 200      # 三维度值：短枚举说法
+_CONTENT_MAX_CHARS = 8000  # 偏好正文
 
 
 def _safe_ws_segment(value: str) -> str:
@@ -37,7 +38,7 @@ def twin(action: str, data: dict | None = None) -> dict:
 
     动作：write / get / compile / submit / status / taxonomy / pending / resolve /
     task_start / task_submit / task_review / task_pending / task_resume / task_revise /
-    task_recent / task_get / todo / scan / help。
+    task_close / task_recent / task_get / todo / scan / help。
     先 twin(action="help") 查看各动作参数与引导。compile 返回素材包，由当前会话模型
     编译（建议在强模型会话中执行），submit 提交回库落版本并写文件镜像。
     """
@@ -80,7 +81,13 @@ def _workspace(data: dict) -> str:
 
 
 def _action_write(data: dict) -> dict:
-    for f in ("content", "work_type", "audience", "purpose"):
+    content = str(data.get("content") or "").strip()
+    if not content:
+        return {"ok": False, "error": "invalid_input", "field": "content", "reason": "required"}
+    if len(content) > _CONTENT_MAX_CHARS:
+        return {"ok": False, "error": "invalid_input", "field": "content",
+                "reason": f"超出 {_CONTENT_MAX_CHARS} 字符上限"}
+    for f in ("work_type", "audience", "purpose"):
         if not str(data.get(f) or "").strip():
             return {"ok": False, "error": "invalid_input", "field": f, "reason": "required"}
         if len(str(data[f])) > _RAW_MAX_CHARS:
@@ -91,7 +98,8 @@ def _action_write(data: dict) -> dict:
     pendings: list[dict] = []
     tags = ["twin-preference"]
     for kind in taxonomy.KINDS:
-        r = normalize.normalize_value(kind, str(data[kind]), conn)
+        # defer：mema 写成功才 upsert pending，失败重试不留幽灵计数（对抗 review#14）
+        r = normalize.normalize_value(kind, str(data[kind]), conn, defer_pending=True)
         if r.get("error"):
             conn.close()
             return {"ok": False, "error": "invalid_input", "field": kind, "reason": r.get("reason")}
@@ -102,10 +110,13 @@ def _action_write(data: dict) -> dict:
             pendings.append(r)
             tags.append(f"twin:{_KIND_PREFIX[kind]}:raw:{r['raw']}")
     conn.close()  # 后续是 30s 级 HTTP 调用，连接不能跨调用挂着（review#7）
+    # 用户 tags 剥离 twin: 前缀（对抗 review#13）：维度命名空间只归归一层管
+    user_tags = [str(t) for t in (data.get("tags") or [])
+                 if not str(t).startswith("twin:") and str(t) != "twin-preference"]
     resp = sink.remember(
-        content=str(data["content"]),
+        content=content,
         subject=str(data.get("subject") or f"工作偏好：{dims['work_type'].get('raw')}"),
-        tags=tags + [str(t) for t in (data.get("tags") or [])],
+        tags=tags + user_tags,
         workspace=_workspace(data),
         source_ref=str(data.get("source_ref") or ""),
         event_time=_today(),
@@ -117,11 +128,14 @@ def _action_write(data: dict) -> dict:
         ws = _workspace(data)
         mid = _memory_id_of(resp.get("data"))
         conn = db.connect()
-        if mid is not None:
+        if mid is None:
+            # 对抗 review#9①：id 缺失则证据永不登记，必须显式告警而非静默
+            out["warnings"] = ["mema 响应缺记忆 id，本条未入证据索引（compile 不可见），建议重写"]
+        else:
+            for p in pendings:
+                p["pending_id"] = db.upsert_pending(conn, p["kind"], p["raw"], mid)
             db.record_evidence(conn, ws, mid, dims,
                                subject=str(data.get("subject") or ""))
-            db.set_pending_first_seen(
-                conn, [p["pending_id"] for p in pendings if p.get("pending_id")], mid)
             out["evidence_id"] = mid
         if dims["work_type"].get("ok"):
             active = store.get_active(conn, ws, dims["work_type"]["code"])
@@ -191,7 +205,7 @@ def _fetch_evidence(conn, ws: str, code: str) -> tuple[list[dict], list[dict]]:
     for r in rows:
         mid = r["memory_id"]
         try:
-            resp = sink.read_memory(mid)
+            resp = sink.read_memory(mid, ws)
         except sink.SinkError as e:
             skipped.append({"memory_id": mid, "reason": f"mema read 失败: {e}"})
             continue
@@ -200,6 +214,10 @@ def _fetch_evidence(conn, ws: str, code: str) -> tuple[list[dict], list[dict]]:
                             "reason": (resp.get("error") or "read 未命中")})
             continue
         mem = (resp.get("data") or {}).get("memory") or {}
+        if not (mem.get("content") or "").strip():
+            # 对抗 review#9②：形状漂移不能产出空证据行进素材包
+            skipped.append({"memory_id": mid, "reason": "read 响应缺 memory.content"})
+            continue
         evidence.append({
             "id": mid,
             "subject": mem.get("subject") or r.get("subject") or "",
@@ -275,7 +293,7 @@ def _action_submit(data: dict) -> dict:
                                model=str(data.get("model") or ""))
     marked = db.mark_compiled(conn, _workspace(data),
                               source_ids,
-                              rec["version"])
+                              rec["version"], code)
     conn.close()
     rec["ok"] = True
     rec["evidence_marked_compiled"] = marked
@@ -323,6 +341,11 @@ def _action_resolve(data: dict) -> dict:
     row = conn.execute("SELECT * FROM twin_pending_values WHERE id=?", (pid,)).fetchone()
     if not row:
         return {"ok": False, "error": "not_found", "reason": f"pending id {pid}"}
+    if row["status"] != "pending":
+        # 对抗 review#7：已裁定的 pending 不得重复裁定（重复 map 会把同一别名挂到
+        # 第二个 canonical，归一结果由行序决定而非用户裁定）
+        return {"ok": False, "error": "invalid_input",
+                "reason": f"pending {pid} 已裁定为 {row['status']}（→{row['resolved_code']}），不可重复裁定"}
     kind, raw = row["type_kind"], row["raw_value"]
     if decision == "map":
         code = str(data.get("code") or "").strip()
@@ -335,16 +358,28 @@ def _action_resolve(data: dict) -> dict:
         db.set_pending(conn, int(pid), "mapped", code)
     elif decision == "canonicalize":
         nt = data.get("new_type") or {}
+        if not isinstance(nt, dict):
+            return {"ok": False, "error": "invalid_input", "field": "new_type",
+                    "reason": "new_type 必须是对象 {code,zh,en,domain}"}
         try:
             db.add_canonical(conn, kind, str(nt.get("code") or ""),
                              str(nt.get("zh") or ""), str(nt.get("en") or ""),
                              str(nt.get("domain") or ""), [raw])
         except ValueError as e:
             return {"ok": False, "error": "invalid_input", "reason": str(e)}
-        db.set_pending(conn, int(pid), "canonicalized", str(nt.get("code") or ""))
+        code = str(nt.get("code") or "")
+        db.set_pending(conn, int(pid), "canonicalized", code)
     else:
+        code = None
         db.set_pending(conn, int(pid), "rejected", None)
-    return {"ok": True, "pending_id": int(pid), "decision": decision}
+    backfilled = 0
+    if code:
+        # 对抗 review#3：pending 维度写入的证据行 code 为 NULL，对 compile/scan
+        # 不可见——按 raw 回填，创始证据不再静默搁浅
+        backfilled = db.backfill_evidence_codes(conn, kind, raw, code)
+    conn.close()
+    return {"ok": True, "pending_id": int(pid), "decision": decision,
+            "backfilled_evidence": backfilled}
 
 
 # ---- 交付任务流（M2.1，机制改造自 plan-mode）----
@@ -426,8 +461,10 @@ def _action_task_submit(data: dict) -> dict:
     flow.update_deliverable(int(tid), deliverable,
                             brief=str(data.get("brief") or "") or None,
                             todos=session_todos or None)
+    # 条件迁移（对抗 review#4）：并发 supersede 后这里 rowcount=0 → invalid_input
     updated = flow.set_status(int(tid), "submitted",
-                              reason=str(data.get("note") or "") or None)
+                              reason=str(data.get("note") or "") or None,
+                              allowed_from=("planning", "submitted", "pending", "rejected"))
     return {"ok": True, "task_id": int(tid), "status": "submitted",
             "round": len(flow.list_reviews(int(tid))) + 1,
             "guidance": "已提交待评审。请用户审阅后 twin(action=\"task_review\") 裁定。"}
@@ -450,17 +487,22 @@ def _action_task_review(data: dict) -> dict:
     review = flow.add_review(int(tid), verdict, notes)
     out: dict = {"ok": True, "task_id": int(tid), "review": review}
     if verdict == "approved":
-        flow.set_status(int(tid), "approved", reason=notes or None)
+        flow.set_status(int(tid), "approved", reason=notes or None,
+                        allowed_from=("submitted",))
+        # 对抗 review#5：评审期间可能被并发 resubmit，落盘前重读最新交付稿，
+        # 保证 deliverables/ 审计工件与库内一致
+        fresh = flow.get_task(int(tid)) or record
         try:
             out["deliverable_path"] = flow.write_deliverable_file(
-                record["workspace"], int(tid), record["deliverable_md"])
+                record["workspace"], int(tid), fresh.get("deliverable_md") or "")
         except OSError as e:
             out["warnings"] = [f"交付物文件写入失败：{e}"]
         out["guidance"] = (
             "评审通过、任务收口。交付后提醒用户：后续修改尽量交给 Agent 而非手动改——"
             "每次修改都是一次偏好沉淀机会（twin.write，注明来源交付物）。")
     else:
-        flow.set_status(int(tid), "rejected", reason=notes or None)
+        flow.set_status(int(tid), "rejected", reason=notes or None,
+                        allowed_from=("submitted",))
         out["guidance"] = (
             "要求修改。评审意见本身是偏好信号：可先把用户的修改要求 twin.write 沉淀"
             "（工作性质/受众/用途照旧），改稿后直接 task_submit 提交下一轮"
@@ -479,7 +521,8 @@ def _action_task_pending(data: dict) -> dict:
     if record["status"] != "submitted":
         return {"ok": False, "error": "invalid_input",
                 "reason": f"task {tid} 状态为 {record['status']!r}，仅 submitted 可搁置"}
-    flow.set_status(int(tid), "pending", reason=str(data.get("reason") or "") or None)
+    flow.set_status(int(tid), "pending", reason=str(data.get("reason") or "") or None,
+                    allowed_from=("submitted",))
     return {"ok": True, "task_id": int(tid), "status": "pending",
             "guidance": "评审搁置（中断未决）。用户明确意向后可 task_review 裁定或 task_resume 续作。"}
 
@@ -553,9 +596,11 @@ def _action_task_revise(data: dict) -> dict:
     dims = {k: {"ok": bool(record.get(k)), "kind": k, "raw": record.get(f"{k}_raw") or "",
                 "code": record.get(k), "matched_by": "db_alias" if record.get(k) else None}
             for k in taxonomy.KINDS}
+    # 对抗 review#8：修订=返工，子任务一律 planning 重走执行→提交→评审，
+    # 不继承 approved（否则出现"从未被评审的已批准"审计伪造）
     child = flow.insert_task(
         workspace=record["workspace"], brief=new_brief or record["brief"],
-        status=record["status"], dims=dims,
+        status="planning", dims=dims,
         interpreted_intent=record.get("interpreted_intent"),
         deliverable_md=deliverable or record.get("deliverable_md") or "",
         reason=revision_reason or None,
@@ -564,12 +609,31 @@ def _action_task_revise(data: dict) -> dict:
         revision_reason=revision_reason or None,
         session_todos=flow.current_todos(data.get("session")),
     )
-    flow.set_status(int(tid), "superseded", reason=f"revised by task #{child['id']}")
+    flow.set_status(int(tid), "superseded", reason=f"revised by task #{child['id']}",
+                    allowed_from=(record["status"],))
     flow.supersede_open_tasks(record["workspace"], child["id"])
     return {"ok": True, "parent_task_id": int(tid), "task_id": child["id"],
             "iteration": child["iteration"], "status": child["status"],
             "guidance": (f"已生成修订版任务 #{child['id']}（第 {child['iteration']} 次修订，"
-                         "继承原状态）。继续执行后 task_submit。")}
+                         "回到 planning 重走执行）。继续执行后 task_submit。")}
+
+
+def _action_task_close(data: dict) -> dict:
+    tid = data.get("task_id")
+    if tid is None:
+        return {"ok": False, "error": "invalid_input", "reason": "需要 task_id"}
+    flow.ensure_schema()
+    record = flow.get_task(int(tid))
+    if not record:
+        return {"ok": False, "error": "not_found", "reason": f"task id {tid}"}
+    if record["status"] not in flow._OPEN_STATUSES:
+        return {"ok": False, "error": "invalid_input",
+                "reason": f"task {tid} 状态为 {record['status']!r}，仅开放任务可关闭"}
+    flow.set_status(int(tid), "superseded",
+                    reason=str(data.get("reason") or "closed") or None,
+                    allowed_from=flow._OPEN_STATUSES)
+    return {"ok": True, "task_id": int(tid), "status": "superseded",
+            "guidance": "任务已显式关闭（历史保留可审计）。"}
 
 
 def _action_task_recent(data: dict) -> dict:
@@ -633,7 +697,8 @@ def _action_help(data: dict) -> dict:
             "task_pending": "评审搁置（中断未决）。task_id。",
             "task_resume": "续作历史任务（可中断可继续）。task_id；恢复 todos、新建 planning 任务并再注入 persona。",
             "task_revise": "修订进行中的任务。task_id + brief/deliverable_md/revision_reason 至少其一；"
-                           "子任务继承状态并记 lineage。",
+                           "子任务回 planning 重走执行并记 lineage。",
+            "task_close": "显式关闭开放任务（planning/submitted/pending），历史保留可审计。",
             "task_recent": "最近任务列表。参数 limit（默认 10）。",
             "task_get": "取单个任务全量（含评审历史）。task_id。",
             "todo": "会话 todo 读写（plan-mode 同款语义：整体替换，至多一条 in_progress）。传 todos 替换，不传读取。",
@@ -661,6 +726,7 @@ _ACTIONS = {
     "task_pending": _action_task_pending,
     "task_resume": _action_task_resume,
     "task_revise": _action_task_revise,
+    "task_close": _action_task_close,
     "task_recent": _action_task_recent,
     "task_get": _action_task_get,
     "todo": _action_todo,

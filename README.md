@@ -66,10 +66,10 @@ live in twin's own SQLite with a file mirror for fallback and human review.
 | `taxonomy` | 列枚举（kind ∈ work_type/audience/purpose） |
 | `pending` / `resolve` | 待裁长尾的查看与治理 |
 | `task_start` | 开工建档并注入 persona prompt（audience/purpose 可选） |
-| `task_submit` | 提交交付稿待评审 |
+| `task_submit` | 提交交付稿待评审（打回后同任务可再提交，轮次递增） |
 | `task_review` | 评审裁定（approved 落交付文件 / changes_requested 走修订），append-only 审计 |
 | `task_pending` | 评审搁置（中断未决） |
-| `task_resume` / `task_revise` | 续作历史任务 / 修订进行中任务（lineage 追溯） |
+| `task_resume` / `task_revise` / `task_close` | 续作历史任务（含进行中）/ 修订返工（子任务回 planning 记 lineage）/ 显式关闭开放任务 |
 | `task_recent` / `task_get` | 任务列表 / 单任务全量（含评审历史） |
 | `todo` | 会话 todo 读写（plan-mode 同款语义） |
 | `scan` | 定时扫描：未编译偏好/pending 积压/开放任务汇总与建议 |
