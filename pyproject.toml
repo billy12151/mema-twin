@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mema-twin"
-version = "0.2.0"
+version = "0.3.0"
 description = "Personal work twin: compiles versioned persona prompts from mema preference memories and injects them into plan workflows."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -16,9 +16,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# embed 近邻归一档：mema-core 提供 ManagedEmbedder（0.15.4 基线），本地
-# embedder 还需 llama-cpp-python（GGUF 推理）；缺省时 embed 档 fail-open 跳过
-core = ["memory-arbiter-mcp>=0.15.4", "llama-cpp-python>=0.3.0"]
 test = ["pytest>=8.0.0", "pytest-asyncio>=0.23.0"]
 
 [project.scripts]

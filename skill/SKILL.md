@@ -36,8 +36,17 @@ description: 个人分身：工作类偏好沉淀与 persona prompt 编译，经
 ## write 的抽象口径
 
 只收可复用抽象：偏好与规则（用语/详略/格式/口吻）、结构习惯、开工前应确认的问题与材料。
-必带三字段 work_type / audience / purpose（原始值即可，产品负责归一）。
+必带三字段 work_type / audience / purpose。
 事件性内容（做了什么、何时交付）走普通 memory.remember，不要走 twin.write。
+
+## 三字段选码（硬流程：先查清单再写）
+
+- write / task_start 之前**必须**先 `twin(action="taxonomy")`（按需带
+  kind=work_type|audience|purpose）查枚举清单，从清单里选最贴的 canonical
+  code（或其别名/中文名）作为三字段的值——不要凭记忆造说法
+- 清单里确实没有合适项时，给**你认为最合适的原始值**即可：它会自动进
+  pending 由用户裁定（map / canonicalize / reject），不要硬凑一个近义枚举
+- 不要依赖"我觉得我拿得准"——查清单是每次必走的步骤，不是拿不准时的补救
 
 ## compile / submit
 

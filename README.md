@@ -34,9 +34,11 @@ live in twin's own SQLite with a file mirror for fallback and human review.
 
 设计要点（详见 `~/ZCodeProject/docs/mema-avatar-design-2026-09-02.md`）：
 
-- **Agent 抽象、产品归一**：三字段（工作性质/受众/用途）写入时强制语义归一，档位为
-  精确/别名 → embed 近邻（阈值 0.75，复用 mema-core 的 GGUF embedder，禁用或失败
-  自动跳过）→ pending 由用户裁定 map / canonicalize / reject，绝不自动新建。
+- **Agent 抽象、产品归一**：三字段（工作性质/受众/用途）写入时强制归一。SKILL 硬
+  流程要求 Agent 先 `taxonomy` 查清单选码；归一档位为 精确/别名 → pending 由用户
+  裁定 map / canonicalize / reject，绝不自动新建。（v0.3.0 移除 embed 近邻档：候选
+  枚举有限，语义选码由 LLM 对清单完成即可，本地小模型静默错归没有人工检查点，
+  且不再让 twin 引入第二份向量模型依赖。）
 - **偏好本体存 mema**：经其 HTTP MCP 读写，复用 mema 的冲突检查、审计与治理；
   twin 自有 `twin.sqlite3` 存枚举注册表、待裁长尾、prompt 版本、证据指针索引
   （twin_evidence 只存 mema 记忆 id 与维度标签，不存正文；compile 按 id 精确
@@ -98,10 +100,6 @@ MCP 配置见 `examples/zcode.mcp.json`。环境变量：
 | `MEMA_TWIN_MEMA_URL` | `http://127.0.0.1:8000/mcp` | mema HTTP MCP 端点 |
 | `MEMA_TWIN_CLIENT_ID` / `MEMA_TWIN_AGENT_ID` | `zcode` / `mema-twin` | mema 必需的身份头。twin 作为**子 agent** 范式：client 标识宿主客户端（zcode/kimi/...），agent_id 固定为 `mema-twin` 标识写入者——按 agent_id 一次查出所有经 twin 落库的偏好，配合 `twin:*` 标签双保险 |
 | `MEMA_TWIN_WORKSPACE` | `mema-twin` | mema 侧偏好**存储桶**（画像人级全局，twin 本地无 workspace 维度）。此值仅决定偏好记忆在 mema 里与项目记忆隔离；只来自本 env，无 per-call 覆盖 |
-| `MEMA_TWIN_EMBED_MODEL` | mema 配置的模型 | embed 档 GGUF 路径；解析顺序：本变量 → mema 配置 `embedding.model_path` → 禁用（fail-open 走 pending） |
-
-embed 档依赖：`uv pip install -e ".[core]"`（mema-core ≥0.15.4 提供 ManagedEmbedder；
-本地 embedder 还需 llama-cpp-python）。未安装时 embed 档自动跳过，不影响其余功能。
 
 Agent 引导：安装 `skill/SKILL.md` 到各 client 的 skills 目录。
 

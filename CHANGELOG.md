@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.3.0] — 2026-09-03
+
+- **移除 embed 近邻归一档**：归一收敛为 精确/别名 → pending 两档。候选枚举仅 53 项，
+  语义选码由调用方 LLM 对 `taxonomy` 清单完成（SKILL 硬流程：先查清单再写；清单无
+  合适项给原始值，进 pending 由用户裁定）——本地小模型 0.75 阈值静默错归无人工
+  检查点、吃掉 pending 治理信号，且 llama-cpp-python + GGUF 是只为 53 个枚举背的
+  重依赖。移除后 twin 自身零向量模型，mema-team 集成天然满足单向量模型约束。
+- 删除 `mema_twin/embed.py`、`MEMA_TWIN_EMBED_MODEL` env、pyproject `core` extra
+  （memory-arbiter-mcp / llama-cpp-python 依赖随之取消）。
+- 修复 server.py 各 handler 的 sqlite 连接泄漏（全部 try/finally 收口）；write 的
+  `tags` 参数非列表时打回 invalid_input（原会被逐字符拆成 tag）。
+
 ## [0.2.0] — 2026-09-03
 
 M1 + M2 落地（mema-core 0.15.4 基线），两轮 review（常规+对抗性）修复 28 项发现，61 测试绿：
