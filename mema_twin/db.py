@@ -82,8 +82,8 @@ def now_iso() -> str:
 
 
 def validate_code_segment(value: str) -> str:
-    """canonical code 会进文件路径（prompts/<ws>/<code>/）：与 server 侧 workspace
-    守卫同款规则（对抗 review#1：canonicalize 是自定义 code 的唯一入口）。"""
+    """canonical code 会进文件路径（prompts/<code>/）：与 server 侧桶名守卫
+    同款规则（对抗 review#1：canonicalize 是自定义 code 的唯一入口）。"""
     v = (value or "").strip()
     if not v or "/" in v or "\\" in v or ".." in v or "\x00" in v or len(v) > 64:
         raise ValueError(f"unsafe code segment: {value!r}")

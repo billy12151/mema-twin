@@ -100,21 +100,26 @@ def _action_write(data: dict) -> dict:
     dims: dict = {}
     pendings: list[dict] = []
     tags = ["twin-preference"]
-    for kind in taxonomy.KINDS:
-        # defer：mema 写成功才 upsert pending，失败重试不留幽灵计数（对抗 review#14）
-        r = normalize.normalize_value(kind, str(data[kind]), conn, defer_pending=True)
-        if r.get("error"):
-            conn.close()
-            return {"ok": False, "error": "invalid_input", "field": kind, "reason": r.get("reason")}
-        dims[kind] = r
-        if r.get("ok"):
-            tags.append(f"twin:{_KIND_PREFIX[kind]}:{r['code']}")
-        else:
-            pendings.append(r)
-            tags.append(f"twin:{_KIND_PREFIX[kind]}:raw:{r['raw']}")
-    conn.close()  # 后续是 30s 级 HTTP 调用，连接不能跨调用挂着（review#7）
+    try:
+        for kind in taxonomy.KINDS:
+            # defer：mema 写成功才 upsert pending，失败重试不留幽灵计数（对抗 review#14）
+            r = normalize.normalize_value(kind, str(data[kind]), conn, defer_pending=True)
+            if r.get("error"):
+                return {"ok": False, "error": "invalid_input", "field": kind, "reason": r.get("reason")}
+            dims[kind] = r
+            if r.get("ok"):
+                tags.append(f"twin:{_KIND_PREFIX[kind]}:{r['code']}")
+            else:
+                pendings.append(r)
+                tags.append(f"twin:{_KIND_PREFIX[kind]}:raw:{r['raw']}")
+    finally:
+        conn.close()  # 后续是 30s 级 HTTP 调用，连接不能跨调用挂着（review#7）
     # 用户 tags 剥离 twin: 前缀（对抗 review#13）：维度命名空间只归归一层管
-    user_tags = [str(t) for t in (data.get("tags") or [])
+    raw_tags = data.get("tags") or []
+    if not isinstance(raw_tags, list):
+        return {"ok": False, "error": "invalid_input", "field": "tags",
+                "reason": "tags 必须是字符串列表"}
+    user_tags = [str(t) for t in raw_tags
                  if not str(t).startswith("twin:") and str(t) != "twin-preference"]
     resp = sink.remember(
         content=content,
@@ -130,46 +135,51 @@ def _action_write(data: dict) -> dict:
     if ok:
         mid = _memory_id_of(resp.get("data"))
         conn = db.connect()
-        if mid is None:
-            # 对抗 review#9①：id 缺失则证据永不登记，必须显式告警而非静默
-            out["warnings"] = ["mema 响应缺记忆 id，本条未入证据索引（compile 不可见），建议重写"]
-        else:
-            for p in pendings:
-                p["pending_id"] = db.upsert_pending(conn, p["kind"], p["raw"], mid)
-            db.record_evidence(conn, mid, dims,
-                               subject=str(data.get("subject") or ""))
-            out["evidence_id"] = mid
-        if dims["work_type"].get("ok"):
-            active = store.get_active(conn, dims["work_type"]["code"])
-            if active and active.get("version") is not None:
-                out["hint"] = (f"{dims['work_type']['label_zh']} 已有 persona prompt v{active['version']}；"
-                               "本次偏好已入池未编译，可 twin(action=\"compile\") 生成新版本"
-                               f"（{templates.STRONG_MODEL_NOTE}）")
+        try:
+            if mid is None:
+                # 对抗 review#9①：id 缺失则证据永不登记，必须显式告警而非静默
+                out["warnings"] = ["mema 响应缺记忆 id，本条未入证据索引（compile 不可见），建议重写"]
             else:
-                out["hint"] = (f"{dims['work_type']['label_zh']} 尚无 persona prompt，"
-                               "可 twin(action=\"compile\") 生成 v1"
-                               f"（{templates.STRONG_MODEL_NOTE}）")
-        conn.close()
+                for p in pendings:
+                    p["pending_id"] = db.upsert_pending(conn, p["kind"], p["raw"], mid)
+                db.record_evidence(conn, mid, dims,
+                                   subject=str(data.get("subject") or ""))
+                out["evidence_id"] = mid
+            if dims["work_type"].get("ok"):
+                active = store.get_active(conn, dims["work_type"]["code"])
+                if active and active.get("version") is not None:
+                    out["hint"] = (f"{dims['work_type']['label_zh']} 已有 persona prompt v{active['version']}；"
+                                   "本次偏好已入池未编译，可 twin(action=\"compile\") 生成新版本"
+                                   f"（{templates.STRONG_MODEL_NOTE}）")
+                else:
+                    out["hint"] = (f"{dims['work_type']['label_zh']} 尚无 persona prompt，"
+                                   "可 twin(action=\"compile\") 生成 v1"
+                                   f"（{templates.STRONG_MODEL_NOTE}）")
+        finally:
+            conn.close()
     return out
 
 
 def _action_status(data: dict) -> dict:
     conn = db.connect()
-    rows = conn.execute(
-        "SELECT work_type, version, model, status, evidence_count, created_at"
-        " FROM twin_prompt_versions ORDER BY work_type, version",
-    ).fetchall()
-    versions: dict = {}
-    for r in rows:
-        v = versions.setdefault(r["work_type"],
-                                {"work_type": r["work_type"], "active": None, "versions": []})
-        v["versions"].append(dict(r))
-        if r["status"] == "active":
-            v["active"] = r["version"]
-    pending = db.list_pending(conn)
-    out = {"ok": True, "prompts": list(versions.values()),
-           "pending_count": len(pending),
-           "uncompiled": db.evidence_stats(conn)}
+    try:
+        rows = conn.execute(
+            "SELECT work_type, version, model, status, evidence_count, created_at"
+            " FROM twin_prompt_versions ORDER BY work_type, version",
+        ).fetchall()
+        versions: dict = {}
+        for r in rows:
+            v = versions.setdefault(r["work_type"],
+                                    {"work_type": r["work_type"], "active": None, "versions": []})
+            v["versions"].append(dict(r))
+            if r["status"] == "active":
+                v["active"] = r["version"]
+        pending = db.list_pending(conn)
+        out = {"ok": True, "prompts": list(versions.values()),
+               "pending_count": len(pending),
+               "uncompiled": db.evidence_stats(conn)}
+    finally:
+        conn.close()
     notice = scan.scan_notice()
     if notice:
         out["scan_notice"] = notice
@@ -233,13 +243,16 @@ def _action_compile(data: dict) -> dict:
     if not wt:
         return {"ok": False, "error": "invalid_input", "field": "work_type", "reason": "required"}
     conn = db.connect()
-    code = store.resolve_work_type_code(conn, wt)
-    if not code:
-        return {"ok": False, "error": "invalid_input", "field": "work_type",
-                "reason": "unknown code；先 twin(action=\"taxonomy\") 查码或治理 pending"}
-    t = taxonomy.by_code("work_type", code)
-    active = store.get_active(conn, code)
-    evidence, skipped = _fetch_evidence(conn, code)
+    try:
+        code = store.resolve_work_type_code(conn, wt)
+        if not code:
+            return {"ok": False, "error": "invalid_input", "field": "work_type",
+                    "reason": "unknown code；先 twin(action=\"taxonomy\") 查码或治理 pending"}
+        t = taxonomy.by_code("work_type", code)
+        active = store.get_active(conn, code)
+        evidence, skipped = _fetch_evidence(conn, code)
+    finally:
+        conn.close()
     material = templates.compile_prompt_material(code, t.zh if t else code, active, evidence)
     out: dict = {"ok": True, "work_type": code,
                  "current_version": (active or {}).get("version"),
@@ -282,16 +295,17 @@ def _action_submit(data: dict) -> dict:
         return {"ok": False, "error": "invalid_input", "field": "source_memory_ids",
                 "reason": str(e)}
     conn = db.connect()
-    code = store.resolve_work_type_code(conn, str(data["work_type"]))
-    if not code:
+    try:
+        code = store.resolve_work_type_code(conn, str(data["work_type"]))
+        if not code:
+            return {"ok": False, "error": "invalid_input", "field": "work_type", "reason": "unknown code"}
+        rec = store.create_version(conn, code,
+                                   str(data["prompt_md"]),
+                                   source_ids,
+                                   model=str(data.get("model") or ""))
+        marked = db.mark_compiled(conn, source_ids, rec["version"], code)
+    finally:
         conn.close()
-        return {"ok": False, "error": "invalid_input", "field": "work_type", "reason": "unknown code"}
-    rec = store.create_version(conn, code,
-                               str(data["prompt_md"]),
-                               source_ids,
-                               model=str(data.get("model") or ""))
-    marked = db.mark_compiled(conn, source_ids, rec["version"], code)
-    conn.close()
     rec["ok"] = True
     rec["evidence_marked_compiled"] = marked
     return rec
@@ -302,10 +316,13 @@ def _action_get(data: dict) -> dict:
     if not wt:
         return {"ok": False, "error": "invalid_input", "field": "work_type", "reason": "required"}
     conn = db.connect()
-    code = store.resolve_work_type_code(conn, wt)
-    if not code:
-        return {"ok": False, "error": "invalid_input", "field": "work_type", "reason": "unknown code"}
-    rec = store.get_active(conn, code)
+    try:
+        code = store.resolve_work_type_code(conn, wt)
+        if not code:
+            return {"ok": False, "error": "invalid_input", "field": "work_type", "reason": "unknown code"}
+        rec = store.get_active(conn, code)
+    finally:
+        conn.close()
     if not rec:
         return {"ok": True, "work_type": code, "prompt_md": None,
                 "hint": "尚无 persona prompt；可先喂历史产出物或积累偏好后 compile"}
@@ -324,8 +341,11 @@ def _action_taxonomy(data: dict) -> dict:
 
 def _action_pending(data: dict) -> dict:
     conn = db.connect()
-    status = str(data.get("status") or "pending")
-    return {"ok": True, "status": status, "items": db.list_pending(conn, status)}
+    try:
+        status = str(data.get("status") or "pending")
+        return {"ok": True, "status": status, "items": db.list_pending(conn, status)}
+    finally:
+        conn.close()
 
 
 def _action_resolve(data: dict) -> dict:
@@ -335,46 +355,48 @@ def _action_resolve(data: dict) -> dict:
         return {"ok": False, "error": "invalid_input",
                 "reason": "需要 pending_id 与 decision ∈ map|canonicalize|reject"}
     conn = db.connect()
-    row = conn.execute("SELECT * FROM twin_pending_values WHERE id=?", (pid,)).fetchone()
-    if not row:
-        return {"ok": False, "error": "not_found", "reason": f"pending id {pid}"}
-    if row["status"] != "pending":
-        # 对抗 review#7：已裁定的 pending 不得重复裁定（重复 map 会把同一别名挂到
-        # 第二个 canonical，归一结果由行序决定而非用户裁定）
-        return {"ok": False, "error": "invalid_input",
-                "reason": f"pending {pid} 已裁定为 {row['status']}（→{row['resolved_code']}），不可重复裁定"}
-    kind, raw = row["type_kind"], row["raw_value"]
-    if decision == "map":
-        code = str(data.get("code") or "").strip()
-        known = taxonomy.by_code(kind, code) or \
-            any(r["code"] == code for r in db.custom_types(conn, kind))
-        if not code or not known:
-            return {"ok": False, "error": "invalid_input", "field": "code",
-                    "reason": "map 需要已有 canonical code"}
-        db.append_alias(conn, kind, code, raw)
-        db.set_pending(conn, int(pid), "mapped", code)
-    elif decision == "canonicalize":
-        nt = data.get("new_type") or {}
-        if not isinstance(nt, dict):
-            return {"ok": False, "error": "invalid_input", "field": "new_type",
-                    "reason": "new_type 必须是对象 {code,zh,en,domain}"}
-        try:
-            db.add_canonical(conn, kind, str(nt.get("code") or ""),
-                             str(nt.get("zh") or ""), str(nt.get("en") or ""),
-                             str(nt.get("domain") or ""), [raw])
-        except ValueError as e:
-            return {"ok": False, "error": "invalid_input", "reason": str(e)}
-        code = str(nt.get("code") or "")
-        db.set_pending(conn, int(pid), "canonicalized", code)
-    else:
-        code = None
-        db.set_pending(conn, int(pid), "rejected", None)
-    backfilled = 0
-    if code:
-        # 对抗 review#3：pending 维度写入的证据行 code 为 NULL，对 compile/scan
-        # 不可见——按 raw 回填，创始证据不再静默搁浅
-        backfilled = db.backfill_evidence_codes(conn, kind, raw, code)
-    conn.close()
+    try:
+        row = conn.execute("SELECT * FROM twin_pending_values WHERE id=?", (pid,)).fetchone()
+        if not row:
+            return {"ok": False, "error": "not_found", "reason": f"pending id {pid}"}
+        if row["status"] != "pending":
+            # 对抗 review#7：已裁定的 pending 不得重复裁定（重复 map 会把同一别名挂到
+            # 第二个 canonical，归一结果由行序决定而非用户裁定）
+            return {"ok": False, "error": "invalid_input",
+                    "reason": f"pending {pid} 已裁定为 {row['status']}（→{row['resolved_code']}），不可重复裁定"}
+        kind, raw = row["type_kind"], row["raw_value"]
+        if decision == "map":
+            code = str(data.get("code") or "").strip()
+            known = taxonomy.by_code(kind, code) or \
+                any(r["code"] == code for r in db.custom_types(conn, kind))
+            if not code or not known:
+                return {"ok": False, "error": "invalid_input", "field": "code",
+                        "reason": "map 需要已有 canonical code"}
+            db.append_alias(conn, kind, code, raw)
+            db.set_pending(conn, int(pid), "mapped", code)
+        elif decision == "canonicalize":
+            nt = data.get("new_type") or {}
+            if not isinstance(nt, dict):
+                return {"ok": False, "error": "invalid_input", "field": "new_type",
+                        "reason": "new_type 必须是对象 {code,zh,en,domain}"}
+            try:
+                db.add_canonical(conn, kind, str(nt.get("code") or ""),
+                                 str(nt.get("zh") or ""), str(nt.get("en") or ""),
+                                 str(nt.get("domain") or ""), [raw])
+            except ValueError as e:
+                return {"ok": False, "error": "invalid_input", "reason": str(e)}
+            code = str(nt.get("code") or "")
+            db.set_pending(conn, int(pid), "canonicalized", code)
+        else:
+            code = None
+            db.set_pending(conn, int(pid), "rejected", None)
+        backfilled = 0
+        if code:
+            # 对抗 review#3：pending 维度写入的证据行 code 为 NULL，对 compile/scan
+            # 不可见——按 raw 回填，创始证据不再静默搁浅
+            backfilled = db.backfill_evidence_codes(conn, kind, raw, code)
+    finally:
+        conn.close()
     return {"ok": True, "pending_id": int(pid), "decision": decision,
             "backfilled_evidence": backfilled}
 
@@ -396,21 +418,24 @@ def _action_task_start(data: dict) -> dict:
         return {"ok": False, "error": "invalid_input", "field": "work_type", "reason": "required"}
     flow.ensure_schema()
     conn = db.connect()
-    dims: dict = {}
-    pendings: list[dict] = []
-    for kind in taxonomy.KINDS:
-        raw = str(data.get(kind) or "").strip()
-        if not raw:
-            if kind == "work_type":
-                return {"ok": False, "error": "invalid_input", "field": kind, "reason": "required"}
-            dims[kind] = {"ok": False, "kind": kind, "raw": "", "code": None, "matched_by": None}
-            continue
-        r = normalize.normalize_value(kind, raw, conn)
-        dims[kind] = r
-        if not r.get("ok"):
-            pendings.append(r)
-    wt = dims["work_type"]
-    persona = _task_persona(conn, wt.get("code") if wt.get("ok") else None)
+    try:
+        dims: dict = {}
+        pendings: list[dict] = []
+        for kind in taxonomy.KINDS:
+            raw = str(data.get(kind) or "").strip()
+            if not raw:
+                if kind == "work_type":
+                    return {"ok": False, "error": "invalid_input", "field": kind, "reason": "required"}
+                dims[kind] = {"ok": False, "kind": kind, "raw": "", "code": None, "matched_by": None}
+                continue
+            r = normalize.normalize_value(kind, raw, conn)
+            dims[kind] = r
+            if not r.get("ok"):
+                pendings.append(r)
+        wt = dims["work_type"]
+        persona = _task_persona(conn, wt.get("code") if wt.get("ok") else None)
+    finally:
+        conn.close()
     record = flow.insert_task(
         brief=brief, status="planning", dims=dims,
         interpreted_intent=str(data.get("interpreted_intent") or "") or None,
@@ -538,11 +563,14 @@ def _action_task_resume(data: dict) -> dict:
     old_todos = record.get("todos") or []
     if old_todos:
         flow.set_session_todos(data.get("session"), old_todos)
-    conn = db.connect()
     dims = {k: {"ok": bool(record.get(k)), "kind": k, "raw": record.get(f"{k}_raw") or "",
                 "code": record.get(k), "matched_by": "db_alias" if record.get(k) else None}
             for k in taxonomy.KINDS}
-    persona = _task_persona(conn, record.get("work_type"))
+    conn = db.connect()
+    try:
+        persona = _task_persona(conn, record.get("work_type"))
+    finally:
+        conn.close()
     new_record = flow.insert_task(
         brief=record["brief"], status="planning",
         dims=dims, interpreted_intent=record.get("interpreted_intent"),
