@@ -13,6 +13,10 @@
   `tags` 参数非列表时打回 invalid_input（原会被逐字符拆成 tag）。
 - **许可证定为 Apache-2.0**（2026-09-03 拍板）：twin 实现简单，闭源买不到保护、
   开源是信任与采用率的前提；收费叙事保留在 mema-team（协调价值），twin 作其漏斗顶部。
+- **仓库转 public 进入阶段 1 开源试用**（2026-09-03）：GitHub 分发（`uv tool install
+  git+https://github.com/billy12151/mema-twin`），README 补快速开始（MCP 客户端配置
+  模板 + 前置 mema HTTP MCP 说明）；官方 MCP Registry 暂不上（包类型仅认 npm/PyPI/
+  NuGet/Cargo/OCI/MCPB，Python 的最小路径是 PyPI，当前选择跳过）。
 
 ## [0.2.0] — 2026-09-03
 
