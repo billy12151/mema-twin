@@ -43,15 +43,23 @@ def _parse_iso(ts: str | None) -> _dt.datetime | None:
     if not ts:
         return None
     try:
-        return _dt.datetime.fromisoformat(ts)
+        t = _dt.datetime.fromisoformat(ts)
     except ValueError:
         return None
+    if t.tzinfo is None:  # naive 一律按 UTC（review#8：naive 与 now(utc) 相减会炸）
+        t = t.replace(tzinfo=_dt.timezone.utc)
+    return t
+
+
+def _scan_key(workspace: str) -> str:
+    return f"last_scan_at:{workspace}"
 
 
 def scan_notice(workspace: str) -> dict | None:
-    """scan 过期/从未跑过时返回提醒载荷；近期跑过返回 None（提醒自消失）。"""
+    """scan 过期/从未跑过时返回提醒载荷；近期跑过返回 None（提醒自消失）。
+    last_scan_at 按 workspace 隔离（review#8）。"""
     flow.ensure_schema()
-    last = _parse_iso(flow.get_meta("last_scan_at"))
+    last = _parse_iso(flow.get_meta(_scan_key(workspace)))
     if last is not None and (_dt.datetime.now(_dt.timezone.utc) - last).days < SCAN_FRESH_DAYS:
         return None
     return {
@@ -71,8 +79,7 @@ def run_scan(workspace: str) -> dict:
         pending = db.list_pending(conn)
     finally:
         conn.close()
-    open_tasks = [t for t in flow.recent_tasks(workspace, limit=50)
-                  if t["status"] in flow._OPEN_STATUSES]
+    open_rows = flow.open_tasks(workspace)
 
     suggestions: list[str] = []
     total_uncompiled = sum(uncompiled.values())
@@ -86,18 +93,18 @@ def run_scan(workspace: str) -> dict:
         suggestions.append(
             f"pending 治理积压 {len(pending)} 条（三维度未识别值）；"
             "twin(action=\"pending\") 查看后逐条 resolve")
-    if open_tasks:
-        ids = ", ".join(f"#{t['id']}({t['status']})" for t in open_tasks[:5])
+    if open_rows:
+        ids = ", ".join(f"#{t['id']}({t['status']})" for t in open_rows[:5])
         suggestions.append(
-            f"有 {len(open_tasks)} 个未收口的交付任务（{ids}）；"
+            f"有 {len(open_rows)} 个未收口的交付任务（{ids}）；"
             "继续执行或评审收口（task_review），长期不动的考虑显式关闭")
 
-    flow.set_meta("last_scan_at", db.now_iso())
+    flow.set_meta(_scan_key(workspace), db.now_iso())
     return {
         "ok": True, "workspace": workspace,
         "uncompiled_total": total_uncompiled,
         "uncompiled_by_work_type": uncompiled,
         "pending_count": len(pending),
-        "open_tasks": len(open_tasks),
+        "open_tasks": len(open_rows),
         "suggestions": suggestions or ["没有需要处理的积压——分身状态健康"],
     }

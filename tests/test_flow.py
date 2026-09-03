@@ -8,7 +8,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("MEMA_TWIN_DB_PATH", str(tmp_path / "twin.sqlite3"))
     monkeypatch.setenv("MEMA_TWIN_PROMPTS_DIR", str(tmp_path / "prompts"))
     monkeypatch.setenv("MEMA_TWIN_DELIVERABLES_DIR", str(tmp_path / "deliverables"))
-    flow.ensure_schema_registered = False
+    flow._schema_ready.clear()
     flow.ensure_schema()
     yield tmp_path
     flow._todos_by_session.clear()
@@ -142,4 +142,27 @@ def test_submit_snapshots_session_todos_for_resume(env):
                                     "session": "sx"})
     assert r["ok"]
     # 行内 todos 已随 submit 快照
+    assert [x["content"] for x in flow.get_task(t["id"])["todos"]] == ["a"]
+
+
+def test_supersede_spares_submitted(env):
+    """review#6：submitted 在等评审，开新任务不得把它变成不可评审的 superseded。"""
+    t1 = flow.insert_task(workspace="ws", brief="待评审", status="submitted", dims=_dims())
+    t2 = flow.insert_task(workspace="ws", brief="新任务", status="planning", dims=_dims())
+    assert flow.supersede_open_tasks("ws", t2["id"]) == 0  # submitted 不让位
+    assert flow.get_task(t1["id"])["status"] == "submitted"
+    t3 = flow.insert_task(workspace="ws", brief="又一个", status="planning", dims=_dims())
+    assert flow.supersede_open_tasks("ws", t3["id"]) == 1  # planning 照常让位
+    assert flow.get_task(t2["id"])["status"] == "superseded"
+
+
+def test_resubmit_from_empty_session_keeps_todos(env):
+    """review#5：空会话重提不清掉任务行里已快照的 todos。"""
+    from mema_twin import server
+    flow.set_session_todos("s-full", [{"content": "a", "status": "pending"}])
+    t = flow.insert_task(workspace="ws", brief="T", status="planning", dims=_dims())
+    server.twin("task_submit", {"task_id": t["id"], "deliverable_md": "v1", "session": "s-full"})
+    server.twin("task_review", {"task_id": t["id"], "verdict": "changes_requested"})
+    r = server.twin("task_submit", {"task_id": t["id"], "deliverable_md": "v2", "session": "s-empty"})
+    assert r["ok"]
     assert [x["content"] for x in flow.get_task(t["id"])["todos"]] == ["a"]

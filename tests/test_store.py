@@ -47,3 +47,18 @@ def test_resolve_work_type_code(env):
     assert store.resolve_work_type_code(conn, "周报") == "work_report"
     assert store.resolve_work_type_code(conn, "work_report") == "work_report"
     assert store.resolve_work_type_code(conn, "不存在") is None
+
+
+def test_mirror_failure_degrades_to_warning(env, monkeypatch):
+    """review#3：镜像写失败不击穿已落库版本。"""
+    from mema_twin import store as twin_store
+
+    def boom(path, text):
+        raise OSError("disk full (simulated)")
+    monkeypatch.setattr(twin_store, "_atomic_write", boom)
+    conn = twin_db.connect()
+    rec = twin_store.create_version(conn, "ws", "work_report", "# v1", ["1"], model="m")
+    assert rec["version"] == 1
+    assert rec["warnings"] and "disk full" in rec["warnings"][0]
+    active = store.get_active(conn, "ws", "work_report")
+    assert active["prompt_md"] == "# v1"  # DB 版本完好

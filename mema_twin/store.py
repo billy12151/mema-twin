@@ -53,31 +53,47 @@ def create_version(conn: sqlite3.Connection, workspace: str, work_type: str,
     if not is_known_work_type(conn, work_type):
         raise ValueError(f"unknown work_type code: {work_type!r}；先 twin(action=\"taxonomy\") 查码或治理 pending")
     ids = [str(i) for i in (source_memory_ids or [])]
-    row = conn.execute(
-        "SELECT COALESCE(MAX(version),0) AS v FROM twin_prompt_versions WHERE workspace=? AND work_type=?",
-        (workspace, work_type),
-    ).fetchone()
-    version = int(row["v"]) + 1
     ts = db.now_iso()
-    conn.execute(
-        "UPDATE twin_prompt_versions SET status='retired'"
-        " WHERE workspace=? AND work_type=? AND status='active'",
-        (workspace, work_type),
-    )
-    conn.execute(
-        "INSERT INTO twin_prompt_versions"
-        "(workspace, work_type, version, prompt_md, source_memory_ids, model, status, evidence_count, created_at, activated_at)"
-        " VALUES(?,?,?,?,?,?,?,?,?,?)",
-        (workspace, work_type, version, prompt_md, json.dumps(ids), model or "",
-         "active", len(ids), ts, ts),
-    )
+    warnings: list[str] = []
+    for _attempt in range(3):  # review#12：并发 submit 撞版本号时重试
+        row = conn.execute(
+            "SELECT COALESCE(MAX(version),0) AS v FROM twin_prompt_versions WHERE workspace=? AND work_type=?",
+            (workspace, work_type),
+        ).fetchone()
+        version = int(row["v"]) + 1
+        conn.execute(
+            "UPDATE twin_prompt_versions SET status='retired'"
+            " WHERE workspace=? AND work_type=? AND status='active'",
+            (workspace, work_type),
+        )
+        try:
+            conn.execute(
+                "INSERT INTO twin_prompt_versions"
+                "(workspace, work_type, version, prompt_md, source_memory_ids, model, status, evidence_count, created_at, activated_at)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (workspace, work_type, version, prompt_md, json.dumps(ids), model or "",
+                 "active", len(ids), ts, ts),
+            )
+            break
+        except sqlite3.IntegrityError:
+            conn.rollback()
+            if _attempt == 2:
+                raise
+            continue
     conn.commit()
     d = _mirror_dir(workspace, work_type)
-    _atomic_write(d / f"v{version}.md", prompt_md)
-    _atomic_write(d / "active.md", prompt_md)
-    return {"workspace": workspace, "work_type": work_type, "version": version,
-            "model": model or "", "source_count": len(ids),
-            "mirror": str(d / f"v{version}.md")}
+    for f in (f"v{version}.md", "active.md"):
+        # 镜像是降级/可视化渠道（D2），写失败降级为警告，不击穿已落库的版本（review#3）
+        try:
+            _atomic_write(d / f, prompt_md)
+        except OSError as e:
+            warnings.append(f"镜像写入失败（{d / f}）: {e}")
+    out = {"workspace": workspace, "work_type": work_type, "version": version,
+           "model": model or "", "source_count": len(ids),
+           "mirror": str(d / f"v{version}.md")}
+    if warnings:
+        out["warnings"] = warnings
+    return out
 
 
 def get_active(conn: sqlite3.Connection, workspace: str, work_type: str) -> dict | None:

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import os
+import sqlite3
 
 from mcp.server.fastmcp import FastMCP
 
@@ -17,6 +18,16 @@ from . import db, flow, normalize, scan, sink, store, taxonomy, templates
 mcp = FastMCP("mema-twin")
 
 _KIND_PREFIX = {"work_type": "wt", "audience": "au", "purpose": "pu"}
+_RAW_MAX_CHARS = 200
+
+
+def _safe_ws_segment(value: str) -> str:
+    """workspace/work_type 会进文件路径（prompts/、deliverables/）：拒绝路径段
+    分隔符与穿越（review#11）。"""
+    v = (value or "").strip()
+    if not v or "/" in v or "\\" in v or ".." in v or "\x00" in v or len(v) > 64:
+        raise ValueError(f"unsafe path segment: {value!r}")
+    return v
 
 
 @mcp.tool()
@@ -41,6 +52,11 @@ def twin(action: str, data: dict | None = None) -> dict:
         return {"ok": False, "error": "mema_unreachable", "reason": str(e)}
     except ValueError as e:
         return {"ok": False, "error": "invalid_input", "reason": str(e)}
+    except (TypeError, AttributeError, KeyError, OverflowError,
+            sqlite3.Error, OSError) as e:
+        # 兜底边界（review#2）：畸形参数/存储异常绝不击穿 MCP 工具面
+        return {"ok": False, "error": "internal_error",
+                "reason": f"{type(e).__name__}: {e}"}
 
 
 def _today() -> str:
@@ -60,13 +76,16 @@ def _memory_id_of(data) -> int | None:
 
 
 def _workspace(data: dict) -> str:
-    return str(data.get("workspace") or os.environ.get("MEMA_TWIN_WORKSPACE", "memory-arbiter-mcp"))
+    return _safe_ws_segment(str(data.get("workspace") or os.environ.get("MEMA_TWIN_WORKSPACE", "memory-arbiter-mcp")))
 
 
 def _action_write(data: dict) -> dict:
     for f in ("content", "work_type", "audience", "purpose"):
         if not str(data.get(f) or "").strip():
             return {"ok": False, "error": "invalid_input", "field": f, "reason": "required"}
+        if len(str(data[f])) > _RAW_MAX_CHARS:
+            return {"ok": False, "error": "invalid_input", "field": f,
+                    "reason": f"超出 {_RAW_MAX_CHARS} 字符上限（维度值应是短枚举说法）"}
     conn = db.connect()
     dims: dict = {}
     pendings: list[dict] = []
@@ -74,6 +93,7 @@ def _action_write(data: dict) -> dict:
     for kind in taxonomy.KINDS:
         r = normalize.normalize_value(kind, str(data[kind]), conn)
         if r.get("error"):
+            conn.close()
             return {"ok": False, "error": "invalid_input", "field": kind, "reason": r.get("reason")}
         dims[kind] = r
         if r.get("ok"):
@@ -81,6 +101,7 @@ def _action_write(data: dict) -> dict:
         else:
             pendings.append(r)
             tags.append(f"twin:{_KIND_PREFIX[kind]}:raw:{r['raw']}")
+    conn.close()  # 后续是 30s 级 HTTP 调用，连接不能跨调用挂着（review#7）
     resp = sink.remember(
         content=str(data["content"]),
         subject=str(data.get("subject") or f"工作偏好：{dims['work_type'].get('raw')}"),
@@ -95,13 +116,15 @@ def _action_write(data: dict) -> dict:
     if ok:
         ws = _workspace(data)
         mid = _memory_id_of(resp.get("data"))
+        conn = db.connect()
         if mid is not None:
             db.record_evidence(conn, ws, mid, dims,
                                subject=str(data.get("subject") or ""))
+            db.set_pending_first_seen(
+                conn, [p["pending_id"] for p in pendings if p.get("pending_id")], mid)
             out["evidence_id"] = mid
         if dims["work_type"].get("ok"):
-            conn2 = db.connect()
-            active = store.get_active(conn2, _workspace(data), dims["work_type"]["code"])
+            active = store.get_active(conn, ws, dims["work_type"]["code"])
             if active and active.get("version") is not None:
                 out["hint"] = (f"{dims['work_type']['label_zh']} 已有 persona prompt v{active['version']}；"
                                "本次偏好已入池未编译，可 twin(action=\"compile\") 生成新版本"
@@ -110,6 +133,7 @@ def _action_write(data: dict) -> dict:
                 out["hint"] = (f"{dims['work_type']['label_zh']} 尚无 persona prompt，"
                                "可 twin(action=\"compile\") 生成 v1"
                                f"（{templates.STRONG_MODEL_NOTE}）")
+        conn.close()
     return out
 
 
@@ -211,21 +235,48 @@ def _action_compile(data: dict) -> dict:
     return out
 
 
+def _coerce_source_ids(value) -> list[int]:
+    """review#10：只收 int / 数字字符串列表；"123" 这类可迭代脏值会拆成 1/2/3。"""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError("source_memory_ids must be a list of memory ids")
+    out: list[int] = []
+    for i in value:
+        if isinstance(i, bool) or not isinstance(i, (int, str)):
+            raise ValueError(f"invalid memory id: {i!r}")
+        try:
+            n = int(i)
+        except ValueError:
+            raise ValueError(f"invalid memory id: {i!r}")
+        if str(n) != str(i).strip() and not isinstance(i, int):
+            raise ValueError(f"invalid memory id: {i!r}")
+        out.append(n)
+    return out
+
+
 def _action_submit(data: dict) -> dict:
     for f in ("work_type", "prompt_md"):
         if not str(data.get(f) or "").strip():
             return {"ok": False, "error": "invalid_input", "field": f, "reason": "required"}
+    try:
+        source_ids = _coerce_source_ids(data.get("source_memory_ids"))
+    except ValueError as e:
+        return {"ok": False, "error": "invalid_input", "field": "source_memory_ids",
+                "reason": str(e)}
     conn = db.connect()
     code = store.resolve_work_type_code(conn, str(data["work_type"]))
     if not code:
+        conn.close()
         return {"ok": False, "error": "invalid_input", "field": "work_type", "reason": "unknown code"}
     rec = store.create_version(conn, _workspace(data), code,
                                str(data["prompt_md"]),
-                               data.get("source_memory_ids") or [],
+                               source_ids,
                                model=str(data.get("model") or ""))
     marked = db.mark_compiled(conn, _workspace(data),
-                              [int(i) for i in (data.get("source_memory_ids") or [])],
+                              source_ids,
                               rec["version"])
+    conn.close()
     rec["ok"] = True
     rec["evidence_marked_compiled"] = marked
     return rec
@@ -369,10 +420,12 @@ def _action_task_submit(data: dict) -> dict:
                 "reason": f"task {tid} 状态为 {record['status']!r}，不可提交；可 task_resume 续作"}
     if data.get("todos") is not None:
         flow.set_session_todos(data.get("session"), data.get("todos"))
-    # submit 即快照会话 todos 进任务行（plan-mode submit_plan 同款），resume 才有得恢复
+    # submit 即快照会话 todos 进任务行（plan-mode submit_plan 同款），resume 才有得恢复；
+    # 空会话传 None 保留原快照（review#5：空列表会把 COALESCE 当真值清掉 todos）
+    session_todos = flow.current_todos(data.get("session"))
     flow.update_deliverable(int(tid), deliverable,
                             brief=str(data.get("brief") or "") or None,
-                            todos=flow.current_todos(data.get("session")))
+                            todos=session_todos or None)
     updated = flow.set_status(int(tid), "submitted",
                               reason=str(data.get("note") or "") or None)
     return {"ok": True, "task_id": int(tid), "status": "submitted",
