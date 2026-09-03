@@ -166,21 +166,30 @@ def add_canonical(conn: sqlite3.Connection, kind: str, code: str, zh: str,
 
 def upsert_pending(conn: sqlite3.Connection, kind: str, raw_value: str,
                    memory_id: str | None = None) -> int:
-    row = conn.execute(
-        "SELECT id FROM twin_pending_values WHERE type_kind=? AND raw_value=? AND status='pending'",
-        (kind, raw_value),
-    ).fetchone()
-    if row:
-        conn.execute("UPDATE twin_pending_values SET hit_count=hit_count+1 WHERE id=?", (row["id"],))
-        conn.commit()
-        return int(row["id"])
+    """UNIQUE(type_kind, raw_value) 覆盖全部状态：reject 后同值再现必须复活为
+    pending（hit_count 续增），否则 INSERT 撞约束让 IntegrityError 逸出工具边界。"""
     cur = conn.execute(
         "INSERT INTO twin_pending_values(type_kind, raw_value, first_seen_memory_id, created_at)"
-        " VALUES(?,?,?,?)",
+        " VALUES(?,?,?,?)"
+        " ON CONFLICT(type_kind, raw_value) DO UPDATE SET"
+        " status='pending', resolved_code=NULL, hit_count=hit_count+1",
         (kind, raw_value, memory_id, now_iso()),
     )
     conn.commit()
     return int(cur.lastrowid)
+
+
+def set_pending_first_seen(conn: sqlite3.Connection, pending_ids: list[int],
+                           memory_id: int) -> None:
+    """write 落库拿到 mema id 后回填（normalize 时 id 尚不存在）。"""
+    if not pending_ids:
+        return
+    ph = ",".join("?" for _ in pending_ids)
+    conn.execute(
+        f"UPDATE twin_pending_values SET first_seen_memory_id=? WHERE id IN ({ph})",
+        (str(memory_id), *pending_ids),
+    )
+    conn.commit()
 
 
 def list_pending(conn: sqlite3.Connection, status: str = "pending") -> list[dict]:

@@ -34,7 +34,11 @@ def _parse_sse(body: str) -> dict:
                 for line in body.splitlines() if line.startswith("data:")]
     if not payloads:
         raise SinkError(f"response has no data frame: {body[:200]!r}")
-    return json.loads(payloads[-1])
+    try:
+        return json.loads(payloads[-1])
+    except json.JSONDecodeError as e:
+        # 不能让 JSONDecodeError 以 ValueError 身份被上层误标为 invalid_input（review#4）
+        raise SinkError(f"SSE data 帧不是合法 JSON: {e}") from e
 
 
 def _call(name: str, arguments: dict) -> dict:
@@ -47,7 +51,8 @@ def _call(name: str, arguments: dict) -> dict:
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             body = resp.read().decode("utf-8")
-    except urllib.error.URLError as e:
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        # URLError 不覆盖读 body 途中超时/连接重置（review#4）
         raise SinkError(f"mema HTTP MCP 不可达（{_base_url()}）: {e}") from e
     msg = _parse_sse(body)
     if "error" in msg:

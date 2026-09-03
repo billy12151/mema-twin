@@ -23,6 +23,9 @@ from . import db
 # pending = 审批被搁置（中断未决）；superseded = 被新任务让位（历史保留）。
 STATUSES = ("planning", "submitted", "approved", "rejected", "pending", "superseded")
 _OPEN_STATUSES = ("planning", "submitted", "pending")
+# 自动让位只收 planning/pending（review#6）：submitted 是在等人评审，开新任务
+# 不该把待评审的交付稿变成不可评审的 superseded（task_review 仅收 submitted）。
+_SUPERSEDE_STATUSES = ("planning", "pending")
 _RESUMABLE_STATUSES = ("approved", "submitted", "pending")
 _REVISABLE_STATUSES = ("approved", "submitted", "pending")
 
@@ -61,19 +64,20 @@ CREATE TABLE IF NOT EXISTS twin_task_reviews(
   notes TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_twin_tasks_ws_status ON twin_tasks(workspace, status);
 CREATE TABLE IF NOT EXISTS twin_meta(
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
 """
 
-ensure_schema_registered = False
+_schema_ready: set[str] = set()  # 已建表的 db 路径（测试会切 MEMA_TWIN_DB_PATH，不能单布尔）
 
 
 def ensure_schema() -> None:
     """twin_tasks 等表建在 twin.sqlite3（与既有表同库，db.connect 后追加执行）。"""
-    global ensure_schema_registered
-    if ensure_schema_registered:
+    path = str(db.db_path())
+    if path in _schema_ready:
         return
     conn = db.connect()
     try:
@@ -81,7 +85,7 @@ def ensure_schema() -> None:
         conn.commit()
     finally:
         conn.close()
-    ensure_schema_registered = True
+    _schema_ready.add(path)
 
 
 # ---- 会话 todos（进程内存，plan-mode 同款隔离方式）----
@@ -218,8 +222,8 @@ def supersede_open_tasks(workspace: str, except_id: int) -> int:
     try:
         cur = conn.execute(
             f"UPDATE twin_tasks SET status='superseded', decided_at=?"
-            f" WHERE workspace=? AND id!=? AND status IN ({','.join('?' for _ in _OPEN_STATUSES)})",
-            (db.now_iso(), workspace, int(except_id), *_OPEN_STATUSES),
+            f" WHERE workspace=? AND id!=? AND status IN ({','.join('?' for _ in _SUPERSEDE_STATUSES)})",
+            (db.now_iso(), workspace, int(except_id), *_SUPERSEDE_STATUSES),
         )
         conn.commit()
         return cur.rowcount
@@ -259,15 +263,16 @@ def set_deliverable_path(task_id: int, path: str) -> None:
         conn.close()
 
 
-def latest_open_task(workspace: str) -> dict | None:
+def open_tasks(workspace: str, limit: int = 100) -> list[dict]:
+    """scan 用：直接按状态查（走 idx_twin_tasks_ws_status），不翻 recent 截断（review#13）。"""
     conn = db.connect()
     try:
-        row = conn.execute(
+        rows = conn.execute(
             f"SELECT * FROM twin_tasks WHERE workspace=? AND status IN"
-            f" ({','.join('?' for _ in _OPEN_STATUSES)}) ORDER BY id DESC LIMIT 1",
-            (workspace, *_OPEN_STATUSES),
-        ).fetchone()
-        return _row_to_dict(row)
+            f" ({','.join('?' for _ in _OPEN_STATUSES)}) ORDER BY id LIMIT ?",
+            (workspace, *_OPEN_STATUSES, max(1, min(int(limit), 500))),
+        ).fetchall()
+        return [_row_to_dict(r) for r in rows]
     finally:
         conn.close()
 

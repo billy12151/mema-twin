@@ -56,3 +56,15 @@ def test_seed_idempotent_and_preserves_governance(conn):
     assert "日报" in row["aliases"]
     assert normalize.normalize_value("work_type", "日报", conn2)["ok"]
     conn2.close()
+
+
+def test_rejected_value_reencounters_as_pending(conn):
+    """review#1：reject 后同值再现必须复活为 pending，而不是撞 UNIQUE 崩掉。"""
+    r1 = normalize.normalize_value("work_type", "灵能审计年报", conn)
+    assert not r1["ok"]
+    twin_db.set_pending(conn, r1["pending_id"], "rejected", None)
+    r2 = normalize.normalize_value("work_type", "灵能审计年报", conn)
+    assert not r2["ok"] and r2["pending_id"]
+    row = conn.execute("SELECT status, hit_count FROM twin_pending_values WHERE id=?",
+                       (r2["pending_id"],)).fetchone()
+    assert row["status"] == "pending" and row["hit_count"] >= 2
