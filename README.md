@@ -82,15 +82,46 @@ work_type 34 项（七域：通用职场/方案商务/产品研发/管理制度/
 audience 10 项、purpose 9 项。清单见 `mema_twin/taxonomy.py` 或 `twin(action="taxonomy")`。
 后续版本可扩展；长尾进 pending 由用户治理。
 
-## 安装与配置
+## 快速开始（GitHub 安装）
+
+前置：本机已跑 mema HTTP MCP（默认 `http://127.0.0.1:8000/mcp`）——twin 的偏好本体
+存在 mema 里。
 
 ```bash
-cd ~/BillyProject/mema-twin
+uv tool install git+https://github.com/billy12151/mema-twin
+```
+
+MCP 客户端配置（Claude Desktop / Cursor / 通用 stdio 均可）：
+
+```json
+{
+  "mcpServers": {
+    "mema-twin": {
+      "command": "mema-twin",
+      "env": {
+        "MEMA_TWIN_MEMA_URL": "http://127.0.0.1:8000/mcp",
+        "MEMA_TWIN_CLIENT_ID": "你的客户端名",
+        "MEMA_TWIN_AGENT_ID": "mema-twin",
+        "MEMA_TWIN_WORKSPACE": "mema-twin"
+      }
+    }
+  }
+}
+```
+
+装好 skill 引导：把 `skill/SKILL.md` 放到客户端的 skills 目录，Agent 才知道何时
+调 `twin.write` / `task_start`。
+
+## 开发（本地源码）
+
+```bash
+git clone https://github.com/billy12151/mema-twin
+cd mema-twin
 uv venv && uv pip install -e ".[test]"
 .venv/bin/pytest -q          # 跑测试
 ```
 
-MCP 配置见 `examples/zcode.mcp.json`。环境变量：
+环境变量：
 
 | 变量 | 默认 | 说明 |
 |------|------|------|
@@ -101,8 +132,6 @@ MCP 配置见 `examples/zcode.mcp.json`。环境变量：
 | `MEMA_TWIN_CLIENT_ID` / `MEMA_TWIN_AGENT_ID` | `zcode` / `mema-twin` | mema 必需的身份头。twin 作为**子 agent** 范式：client 标识宿主客户端（zcode/kimi/...），agent_id 固定为 `mema-twin` 标识写入者——按 agent_id 一次查出所有经 twin 落库的偏好，配合 `twin:*` 标签双保险 |
 | `MEMA_TWIN_WORKSPACE` | `mema-twin` | mema 侧偏好**存储桶**（画像人级全局，twin 本地无 workspace 维度）。此值仅决定偏好记忆在 mema 里与项目记忆隔离；只来自本 env，无 per-call 覆盖 |
 
-Agent 引导：安装 `skill/SKILL.md` 到各 client 的 skills 目录。
-
 ## 开发
 
 ```bash
@@ -112,8 +141,10 @@ Agent 引导：安装 `skill/SKILL.md` 到各 client 的 skills 目录。
 ## 路线图
 
 - **阶段 0 原型自用**：表 + 归一 + 手动编译 + 注入，吃自己狗粮验证"越来越像"
-- **阶段 1 免费发布**：registry / PyPI 验证留存（许可证已定 Apache-2.0——twin 实现简单，
-  闭源买不到保护，开源是信任与采用率的前提）
+- **阶段 1 开源试用**：GitHub 公开仓库分发（`uv tool install git+...`），验证留存与
+  "越来越像"结论（许可证已定 Apache-2.0——twin 实现简单，闭源买不到保护，开源是信任
+  与采用率的前提；官方 MCP Registry 暂不上，其包类型只认 npm/PyPI/NuGet/Cargo/OCI/MCPB，
+  Python 包的最小路径是 PyPI，当前选择跳过）
 - **阶段 2 收费拍板**：收费叙事在 mema-team（团队多人画像、组织级治理、托管）——那是
   协调价值而非代码价值；twin 保持开源作为其漏斗顶部，凭留存数据决定形态
 
