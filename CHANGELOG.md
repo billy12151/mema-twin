@@ -11,6 +11,8 @@
   （memory-arbiter-mcp / llama-cpp-python 依赖随之取消）。
 - 修复 server.py 各 handler 的 sqlite 连接泄漏（全部 try/finally 收口）；write 的
   `tags` 参数非列表时打回 invalid_input（原会被逐字符拆成 tag）。
+- **许可证定为 Apache-2.0**（2026-09-03 拍板）：twin 实现简单，闭源买不到保护、
+  开源是信任与采用率的前提；收费叙事保留在 mema-team（协调价值），twin 作其漏斗顶部。
 
 ## [0.2.0] — 2026-09-03
 
