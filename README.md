@@ -97,7 +97,7 @@ MCP 配置见 `examples/zcode.mcp.json`。环境变量：
 | `MEMA_TWIN_DELIVERABLES_DIR` | `<项目>/deliverables` | 交付物文件目录 |
 | `MEMA_TWIN_MEMA_URL` | `http://127.0.0.1:8000/mcp` | mema HTTP MCP 端点 |
 | `MEMA_TWIN_CLIENT_ID` / `MEMA_TWIN_AGENT_ID` | `zcode` / `mema-twin` | mema 身份头（缺失会被拒） |
-| `MEMA_TWIN_WORKSPACE` | `mema-twin` | 默认 workspace（独立空间，偏好与项目记忆互不污染；单次调用可用 data.workspace 覆盖） |
+| `MEMA_TWIN_WORKSPACE` | `mema-twin` | 偏好存储桶。画像默认**全局**（能力跟人不跟项目），此值仅用于在 mema 里与项目记忆隔离；一般不改，需单独画像的场景才用 `data.workspace` 显式分桶 |
 | `MEMA_TWIN_EMBED_MODEL` | mema 配置的模型 | embed 档 GGUF 路径；解析顺序：本变量 → mema 配置 `embedding.model_path` → 禁用（fail-open 走 pending） |
 
 embed 档依赖：`uv pip install -e ".[core]"`（mema-core ≥0.15.4 提供 ManagedEmbedder；
