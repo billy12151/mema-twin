@@ -13,8 +13,8 @@ def prompts_dir() -> Path:
     return Path(os.environ.get("MEMA_TWIN_PROMPTS_DIR") or db.PROJECT_ROOT / "prompts")
 
 
-def _mirror_dir(workspace: str, work_type: str) -> Path:
-    return prompts_dir() / workspace / work_type
+def _mirror_dir(work_type: str) -> Path:
+    return prompts_dir() / work_type
 
 
 def _atomic_write(path: Path, text: str) -> None:
@@ -46,7 +46,7 @@ def resolve_work_type_code(conn: sqlite3.Connection, value: str) -> str | None:
     return None
 
 
-def create_version(conn: sqlite3.Connection, workspace: str, work_type: str,
+def create_version(conn: sqlite3.Connection, work_type: str,
                    prompt_md: str, source_memory_ids: list, model: str = "") -> dict:
     if not (prompt_md or "").strip():
         raise ValueError("prompt_md must not be empty")
@@ -57,21 +57,21 @@ def create_version(conn: sqlite3.Connection, workspace: str, work_type: str,
     warnings: list[str] = []
     for _attempt in range(3):  # review#12：并发 submit 撞版本号时重试
         row = conn.execute(
-            "SELECT COALESCE(MAX(version),0) AS v FROM twin_prompt_versions WHERE workspace=? AND work_type=?",
-            (workspace, work_type),
+            "SELECT COALESCE(MAX(version),0) AS v FROM twin_prompt_versions WHERE work_type=?",
+            (work_type,),
         ).fetchone()
         version = int(row["v"]) + 1
         conn.execute(
             "UPDATE twin_prompt_versions SET status='retired'"
-            " WHERE workspace=? AND work_type=? AND status='active'",
-            (workspace, work_type),
+            " WHERE work_type=? AND status='active'",
+            (work_type,),
         )
         try:
             conn.execute(
                 "INSERT INTO twin_prompt_versions"
-                "(workspace, work_type, version, prompt_md, source_memory_ids, model, status, evidence_count, created_at, activated_at)"
-                " VALUES(?,?,?,?,?,?,?,?,?,?)",
-                (workspace, work_type, version, prompt_md, json.dumps(ids), model or "",
+                "(work_type, version, prompt_md, source_memory_ids, model, status, evidence_count, created_at, activated_at)"
+                " VALUES(?,?,?,?,?,?,?,?,?)",
+                (work_type, version, prompt_md, json.dumps(ids), model or "",
                  "active", len(ids), ts, ts),
             )
             break
@@ -81,14 +81,14 @@ def create_version(conn: sqlite3.Connection, workspace: str, work_type: str,
                 raise
             continue
     conn.commit()
-    d = _mirror_dir(workspace, work_type)
+    d = _mirror_dir(work_type)
     for f in (f"v{version}.md", "active.md"):
         # 镜像是降级/可视化渠道（D2），写失败降级为警告，不击穿已落库的版本（review#3）
         try:
             _atomic_write(d / f, prompt_md)
         except OSError as e:
             warnings.append(f"镜像写入失败（{d / f}）: {e}")
-    out = {"workspace": workspace, "work_type": work_type, "version": version,
+    out = {"work_type": work_type, "version": version,
            "model": model or "", "source_count": len(ids),
            "mirror": str(d / f"v{version}.md")}
     if warnings:
@@ -96,31 +96,31 @@ def create_version(conn: sqlite3.Connection, workspace: str, work_type: str,
     return out
 
 
-def get_active(conn: sqlite3.Connection, workspace: str, work_type: str) -> dict | None:
+def get_active(conn: sqlite3.Connection, work_type: str) -> dict | None:
     row = conn.execute(
         "SELECT * FROM twin_prompt_versions"
-        " WHERE workspace=? AND work_type=? AND status='active'"
+        " WHERE work_type=? AND status='active'"
         " ORDER BY version DESC LIMIT 1",
-        (workspace, work_type),
+        (work_type,),
     ).fetchone()
     if row:
         d = dict(row)
         d["source_memory_ids"] = json.loads(d["source_memory_ids"])
         d["from_mirror"] = False
         return d
-    mirror = _mirror_dir(workspace, work_type) / "active.md"
+    mirror = _mirror_dir(work_type) / "active.md"
     if mirror.exists():
-        return {"workspace": workspace, "work_type": work_type, "version": None,
+        return {"work_type": work_type, "version": None,
                 "prompt_md": mirror.read_text(encoding="utf-8"),
                 "source_memory_ids": [], "model": "", "status": "mirror",
                 "from_mirror": True}
     return None
 
 
-def list_versions(conn: sqlite3.Connection, workspace: str, work_type: str) -> list[dict]:
+def list_versions(conn: sqlite3.Connection, work_type: str) -> list[dict]:
     rows = conn.execute(
-        "SELECT * FROM twin_prompt_versions WHERE workspace=? AND work_type=? ORDER BY version DESC",
-        (workspace, work_type),
+        "SELECT * FROM twin_prompt_versions WHERE work_type=? ORDER BY version DESC",
+        (work_type,),
     ).fetchall()
     out = []
     for r in rows:
