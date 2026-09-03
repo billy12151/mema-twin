@@ -26,7 +26,9 @@ _OPEN_STATUSES = ("planning", "submitted", "pending")
 # 自动让位只收 planning/pending（review#6）：submitted 是在等人评审，开新任务
 # 不该把待评审的交付稿变成不可评审的 superseded（task_review 仅收 submitted）。
 _SUPERSEDE_STATUSES = ("planning", "pending")
-_RESUMABLE_STATUSES = ("approved", "submitted", "pending")
+# planning 纳入可续作（对抗 review#8）：最常见的"中断续作"就是打到一半的进行中
+# 任务；plan-mode 不含 planning 是因为它的 resume 面向审批流，twin 面向执行流。
+_RESUMABLE_STATUSES = ("planning", "approved", "submitted", "pending")
 _REVISABLE_STATUSES = ("approved", "submitted", "pending")
 
 _SCHEMA = """
@@ -62,7 +64,8 @@ CREATE TABLE IF NOT EXISTS twin_task_reviews(
   round INTEGER NOT NULL DEFAULT 1,
   verdict TEXT NOT NULL,
   notes TEXT NOT NULL DEFAULT '',
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  UNIQUE(task_id, round)
 );
 CREATE INDEX IF NOT EXISTS idx_twin_tasks_ws_status ON twin_tasks(workspace, status);
 CREATE TABLE IF NOT EXISTS twin_meta(
@@ -199,17 +202,37 @@ def get_task(task_id: int) -> dict | None:
         conn.close()
 
 
-def set_status(task_id: int, status: str, reason: str | None = None) -> dict | None:
+def set_status(task_id: int, status: str, reason: str | None = None,
+               allowed_from: tuple[str, ...] | None = None) -> dict | None:
+    """条件状态迁移（对抗 review#4）：跨连接 check-then-act 会让 superseded 任务
+    被并发操作复活。allowed_from 给出合法前置状态，UPDATE 按 rowcount 判定成败；
+    前置不符抛 ValueError，由边界转为 invalid_input。"""
     if status not in STATUSES:
         raise ValueError(f"unknown status {status!r}; expected one of {STATUSES}")
     reason = (reason or "").strip() or None
     conn = db.connect()
     try:
-        conn.execute(
-            "UPDATE twin_tasks SET status=?, reason=COALESCE(?, reason), decided_at=?"
-            " WHERE id=?",
-            (status, reason, db.now_iso(), int(task_id)),
-        )
+        if allowed_from is None:
+            cur = conn.execute(
+                "UPDATE twin_tasks SET status=?, reason=COALESCE(?, reason), decided_at=?"
+                " WHERE id=?",
+                (status, reason, db.now_iso(), int(task_id)),
+            )
+        else:
+            cur = conn.execute(
+                f"UPDATE twin_tasks SET status=?, reason=COALESCE(?, reason), decided_at=?"
+                f" WHERE id=? AND status IN ({','.join('?' for _ in allowed_from)})",
+                (status, reason, db.now_iso(), int(task_id), *allowed_from),
+            )
+            if cur.rowcount == 0:
+                row = conn.execute(
+                    "SELECT status FROM twin_tasks WHERE id=?", (int(task_id),)
+                ).fetchone()
+                if row is None:
+                    return None
+                raise ValueError(
+                    f"task {task_id} 当前状态为 {row['status']!r}，不允许迁到 {status!r}"
+                    f"（需 {list(allowed_from)}）")
         conn.commit()
         row = conn.execute("SELECT * FROM twin_tasks WHERE id=?", (int(task_id),)).fetchone()
         return _row_to_dict(row)
@@ -296,19 +319,27 @@ def add_review(task_id: int, verdict: str, notes: str = "") -> dict:
         raise ValueError("verdict must be approved | changes_requested")
     conn = db.connect()
     try:
-        row = conn.execute(
-            "SELECT COALESCE(MAX(round),0) AS r FROM twin_task_reviews WHERE task_id=?",
-            (int(task_id),),
-        ).fetchone()
-        rnd = int(row["r"]) + 1
-        conn.execute(
-            "INSERT INTO twin_task_reviews(task_id, round, verdict, notes, created_at)"
-            " VALUES(?,?,?,?,?)",
-            (int(task_id), rnd, verdict, notes or "", db.now_iso()),
-        )
-        conn.commit()
-        return {"task_id": int(task_id), "round": rnd, "verdict": verdict,
-                "notes": notes or ""}
+        for _attempt in range(3):  # UNIQUE(task_id, round)：并发评审撞轮次时重算（对抗 review#11）
+            row = conn.execute(
+                "SELECT COALESCE(MAX(round),0) AS r FROM twin_task_reviews WHERE task_id=?",
+                (int(task_id),),
+            ).fetchone()
+            rnd = int(row["r"]) + 1
+            try:
+                conn.execute(
+                    "INSERT INTO twin_task_reviews(task_id, round, verdict, notes, created_at)"
+                    " VALUES(?,?,?,?,?)",
+                    (int(task_id), rnd, verdict, notes or "", db.now_iso()),
+                )
+                conn.commit()
+                return {"task_id": int(task_id), "round": rnd, "verdict": verdict,
+                        "notes": notes or ""}
+            except sqlite3.IntegrityError:
+                conn.rollback()
+                if _attempt == 2:
+                    raise
+                continue
+        raise RuntimeError("unreachable")
     finally:
         conn.close()
 

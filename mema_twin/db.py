@@ -83,19 +83,44 @@ def now_iso() -> str:
     return _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0).isoformat()
 
 
+def validate_code_segment(value: str) -> str:
+    """canonical code 会进文件路径（prompts/<ws>/<code>/）：与 server 侧 workspace
+    守卫同款规则（对抗 review#1：canonicalize 是自定义 code 的唯一入口）。"""
+    v = (value or "").strip()
+    if not v or "/" in v or "\\" in v or ".." in v or "\x00" in v or len(v) > 64:
+        raise ValueError(f"unsafe code segment: {value!r}")
+    return v
+
+
+# WAL 是库文件级持久属性，每个路径设一次即可；每次连接都 PRAGMA journal_mode
+# 会与并发写事务抢锁直接 BUSY（对抗 review#6），不走 busy_timeout。
+_wal_ready: set[str] = set()
+
+
 def connect() -> sqlite3.Connection:
     path = db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
+    key = str(path)
+    if key not in _wal_ready:
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+        except sqlite3.OperationalError:
+            pass  # 与并发写锁冲突：WAL 多数情况已就位，下次连接再补
+        _wal_ready.add(key)
     conn.executescript(_SCHEMA)
     _seed_types(conn)
     return conn
 
 
 def _seed_types(conn: sqlite3.Connection) -> None:
+    # 空表才播种（对抗 review#6：53 条 INSERT+commit 每连接执行放大写锁竞争）；
     # INSERT OR IGNORE 而非 upsert：治理追加的别名/自建 canonical 不能被内置数据覆盖
+    n = conn.execute("SELECT COUNT(*) AS c FROM twin_types").fetchone()["c"]
+    if n:
+        return
     ts = now_iso()
     for kind in taxonomy.KINDS:
         for t in taxonomy.all_types(kind):
@@ -131,14 +156,25 @@ def custom_types(conn: sqlite3.Connection, kind: str) -> list[dict]:
 
 
 def append_alias(conn: sqlite3.Connection, kind: str, code: str, alias: str) -> list[str]:
+    a = alias.strip()
+    if not a:
+        return json.loads((conn.execute(
+            "SELECT aliases FROM twin_types WHERE type_kind=? AND code=?", (kind, code)
+        ).fetchone() or {"aliases": "[]"})["aliases"] or "[]")
+    # 对抗 review#7：同一别名不允许挂到第二个 canonical——否则归一结果由行序决定，
+    # 用户后一次治理会静默推翻前一次
+    for row in conn.execute(
+            "SELECT code, aliases FROM twin_types WHERE type_kind=? AND status='active'", (kind,)
+    ).fetchall():
+        if row["code"] != code and a in json.loads(row["aliases"] or "[]"):
+            raise ValueError(f"别名 {a!r} 已属于 {kind}/{row['code']}，不能同时映射到 {kind}/{code}")
     row = conn.execute(
         "SELECT aliases FROM twin_types WHERE type_kind=? AND code=?", (kind, code)
     ).fetchone()
     if not row:
         raise ValueError(f"unknown canonical: {kind}/{code}")
     aliases = json.loads(row["aliases"] or "[]")
-    a = alias.strip()
-    if a and a not in aliases:
+    if a not in aliases:
         aliases.append(a)
         conn.execute(
             "UPDATE twin_types SET aliases=? WHERE type_kind=? AND code=?",
@@ -150,9 +186,9 @@ def append_alias(conn: sqlite3.Connection, kind: str, code: str, alias: str) -> 
 
 def add_canonical(conn: sqlite3.Connection, kind: str, code: str, zh: str,
                   en: str = "", domain: str = "", aliases: list[str] | None = None) -> None:
-    code = (code or "").strip()
+    code = validate_code_segment(code)
     zh = (zh or "").strip()
-    if not code or not zh:
+    if not zh:
         raise ValueError("canonicalize 需要 code 与 zh")
     if taxonomy.by_code(kind, code) or any(r["code"] == code for r in custom_types(conn, kind)):
         raise ValueError(f"code 已存在: {kind}/{code}")
@@ -177,19 +213,6 @@ def upsert_pending(conn: sqlite3.Connection, kind: str, raw_value: str,
     )
     conn.commit()
     return int(cur.lastrowid)
-
-
-def set_pending_first_seen(conn: sqlite3.Connection, pending_ids: list[int],
-                           memory_id: int) -> None:
-    """write 落库拿到 mema id 后回填（normalize 时 id 尚不存在）。"""
-    if not pending_ids:
-        return
-    ph = ",".join("?" for _ in pending_ids)
-    conn.execute(
-        f"UPDATE twin_pending_values SET first_seen_memory_id=? WHERE id IN ({ph})",
-        (str(memory_id), *pending_ids),
-    )
-    conn.commit()
 
 
 def list_pending(conn: sqlite3.Connection, status: str = "pending") -> list[dict]:
@@ -255,14 +278,29 @@ def evidence_stats(conn: sqlite3.Connection, workspace: str) -> dict[str, int]:
 
 
 def mark_compiled(conn: sqlite3.Connection, workspace: str,
-                  memory_ids: list[int], version: int) -> int:
+                  memory_ids: list[int], version: int, work_type: str) -> int:
+    """对抗 review#2：必须限定 work_type——否则 submit 带错 id 会把别的类型的
+    未编译证据永久吞掉（compiled_version 还指向错误版本）。"""
     if not memory_ids:
         return 0
     ph = ",".join("?" for _ in memory_ids)
     cur = conn.execute(
         f"UPDATE twin_evidence SET status='compiled', compiled_version=?"
-        f" WHERE workspace=? AND status='uncompiled' AND memory_id IN ({ph})",
-        (version, workspace, *[int(i) for i in memory_ids]),
+        f" WHERE workspace=? AND work_type=? AND status='uncompiled' AND memory_id IN ({ph})",
+        (version, workspace, work_type, *[int(i) for i in memory_ids]),
+    )
+    conn.commit()
+    return cur.rowcount
+
+
+def backfill_evidence_codes(conn: sqlite3.Connection, kind: str,
+                            raw_value: str, code: str) -> int:
+    """resolve 裁定后回填搁浅证据（对抗 review#3）：pending 维度写入的行 code 列
+    为 NULL，对 compile/scan 不可见——按 raw 对账回填，否则创始证据静默丢失。"""
+    cur = conn.execute(
+        f"UPDATE twin_evidence SET {kind}=?"
+        f" WHERE {kind} IS NULL AND {kind}_raw=?",
+        (code, raw_value),
     )
     conn.commit()
     return cur.rowcount

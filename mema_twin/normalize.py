@@ -38,7 +38,10 @@ def _embed_nearest(kind: str, value: str, conn: Any) -> tuple[dict, float] | Non
 
 
 def normalize_value(kind: str, raw: str, conn: Any,
-                    memory_id: str | None = None) -> dict:
+                    memory_id: str | None = None,
+                    defer_pending: bool = False) -> dict:
+    """defer_pending=True 时未命中值不落 pending 表（write 用：mema 写成功后才
+    upsert，避免失败重试虚增 hit_count 留下幽灵 pending——对抗 review#14）。"""
     v = (raw or "").strip()
     if not v:
         return {"ok": False, "error": "invalid_input", "kind": kind, "reason": "empty value"}
@@ -58,6 +61,9 @@ def normalize_value(kind: str, raw: str, conn: Any,
         return {"ok": True, "kind": kind, "raw": v, "code": row["code"],
                 "label_zh": row["label_zh"], "matched_by": "embed",
                 "similarity": round(score, 4)}
+    if defer_pending:
+        return {"ok": False, "kind": kind, "raw": v, "code": None,
+                "matched_by": None, "deferred_pending": True}
     pid = db.upsert_pending(conn, kind, v, memory_id)
     return {"ok": False, "kind": kind, "raw": v, "code": None,
             "matched_by": None, "pending_id": pid}
