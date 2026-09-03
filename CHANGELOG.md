@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.2.0] — 2026-09-03
+
+M1 + M2 落地（mema-core 0.15.4 基线），37 测试绿：
+
+- **embed 近邻归一档（M1.1）**：别名 miss 后先语义近邻（阈值 0.75），命中映射
+  canonical（matched_by=embed，不落别名）；复用 mema-core ManagedEmbedder（懒加载
+  共享同一 GGUF），模型路径 env `MEMA_TWIN_EMBED_MODEL` → mema 配置 → 禁用，
+  任何失败 fail-open 走 pending。
+- **证据指针索引 twin_evidence（M1.3）**：write 成功登记 mema memory id + 三维度；
+  compile 按 id 精确 `memory read` 取全文，召回无丢失；submit 回写编译标记；
+  索引为空时退回 find 兜底（`include_content=true`，适配 0.15.4 find 索引页化）。
+- **交付任务流（M2.1，机制改造自 plan-mode-mcp）**：task_start/submit/review/pending/
+  resume/revise/recent/get + 会话 todo。可审计（任务行不可变追加 + append-only 评审表
+  + lineage）、可中断（pending）、可继续（resume 恢复 todos）；task_start/resume 注入
+  persona prompt；评审通过交付稿落 `deliverables/` 文件。
+- **定时扫描（M2.2，模式照搬 mema scan_tasks）**：`scan` 动作汇总未编译偏好/pending
+  积压/开放任务并产出建议；status 携带自消失安装提醒（7 天内跑过即不再提示）；
+  help(topic="scheduled_tasks") 与提醒同源渲染；twin 自身不起调度。
+- SKILL.md/README 更新；SKILL 安装位 `~/.zcode/skills/mema-twin/`；
+  pyproject `core` extra 钉 mema-core ≥0.15.4 + llama-cpp-python。
+
 ## [0.1.0] — 2026-09-02
 
 阶段 0 骨架（15 测试绿）：
