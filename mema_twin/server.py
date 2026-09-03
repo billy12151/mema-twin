@@ -23,7 +23,7 @@ _CONTENT_MAX_CHARS = 8000  # 偏好正文
 
 
 def _safe_ws_segment(value: str) -> str:
-    """workspace/work_type 会进文件路径（prompts/、deliverables/）：拒绝路径段
+    """桶名/canonical code 会进文件路径（prompts/、deliverables/）：拒绝路径段
     分隔符与穿越（review#11）。"""
     v = (value or "").strip()
     if not v or "/" in v or "\\" in v or ".." in v or "\x00" in v or len(v) > 64:
@@ -48,6 +48,7 @@ def twin(action: str, data: dict | None = None) -> dict:
         return {"ok": False, "error": "invalid_input",
                 "reason": f"unknown action {action!r}", "actions": sorted(_ACTIONS)}
     try:
+        _bucket()  # 入口校验：坏桶名（含路径穿越）立即打回，与动作无关
         return handler(data)
     except sink.SinkError as e:
         return {"ok": False, "error": "mema_unreachable", "reason": str(e)}
@@ -76,9 +77,10 @@ def _memory_id_of(data) -> int | None:
     return None
 
 
-def _workspace(data: dict) -> str:
-    # 默认独立 workspace（不落 mema 项目自己的空间，偏好记忆与项目记忆互不污染）
-    return _safe_ws_segment(str(data.get("workspace") or os.environ.get("MEMA_TWIN_WORKSPACE", "mema-twin")))
+def _bucket() -> str:
+    """mema 侧偏好存储桶（固定值，画像人级全局后不再随调用变化）：
+    与项目记忆隔离，去重/冲突只在偏好内部比对。仅来自 env，无 per-call 覆盖。"""
+    return _safe_ws_segment(os.environ.get("MEMA_TWIN_WORKSPACE", "mema-twin"))
 
 
 def _action_write(data: dict) -> dict:
@@ -118,7 +120,7 @@ def _action_write(data: dict) -> dict:
         content=content,
         subject=str(data.get("subject") or f"工作偏好：{dims['work_type'].get('raw')}"),
         tags=tags + user_tags,
-        workspace=_workspace(data),
+        workspace=_bucket(),
         source_ref=str(data.get("source_ref") or ""),
         event_time=_today(),
     )
@@ -126,7 +128,6 @@ def _action_write(data: dict) -> dict:
     out: dict = {"ok": ok, "memory": resp.get("data") if ok else resp,
                  "dimensions": dims, "pending": pendings}
     if ok:
-        ws = _workspace(data)
         mid = _memory_id_of(resp.get("data"))
         conn = db.connect()
         if mid is None:
@@ -135,11 +136,11 @@ def _action_write(data: dict) -> dict:
         else:
             for p in pendings:
                 p["pending_id"] = db.upsert_pending(conn, p["kind"], p["raw"], mid)
-            db.record_evidence(conn, ws, mid, dims,
+            db.record_evidence(conn, mid, dims,
                                subject=str(data.get("subject") or ""))
             out["evidence_id"] = mid
         if dims["work_type"].get("ok"):
-            active = store.get_active(conn, ws, dims["work_type"]["code"])
+            active = store.get_active(conn, dims["work_type"]["code"])
             if active and active.get("version") is not None:
                 out["hint"] = (f"{dims['work_type']['label_zh']} 已有 persona prompt v{active['version']}；"
                                "本次偏好已入池未编译，可 twin(action=\"compile\") 生成新版本"
@@ -154,11 +155,9 @@ def _action_write(data: dict) -> dict:
 
 def _action_status(data: dict) -> dict:
     conn = db.connect()
-    ws = _workspace(data)
     rows = conn.execute(
         "SELECT work_type, version, model, status, evidence_count, created_at"
-        " FROM twin_prompt_versions WHERE workspace=? ORDER BY work_type, version",
-        (ws,),
+        " FROM twin_prompt_versions ORDER BY work_type, version",
     ).fetchall()
     versions: dict = {}
     for r in rows:
@@ -168,45 +167,45 @@ def _action_status(data: dict) -> dict:
         if r["status"] == "active":
             v["active"] = r["version"]
     pending = db.list_pending(conn)
-    out = {"ok": True, "workspace": ws, "prompts": list(versions.values()),
+    out = {"ok": True, "prompts": list(versions.values()),
            "pending_count": len(pending),
-           "uncompiled": db.evidence_stats(conn, ws)}
-    notice = scan.scan_notice(ws)
+           "uncompiled": db.evidence_stats(conn)}
+    notice = scan.scan_notice()
     if notice:
         out["scan_notice"] = notice
     return out
 
 
-def _fetch_evidence_find(conn, ws: str, code: str) -> list[dict]:
+def _fetch_evidence_find(conn, code: str) -> list[dict]:
     """兜底召回：twin_evidence 索引为空时（索引落地前的存量数据）退回
     mema find 语义召回（include_content=true，0.15.4 起默认索引页无正文）。"""
     t = taxonomy.by_code("work_type", code)
     q = f"{t.zh if t else code} 用户偏好 规则 结构"
-    resp = sink.find(q, ws)
+    resp = sink.find(q, _bucket())
     if not resp.get("ok"):
         return []
     payload = resp.get("data") or {}
     results = payload.get("results") or payload.get("matches") or []
     tag = f"twin:wt:{code}"
     compiled = set()
-    for v in store.list_versions(conn, ws, code):
+    for v in store.list_versions(conn, code):
         compiled.update(v["source_memory_ids"])
     return [r for r in results
             if tag in (r.get("tags") or []) and str(r.get("id")) not in compiled]
 
 
-def _fetch_evidence(conn, ws: str, code: str) -> tuple[list[dict], list[dict]]:
+def _fetch_evidence(conn, code: str) -> tuple[list[dict], list[dict]]:
     """compile 证据：优先 twin_evidence 索引 + 按 id 精确 read 取全文（召回
     精确无丢失，M1.3）；索引为空退回 find 兜底。返回 (evidence, skipped)。"""
-    rows = db.uncompiled_evidence(conn, ws, code)
+    rows = db.uncompiled_evidence(conn, code)
     if not rows:
-        return _fetch_evidence_find(conn, ws, code), []
+        return _fetch_evidence_find(conn, code), []
     evidence: list[dict] = []
     skipped: list[dict] = []
     for r in rows:
         mid = r["memory_id"]
         try:
-            resp = sink.read_memory(mid, ws)
+            resp = sink.read_memory(mid, _bucket())
         except sink.SinkError as e:
             skipped.append({"memory_id": mid, "reason": f"mema read 失败: {e}"})
             continue
@@ -238,10 +237,9 @@ def _action_compile(data: dict) -> dict:
     if not code:
         return {"ok": False, "error": "invalid_input", "field": "work_type",
                 "reason": "unknown code；先 twin(action=\"taxonomy\") 查码或治理 pending"}
-    ws = _workspace(data)
     t = taxonomy.by_code("work_type", code)
-    active = store.get_active(conn, ws, code)
-    evidence, skipped = _fetch_evidence(conn, ws, code)
+    active = store.get_active(conn, code)
+    evidence, skipped = _fetch_evidence(conn, code)
     material = templates.compile_prompt_material(code, t.zh if t else code, active, evidence)
     out: dict = {"ok": True, "work_type": code,
                  "current_version": (active or {}).get("version"),
@@ -288,13 +286,11 @@ def _action_submit(data: dict) -> dict:
     if not code:
         conn.close()
         return {"ok": False, "error": "invalid_input", "field": "work_type", "reason": "unknown code"}
-    rec = store.create_version(conn, _workspace(data), code,
+    rec = store.create_version(conn, code,
                                str(data["prompt_md"]),
                                source_ids,
                                model=str(data.get("model") or ""))
-    marked = db.mark_compiled(conn, _workspace(data),
-                              source_ids,
-                              rec["version"], code)
+    marked = db.mark_compiled(conn, source_ids, rec["version"], code)
     conn.close()
     rec["ok"] = True
     rec["evidence_marked_compiled"] = marked
@@ -309,7 +305,7 @@ def _action_get(data: dict) -> dict:
     code = store.resolve_work_type_code(conn, wt)
     if not code:
         return {"ok": False, "error": "invalid_input", "field": "work_type", "reason": "unknown code"}
-    rec = store.get_active(conn, _workspace(data), code)
+    rec = store.get_active(conn, code)
     if not rec:
         return {"ok": True, "work_type": code, "prompt_md": None,
                 "hint": "尚无 persona prompt；可先喂历史产出物或积累偏好后 compile"}
@@ -385,10 +381,10 @@ def _action_resolve(data: dict) -> dict:
 
 # ---- 交付任务流（M2.1，机制改造自 plan-mode）----
 
-def _task_persona(conn, ws: str, code: str | None) -> dict | None:
+def _task_persona(conn, code: str | None) -> dict | None:
     if not code:
         return None
-    return store.get_active(conn, ws, code)
+    return store.get_active(conn, code)
 
 
 def _action_task_start(data: dict) -> dict:
@@ -413,16 +409,15 @@ def _action_task_start(data: dict) -> dict:
         dims[kind] = r
         if not r.get("ok"):
             pendings.append(r)
-    ws = _workspace(data)
     wt = dims["work_type"]
-    persona = _task_persona(conn, ws, wt.get("code") if wt.get("ok") else None)
+    persona = _task_persona(conn, wt.get("code") if wt.get("ok") else None)
     record = flow.insert_task(
-        workspace=ws, brief=brief, status="planning", dims=dims,
+        brief=brief, status="planning", dims=dims,
         interpreted_intent=str(data.get("interpreted_intent") or "") or None,
         persona_version=(persona or {}).get("version"),
         session_todos=flow.current_todos(data.get("session")),
     )
-    superseded = flow.supersede_open_tasks(ws, record["id"])
+    superseded = flow.supersede_open_tasks(record["id"])
     out: dict = {
         "ok": True, "task_id": record["id"], "status": "planning",
         "superseded_open_tasks": superseded,
@@ -495,7 +490,7 @@ def _action_task_review(data: dict) -> dict:
         fresh = flow.get_task(int(tid)) or record
         try:
             out["deliverable_path"] = flow.write_deliverable_file(
-                record["workspace"], int(tid), fresh.get("deliverable_md") or "")
+                int(tid), fresh.get("deliverable_md") or "")
         except OSError as e:
             out["warnings"] = [f"交付物文件写入失败：{e}"]
         out["guidance"] = (
@@ -547,9 +542,9 @@ def _action_task_resume(data: dict) -> dict:
     dims = {k: {"ok": bool(record.get(k)), "kind": k, "raw": record.get(f"{k}_raw") or "",
                 "code": record.get(k), "matched_by": "db_alias" if record.get(k) else None}
             for k in taxonomy.KINDS}
-    persona = _task_persona(conn, record["workspace"], record.get("work_type"))
+    persona = _task_persona(conn, record.get("work_type"))
     new_record = flow.insert_task(
-        workspace=record["workspace"], brief=record["brief"], status="planning",
+        brief=record["brief"], status="planning",
         dims=dims, interpreted_intent=record.get("interpreted_intent"),
         deliverable_md=record.get("deliverable_md") or "",
         reason=f"resumed from task #{tid}",
@@ -557,7 +552,7 @@ def _action_task_resume(data: dict) -> dict:
         parent_task_id=int(tid),
         session_todos=flow.current_todos(data.get("session")),
     )
-    flow.supersede_open_tasks(record["workspace"], new_record["id"])
+    flow.supersede_open_tasks(new_record["id"])
     out: dict = {
         "ok": True, "resumed_task_id": int(tid), "new_task_id": new_record["id"],
         "brief": record["brief"],
@@ -600,7 +595,7 @@ def _action_task_revise(data: dict) -> dict:
     # 对抗 review#8：修订=返工，子任务一律 planning 重走执行→提交→评审，
     # 不继承 approved（否则出现"从未被评审的已批准"审计伪造）
     child = flow.insert_task(
-        workspace=record["workspace"], brief=new_brief or record["brief"],
+        brief=new_brief or record["brief"],
         status="planning", dims=dims,
         interpreted_intent=record.get("interpreted_intent"),
         deliverable_md=deliverable or record.get("deliverable_md") or "",
@@ -612,7 +607,7 @@ def _action_task_revise(data: dict) -> dict:
     )
     flow.set_status(int(tid), "superseded", reason=f"revised by task #{child['id']}",
                     allowed_from=(record["status"],))
-    flow.supersede_open_tasks(record["workspace"], child["id"])
+    flow.supersede_open_tasks(child["id"])
     return {"ok": True, "parent_task_id": int(tid), "task_id": child["id"],
             "iteration": child["iteration"], "status": child["status"],
             "guidance": (f"已生成修订版任务 #{child['id']}（第 {child['iteration']} 次修订，"
@@ -640,7 +635,7 @@ def _action_task_close(data: dict) -> dict:
 def _action_task_recent(data: dict) -> dict:
     flow.ensure_schema()
     limit = int(data.get("limit") or 10)
-    rows = flow.recent_tasks(_workspace(data), limit)
+    rows = flow.recent_tasks(limit)
     return {"ok": True, "count": len(rows), "tasks": rows}
 
 
@@ -663,7 +658,7 @@ def _action_todo(data: dict) -> dict:
 
 
 def _action_scan(data: dict) -> dict:
-    return scan.run_scan(_workspace(data))
+    return scan.run_scan()
 
 
 def _action_help(data: dict) -> dict:
@@ -680,7 +675,7 @@ def _action_help(data: dict) -> dict:
         "ok": True,
         "actions": {
             "write": "沉淀一条工作偏好。必填 content/work_type/audience/purpose（原始值即可，产品归一）；"
-                     "可选 subject/tags/source_ref/workspace。",
+                     "可选 subject/tags/source_ref。",
             "status": "查看各 work_type 的 prompt 版本概况与 pending 数量。",
             "compile": "取编译素材包（当前版本 prompt + 未编译偏好证据 + 编译规则），"
                        "由当前会话模型编译。参数 work_type。",

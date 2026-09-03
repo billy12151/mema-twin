@@ -42,7 +42,6 @@ CREATE TABLE IF NOT EXISTS twin_pending_values(
 );
 CREATE TABLE IF NOT EXISTS twin_prompt_versions(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  workspace TEXT NOT NULL,
   work_type TEXT NOT NULL,
   version INTEGER NOT NULL,
   prompt_md TEXT NOT NULL,
@@ -52,11 +51,10 @@ CREATE TABLE IF NOT EXISTS twin_prompt_versions(
   evidence_count INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   activated_at TEXT,
-  UNIQUE(workspace, work_type, version)
+  UNIQUE(work_type, version)
 );
 CREATE TABLE IF NOT EXISTS twin_evidence(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  workspace TEXT NOT NULL,
   memory_id INTEGER NOT NULL,
   work_type TEXT,
   audience TEXT,
@@ -68,10 +66,10 @@ CREATE TABLE IF NOT EXISTS twin_evidence(
   status TEXT NOT NULL DEFAULT 'uncompiled',
   compiled_version INTEGER,
   created_at TEXT NOT NULL,
-  UNIQUE(workspace, memory_id)
+  UNIQUE(memory_id)
 );
 CREATE INDEX IF NOT EXISTS idx_twin_evidence_lookup
-  ON twin_evidence(workspace, work_type, status);
+  ON twin_evidence(work_type, status);
 """
 
 
@@ -233,7 +231,7 @@ def set_pending(conn: sqlite3.Connection, pending_id: int, status: str,
 
 # ---- twin_evidence：偏好指针索引（M1.3，本体在 mema，此处只存指针）----
 
-def record_evidence(conn: sqlite3.Connection, workspace: str, memory_id: int,
+def record_evidence(conn: sqlite3.Connection, memory_id: int,
                     dims: dict, subject: str = "") -> None:
     """write 成功后登记指针。dims 为 normalize 三维结果 dict；pending 维度
     code 列存 NULL、raw 列存原始值（pending 裁定后可靠对账回填）。"""
@@ -243,10 +241,10 @@ def record_evidence(conn: sqlite3.Connection, workspace: str, memory_id: int,
 
     conn.execute(
         "INSERT OR IGNORE INTO twin_evidence"
-        "(workspace, memory_id, work_type, audience, purpose,"
+        "(memory_id, work_type, audience, purpose,"
         " work_type_raw, audience_raw, purpose_raw, subject, created_at)"
-        " VALUES(?,?,?,?,?,?,?,?,?,?)",
-        (workspace, int(memory_id), _code("work_type"), _code("audience"),
+        " VALUES(?,?,?,?,?,?,?,?,?)",
+        (int(memory_id), _code("work_type"), _code("audience"),
          _code("purpose"),
          str((dims.get("work_type") or {}).get("raw") or ""),
          str((dims.get("audience") or {}).get("raw") or ""),
@@ -256,28 +254,26 @@ def record_evidence(conn: sqlite3.Connection, workspace: str, memory_id: int,
     conn.commit()
 
 
-def uncompiled_evidence(conn: sqlite3.Connection, workspace: str,
-                        work_type: str) -> list[dict]:
+def uncompiled_evidence(conn: sqlite3.Connection, work_type: str) -> list[dict]:
     rows = conn.execute(
         "SELECT * FROM twin_evidence"
-        " WHERE workspace=? AND work_type=? AND status='uncompiled'"
+        " WHERE work_type=? AND status='uncompiled'"
         " ORDER BY id",
-        (workspace, work_type),
+        (work_type,),
     ).fetchall()
     return [dict(r) for r in rows]
 
 
-def evidence_stats(conn: sqlite3.Connection, workspace: str) -> dict[str, int]:
+def evidence_stats(conn: sqlite3.Connection) -> dict[str, int]:
     rows = conn.execute(
         "SELECT work_type, COUNT(*) AS n FROM twin_evidence"
-        " WHERE workspace=? AND status='uncompiled' AND work_type IS NOT NULL"
+        " WHERE status='uncompiled' AND work_type IS NOT NULL"
         " GROUP BY work_type",
-        (workspace,),
     ).fetchall()
     return {r["work_type"]: int(r["n"]) for r in rows}
 
 
-def mark_compiled(conn: sqlite3.Connection, workspace: str,
+def mark_compiled(conn: sqlite3.Connection,
                   memory_ids: list[int], version: int, work_type: str) -> int:
     """对抗 review#2：必须限定 work_type——否则 submit 带错 id 会把别的类型的
     未编译证据永久吞掉（compiled_version 还指向错误版本）。"""
@@ -286,8 +282,8 @@ def mark_compiled(conn: sqlite3.Connection, workspace: str,
     ph = ",".join("?" for _ in memory_ids)
     cur = conn.execute(
         f"UPDATE twin_evidence SET status='compiled', compiled_version=?"
-        f" WHERE workspace=? AND work_type=? AND status='uncompiled' AND memory_id IN ({ph})",
-        (version, workspace, work_type, *[int(i) for i in memory_ids]),
+        f" WHERE work_type=? AND status='uncompiled' AND memory_id IN ({ph})",
+        (version, work_type, *[int(i) for i in memory_ids]),
     )
     conn.commit()
     return cur.rowcount

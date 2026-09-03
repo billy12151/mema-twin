@@ -29,20 +29,20 @@ def _dims():
 
 
 def test_start_supersedes_open_tasks(env):
-    a = flow.insert_task(workspace="ws", brief="A", status="planning", dims=_dims())
-    b = flow.insert_task(workspace="ws", brief="B", status="planning", dims=_dims())
-    assert flow.supersede_open_tasks("ws", b["id"]) == 1
+    a = flow.insert_task(brief="A", status="planning", dims=_dims())
+    b = flow.insert_task(brief="B", status="planning", dims=_dims())
+    assert flow.supersede_open_tasks(b["id"]) == 1
     assert flow.get_task(a["id"])["status"] == "superseded"
     assert flow.get_task(b["id"])["status"] == "planning"
-    # 其他 workspace 不受影响
-    c = flow.insert_task(workspace="other", brief="C", status="planning", dims=_dims())
-    d = flow.insert_task(workspace="ws", brief="D", status="planning", dims=_dims())
-    assert flow.supersede_open_tasks("ws", d["id"]) == 1  # b 仍开放，被 d 让位
-    assert flow.get_task(c["id"])["status"] == "planning"
+    # 画像人级全局：让位不分 workspace，所有开放 planning/pending 一并收口
+    c = flow.insert_task(brief="C", status="planning", dims=_dims())
+    d = flow.insert_task(brief="D", status="planning", dims=_dims())
+    assert flow.supersede_open_tasks(d["id"]) == 2  # b、c 仍开放，均被 d 让位
+    assert flow.get_task(c["id"])["status"] == "superseded"
 
 
 def test_review_lifecycle_and_audit(env):
-    t = flow.insert_task(workspace="ws", brief="T", status="planning", dims=_dims())
+    t = flow.insert_task(brief="T", status="planning", dims=_dims())
     flow.update_deliverable(t["id"], "draft v1")
     flow.set_status(t["id"], "submitted")
     r1 = flow.add_review(t["id"], "changes_requested", "结论不突出")
@@ -63,13 +63,12 @@ def test_resume_restores_todos_and_creates_new_task(env):
         {"content": "a", "status": "completed"},
         {"content": "b", "status": "pending"},
     ])
-    t = flow.insert_task(workspace="ws", brief="T", status="planning", dims=_dims(),
+    t = flow.insert_task(brief="T", status="planning", dims=_dims(),
                          session_todos=flow.current_todos("s1"))
     flow.set_status(t["id"], "approved")
     _t = flow.get_task(t["id"])
     # resume: 恢复 todos + 新建 planning
-    _t["workspace"] = "ws"
-    nt = flow.insert_task(workspace="ws", brief=_t["brief"], status="planning",
+    nt = flow.insert_task(brief=_t["brief"], status="planning",
                           dims=_dims(), parent_task_id=t["id"],
                           session_todos=_t["todos"])
     flow.set_session_todos("s2", _t["todos"])
@@ -78,9 +77,9 @@ def test_resume_restores_todos_and_creates_new_task(env):
 
 
 def test_revise_lineage(env):
-    t = flow.insert_task(workspace="ws", brief="T", status="planning", dims=_dims())
+    t = flow.insert_task(brief="T", status="planning", dims=_dims())
     flow.set_status(t["id"], "submitted")
-    child = flow.insert_task(workspace="ws", brief="T'", status="submitted",
+    child = flow.insert_task(brief="T'", status="submitted",
                              dims=_dims(), parent_task_id=t["id"], iteration=1,
                              revision_reason="用户要求补风险节")
     flow.set_status(t["id"], "superseded", reason=f"revised by task #{child['id']}")
@@ -101,8 +100,8 @@ def test_todos_validation(env):
 
 
 def test_deliverable_file_written_atomically(env):
-    t = flow.insert_task(workspace="ws", brief="T", status="planning", dims=_dims())
-    p = flow.write_deliverable_file("ws", t["id"], "# 交付稿")
+    t = flow.insert_task(brief="T", status="planning", dims=_dims())
+    p = flow.write_deliverable_file(t["id"], "# 交付稿")
     assert "task-1.md" in p
     from pathlib import Path
     assert Path(p).read_text(encoding="utf-8") == "# 交付稿"
@@ -119,7 +118,7 @@ def test_meta_roundtrip(env):
 def test_resubmit_after_changes_requested(env):
     """打回后同任务再提交（干跑发现的死路修复）：rejected 可再 submit。"""
     from mema_twin import server
-    t = flow.insert_task(workspace="ws", brief="T", status="planning", dims=_dims())
+    t = flow.insert_task(brief="T", status="planning", dims=_dims())
     r1 = server.twin("task_submit", {"task_id": t["id"],
                                      "deliverable_md": "v1"})
     assert r1["ok"] and r1["round"] == 1
@@ -137,7 +136,7 @@ def test_resubmit_after_changes_requested(env):
 def test_submit_snapshots_session_todos_for_resume(env):
     from mema_twin import server
     flow.set_session_todos("sx", [{"content": "a", "status": "pending"}])
-    t = flow.insert_task(workspace="ws", brief="T", status="planning", dims=_dims())
+    t = flow.insert_task(brief="T", status="planning", dims=_dims())
     r = server.twin("task_submit", {"task_id": t["id"], "deliverable_md": "d",
                                     "session": "sx"})
     assert r["ok"]
@@ -147,12 +146,12 @@ def test_submit_snapshots_session_todos_for_resume(env):
 
 def test_supersede_spares_submitted(env):
     """review#6：submitted 在等评审，开新任务不得把它变成不可评审的 superseded。"""
-    t1 = flow.insert_task(workspace="ws", brief="待评审", status="submitted", dims=_dims())
-    t2 = flow.insert_task(workspace="ws", brief="新任务", status="planning", dims=_dims())
-    assert flow.supersede_open_tasks("ws", t2["id"]) == 0  # submitted 不让位
+    t1 = flow.insert_task(brief="待评审", status="submitted", dims=_dims())
+    t2 = flow.insert_task(brief="新任务", status="planning", dims=_dims())
+    assert flow.supersede_open_tasks(t2["id"]) == 0  # submitted 不让位
     assert flow.get_task(t1["id"])["status"] == "submitted"
-    t3 = flow.insert_task(workspace="ws", brief="又一个", status="planning", dims=_dims())
-    assert flow.supersede_open_tasks("ws", t3["id"]) == 1  # planning 照常让位
+    t3 = flow.insert_task(brief="又一个", status="planning", dims=_dims())
+    assert flow.supersede_open_tasks(t3["id"]) == 1  # planning 照常让位
     assert flow.get_task(t2["id"])["status"] == "superseded"
 
 
@@ -160,7 +159,7 @@ def test_resubmit_from_empty_session_keeps_todos(env):
     """review#5：空会话重提不清掉任务行里已快照的 todos。"""
     from mema_twin import server
     flow.set_session_todos("s-full", [{"content": "a", "status": "pending"}])
-    t = flow.insert_task(workspace="ws", brief="T", status="planning", dims=_dims())
+    t = flow.insert_task(brief="T", status="planning", dims=_dims())
     server.twin("task_submit", {"task_id": t["id"], "deliverable_md": "v1", "session": "s-full"})
     server.twin("task_review", {"task_id": t["id"], "verdict": "changes_requested"})
     r = server.twin("task_submit", {"task_id": t["id"], "deliverable_md": "v2", "session": "s-empty"})

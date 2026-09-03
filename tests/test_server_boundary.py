@@ -37,11 +37,13 @@ def test_malformed_source_memory_ids():
     assert r2.get("ok") is False
 
 
-def test_workspace_path_traversal_rejected():
-    # 空串走 or 回退默认 workspace，属合法；只拦真正带分隔符/穿越的值
-    for bad in ("../escape", "a/b", "a\\b", "x" * 65):
-        r = server.twin("status", {"workspace": bad})
+def test_bucket_env_traversal_rejected(monkeypatch):
+    """workspace 覆盖入口已删；桶名只来自 env，坏值必须拦在入口。"""
+    for bad in ("../escape", "a/b", "x" * 65):
+        monkeypatch.setenv("MEMA_TWIN_WORKSPACE", bad)
+        r = server.twin("status", {})
         assert r.get("ok") is False and r.get("error") == "invalid_input", bad
+    monkeypatch.setenv("MEMA_TWIN_WORKSPACE", "mema-twin")
 
 
 def test_write_rejects_oversized_dimension():
@@ -76,10 +78,10 @@ def test_mark_compiled_scopes_work_type(tmp_path, monkeypatch):
                "audience": {"ok": True, "code": "leadership", "raw": "y"},
                "purpose": {"ok": True, "code": "sync_info", "raw": "z"}}
     dims_pp = {**dims_wr, "work_type": {"ok": True, "code": "presentation", "raw": "p"}}
-    twin_db.record_evidence(conn, "ws", 101, dims_wr)
-    twin_db.record_evidence(conn, "ws", 102, dims_pp)
-    assert twin_db.mark_compiled(conn, "ws", [101, 102], 1, "presentation") == 1
-    assert twin_db.uncompiled_evidence(conn, "ws", "work_report")[0]["memory_id"] == 101
+    twin_db.record_evidence(conn, 101, dims_wr)
+    twin_db.record_evidence(conn, 102, dims_pp)
+    assert twin_db.mark_compiled(conn, [101, 102], 1, "presentation") == 1
+    assert twin_db.uncompiled_evidence(conn, "work_report")[0]["memory_id"] == 101
 
 
 def test_resolve_backfills_stranded_evidence(tmp_path, monkeypatch):
@@ -89,15 +91,15 @@ def test_resolve_backfills_stranded_evidence(tmp_path, monkeypatch):
     conn = twin_db.connect()
     r = normalize.normalize_value("work_type", "灵能审计年报", conn, defer_pending=True)
     assert r.get("deferred_pending")
-    twin_db.record_evidence(conn, "ws", 55, {
+    twin_db.record_evidence(conn, 55, {
         "work_type": r, "audience": {"ok": True, "code": "self", "raw": "自己"},
         "purpose": {"ok": True, "code": "record_evidence", "raw": "存证"}})
-    assert twin_db.uncompiled_evidence(conn, "ws", "xianxia_doc") == []
+    assert twin_db.uncompiled_evidence(conn, "xianxia_doc") == []
     # canonicalize 后回填
     twin_db.add_canonical(conn, "work_type", "xianxia_doc", "玄幻设定文档")
     n = twin_db.backfill_evidence_codes(conn, "work_type", "灵能审计年报", "xianxia_doc")
     assert n == 1
-    rows = twin_db.uncompiled_evidence(conn, "ws", "xianxia_doc")
+    rows = twin_db.uncompiled_evidence(conn, "xianxia_doc")
     assert [x["memory_id"] for x in rows] == [55]
 
 
@@ -155,7 +157,7 @@ def test_write_no_ghost_pending_on_sink_failure(monkeypatch):
 
 def test_revise_child_is_planning_not_forged_approved():
     """对抗#8：approved 任务的修订子任务回 planning，不伪造审计。"""
-    t = flow.insert_task(workspace="ws", brief="T", status="approved", dims={})
+    t = flow.insert_task(brief="T", status="approved", dims={})
     flow.add_review(t["id"], "approved", "r1")
     r = server.twin("task_revise", {"task_id": t["id"], "revision_reason": "返工"})
     assert r["ok"] and r["status"] == "planning"
@@ -166,20 +168,20 @@ def test_revise_child_is_planning_not_forged_approved():
 
 def test_resume_allows_planning():
     """对抗#8：进行中任务可续作。"""
-    t = flow.insert_task(workspace="ws", brief="T", status="planning", dims={})
+    t = flow.insert_task(brief="T", status="planning", dims={})
     r = server.twin("task_resume", {"task_id": t["id"], "session": "s"})
     assert r["ok"] and r["new_task_id"]
 
 
 def test_task_close_action():
-    t = flow.insert_task(workspace="ws", brief="T", status="planning", dims={})
+    t = flow.insert_task(brief="T", status="planning", dims={})
     r = server.twin("task_close", {"task_id": t["id"], "reason": "不做"})
     assert r["ok"] and flow.get_task(t["id"])["status"] == "superseded"
 
 
 def test_submit_after_supersede_rejected():
     """对抗#4：被让位的任务不能再 submit 复活。"""
-    t = flow.insert_task(workspace="ws", brief="T", status="planning", dims={})
+    t = flow.insert_task(brief="T", status="planning", dims={})
     flow.set_status(t["id"], "superseded", reason="让位")
     r = server.twin("task_submit", {"task_id": t["id"], "deliverable_md": "x"})
     assert r.get("ok") is False

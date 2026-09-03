@@ -34,7 +34,6 @@ _REVISABLE_STATUSES = ("approved", "submitted", "pending")
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS twin_tasks(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  workspace TEXT NOT NULL,
   work_type TEXT,
   audience TEXT,
   purpose TEXT,
@@ -67,7 +66,7 @@ CREATE TABLE IF NOT EXISTS twin_task_reviews(
   created_at TEXT NOT NULL,
   UNIQUE(task_id, round)
 );
-CREATE INDEX IF NOT EXISTS idx_twin_tasks_ws_status ON twin_tasks(workspace, status);
+CREATE INDEX IF NOT EXISTS idx_twin_tasks_status ON twin_tasks(status);
 CREATE TABLE IF NOT EXISTS twin_meta(
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -152,7 +151,7 @@ def _row_to_dict(row: sqlite3.Row | None) -> dict | None:
     return d
 
 
-def insert_task(*, workspace: str, brief: str, status: str,
+def insert_task(*, brief: str, status: str,
                 dims: dict | None = None, interpreted_intent: str | None = None,
                 deliverable_md: str = "", reason: str | None = None,
                 persona_version: int | None = None,
@@ -168,12 +167,12 @@ def insert_task(*, workspace: str, brief: str, status: str,
     conn = db.connect()
     try:
         cur = conn.execute(
-            "INSERT INTO twin_tasks(workspace, work_type, audience, purpose,"
+            "INSERT INTO twin_tasks(work_type, audience, purpose,"
             " work_type_raw, audience_raw, purpose_raw, brief, interpreted_intent,"
             " deliverable_md, todos, status, reason, client, agent_id,"
             " persona_version, created_at, parent_task_id, iteration, revision_reason)"
-            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (workspace, code("work_type"), code("audience"), code("purpose"),
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (code("work_type"), code("audience"), code("purpose"),
              str((dims.get("work_type") or {}).get("raw") or ""),
              str((dims.get("audience") or {}).get("raw") or ""),
              str((dims.get("purpose") or {}).get("raw") or ""),
@@ -240,13 +239,13 @@ def set_status(task_id: int, status: str, reason: str | None = None,
         conn.close()
 
 
-def supersede_open_tasks(workspace: str, except_id: int) -> int:
+def supersede_open_tasks(except_id: int) -> int:
     conn = db.connect()
     try:
         cur = conn.execute(
             f"UPDATE twin_tasks SET status='superseded', decided_at=?"
-            f" WHERE workspace=? AND id!=? AND status IN ({','.join('?' for _ in _SUPERSEDE_STATUSES)})",
-            (db.now_iso(), workspace, int(except_id), *_SUPERSEDE_STATUSES),
+            f" WHERE id!=? AND status IN ({','.join('?' for _ in _SUPERSEDE_STATUSES)})",
+            (db.now_iso(), int(except_id), *_SUPERSEDE_STATUSES),
         )
         conn.commit()
         return cur.rowcount
@@ -286,26 +285,26 @@ def set_deliverable_path(task_id: int, path: str) -> None:
         conn.close()
 
 
-def open_tasks(workspace: str, limit: int = 100) -> list[dict]:
-    """scan 用：直接按状态查（走 idx_twin_tasks_ws_status），不翻 recent 截断（review#13）。"""
+def open_tasks(limit: int = 100) -> list[dict]:
+    """scan 用：直接按状态查（走 idx_twin_tasks_status），不翻 recent 截断（review#13）。"""
     conn = db.connect()
     try:
         rows = conn.execute(
-            f"SELECT * FROM twin_tasks WHERE workspace=? AND status IN"
+            f"SELECT * FROM twin_tasks WHERE status IN"
             f" ({','.join('?' for _ in _OPEN_STATUSES)}) ORDER BY id LIMIT ?",
-            (workspace, *_OPEN_STATUSES, max(1, min(int(limit), 500))),
+            (*_OPEN_STATUSES, max(1, min(int(limit), 500))),
         ).fetchall()
         return [_row_to_dict(r) for r in rows]
     finally:
         conn.close()
 
 
-def recent_tasks(workspace: str, limit: int = 10) -> list[dict]:
+def recent_tasks(limit: int = 10) -> list[dict]:
     conn = db.connect()
     try:
         rows = conn.execute(
-            "SELECT * FROM twin_tasks WHERE workspace=? ORDER BY id DESC LIMIT ?",
-            (workspace, max(1, min(int(limit), 100))),
+            "SELECT * FROM twin_tasks ORDER BY id DESC LIMIT ?",
+            (max(1, min(int(limit), 100)),),
         ).fetchall()
         return [_row_to_dict(r) for r in rows]
     finally:
@@ -366,9 +365,8 @@ def deliverables_dir() -> Path:
     return d
 
 
-def write_deliverable_file(workspace: str, task_id: int,
-                           deliverable_md: str) -> str:
-    path = deliverables_dir() / workspace / f"task-{int(task_id)}.md"
+def write_deliverable_file(task_id: int, deliverable_md: str) -> str:
+    path = deliverables_dir() / f"task-{int(task_id)}.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(deliverable_md, encoding="utf-8")

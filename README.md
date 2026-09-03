@@ -41,8 +41,8 @@ live in twin's own SQLite with a file mirror for fallback and human review.
   twin 自有 `twin.sqlite3` 存枚举注册表、待裁长尾、prompt 版本、证据指针索引
   （twin_evidence 只存 mema 记忆 id 与维度标签，不存正文；compile 按 id 精确
   read 取全文，召回无丢失）。
-- **DB 为准、文件镜像降级**：`prompts/<workspace>/<work_type>/vN.md` + `active.md`；
-  交付任务评审通过后交付稿落 `deliverables/<workspace>/task-N.md`。
+- **DB 为准、文件镜像降级**：`prompts/<work_type>/vN.md` + `active.md`；
+  交付任务评审通过后交付稿落 `deliverables/task-N.md`。画像人级全局，本地无 workspace 维度。
 - **编译执行者＝宿主 Agent**（twin 不自配模型）：compile 返回素材包，会话模型编译后
   submit 回库，版本记录来源 memory ids 与编译模型。建议在强模型会话中执行编译。
 - **交付任务流（机制改造自 plan-mode）**：可审计（任务行不可变追加 + append-only
@@ -97,7 +97,7 @@ MCP 配置见 `examples/zcode.mcp.json`。环境变量：
 | `MEMA_TWIN_DELIVERABLES_DIR` | `<项目>/deliverables` | 交付物文件目录 |
 | `MEMA_TWIN_MEMA_URL` | `http://127.0.0.1:8000/mcp` | mema HTTP MCP 端点 |
 | `MEMA_TWIN_CLIENT_ID` / `MEMA_TWIN_AGENT_ID` | `zcode` / `mema-twin` | mema 必需的身份头。twin 作为**子 agent** 范式：client 标识宿主客户端（zcode/kimi/...），agent_id 固定为 `mema-twin` 标识写入者——按 agent_id 一次查出所有经 twin 落库的偏好，配合 `twin:*` 标签双保险 |
-| `MEMA_TWIN_WORKSPACE` | `mema-twin` | 偏好存储桶。画像默认**全局**（能力跟人不跟项目），此值仅用于在 mema 里与项目记忆隔离；一般不改，需单独画像的场景才用 `data.workspace` 显式分桶 |
+| `MEMA_TWIN_WORKSPACE` | `mema-twin` | mema 侧偏好**存储桶**（画像人级全局，twin 本地无 workspace 维度）。此值仅决定偏好记忆在 mema 里与项目记忆隔离；只来自本 env，无 per-call 覆盖 |
 | `MEMA_TWIN_EMBED_MODEL` | mema 配置的模型 | embed 档 GGUF 路径；解析顺序：本变量 → mema 配置 `embedding.model_path` → 禁用（fail-open 走 pending） |
 
 embed 档依赖：`uv pip install -e ".[core]"`（mema-core ≥0.15.4 提供 ManagedEmbedder；

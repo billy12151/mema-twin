@@ -51,15 +51,10 @@ def _parse_iso(ts: str | None) -> _dt.datetime | None:
     return t
 
 
-def _scan_key(workspace: str) -> str:
-    return f"last_scan_at:{workspace}"
-
-
-def scan_notice(workspace: str) -> dict | None:
-    """scan 过期/从未跑过时返回提醒载荷；近期跑过返回 None（提醒自消失）。
-    last_scan_at 按 workspace 隔离（review#8）。"""
+def scan_notice() -> dict | None:
+    """scan 过期/从未跑过时返回提醒载荷；近期跑过返回 None（提醒自消失）。"""
     flow.ensure_schema()
-    last = _parse_iso(flow.get_meta(_scan_key(workspace)))
+    last = _parse_iso(flow.get_meta("last_scan_at"))
     if last is not None and (_dt.datetime.now(_dt.timezone.utc) - last).days < SCAN_FRESH_DAYS:
         return None
     return {
@@ -70,16 +65,16 @@ def scan_notice(workspace: str) -> dict | None:
     }
 
 
-def run_scan(workspace: str) -> dict:
+def run_scan() -> dict:
     """执行扫描并刷新 last_scan_at。返回给 Agent 的建议素材。"""
     flow.ensure_schema()
     conn = db.connect()
     try:
-        uncompiled = db.evidence_stats(conn, workspace)
+        uncompiled = db.evidence_stats(conn)
         pending = db.list_pending(conn)
     finally:
         conn.close()
-    open_rows = flow.open_tasks(workspace)
+    open_rows = flow.open_tasks()
 
     suggestions: list[str] = []
     total_uncompiled = sum(uncompiled.values())
@@ -99,9 +94,9 @@ def run_scan(workspace: str) -> dict:
             f"有 {len(open_rows)} 个未收口的交付任务（{ids}）；"
             "继续执行或评审收口（task_review），长期不动的用 task_close 显式关闭")
 
-    flow.set_meta(_scan_key(workspace), db.now_iso())
+    flow.set_meta("last_scan_at", db.now_iso())
     return {
-        "ok": True, "workspace": workspace,
+        "ok": True,
         "uncompiled_total": total_uncompiled,
         "uncompiled_by_work_type": uncompiled,
         "pending_count": len(pending),

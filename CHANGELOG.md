@@ -20,6 +20,11 @@ M1 + M2 落地（mema-core 0.15.4 基线），两轮 review（常规+对抗性�
   help(topic="scheduled_tasks") 与提醒同源渲染；twin 自身不起调度。
 - SKILL.md/README 更新；SKILL 安装位 `~/.zcode/skills/mema-twin/`；
   pyproject `core` extra 钉 mema-core ≥0.15.4 + llama-cpp-python。
+- **画像人级全局（2026-09-03 定案）**：twin 三表（twin_evidence/twin_prompt_versions/
+  twin_tasks）删除 workspace 列与 `data.workspace` 覆盖入口，镜像/交付路径降层
+  （`prompts/<work_type>/`、`deliverables/task-N.md`），scan 提醒全局唯一；mema 侧
+  保留 `mema-twin` 存储桶（治理查全 + 偏好内去重/冲突 + 不污染项目空间），agent-id
+  定案为子 agent 范式（client 识宿主、agent_id 识写入者）。
 
 ## [0.1.0] — 2026-09-02
 
