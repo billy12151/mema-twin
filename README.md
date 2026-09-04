@@ -100,8 +100,7 @@ MCP 客户端配置（Claude Desktop / Cursor / 通用 stdio 均可）：
       "command": "mema-twin",
       "env": {
         "MEMA_TWIN_MEMA_URL": "http://127.0.0.1:8000/mcp",
-        "MEMA_TWIN_CLIENT_ID": "你的客户端名",
-        "MEMA_TWIN_WORKSPACE": "mema-twin"
+        "MEMA_TWIN_CLIENT_ID": "你的客户端名"
       }
     }
   }
@@ -130,13 +129,13 @@ uv venv && uv pip install -e ".[test]"
 | `MEMA_TWIN_MEMA_URL` | `http://127.0.0.1:8000/mcp` | mema HTTP MCP 端点 |
 | `MEMA_TWIN_TRANSPORT` | `stdio` | `stdio`（默认，单机零运维）或 `http`（多 Agent 共接，mema 同款形态） |
 | `MEMA_TWIN_HTTP_HOST` / `MEMA_TWIN_HTTP_PORT` | `127.0.0.1` / `8765` | http 模式监听地址；端点 `/mcp`，无状态直调（免 initialize） |
-| `MEMA_TWIN_CLIENT_ID` | `zcode` | twin 调 mema 的 client 头，标识宿主客户端（zcode/kimi/...）。多 Agent 共接 http 时，write 可带 `data.client` 覆盖，归属各自宿主。agent_id 写死为 `mema-twin`（子 agent 范式，产品内部标识不暴露）——按 agent_id 一次查出所有经 twin 落库的偏好，配合 `twin:*` 标签双保险 |
-| `MEMA_TWIN_WORKSPACE` | `mema-twin` | mema 侧偏好**存储桶**（画像人级全局，twin 本地无 workspace 维度）。此值仅决定偏好记忆在 mema 里与项目记忆隔离；只来自本 env，无 per-call 覆盖 |
+| `MEMA_TWIN_CLIENT_ID` | `zcode` | 宿主客户端默认身份（zcode/kimi/...）。http 模式下连接头 `X-Mema-Client` 是权威身份（`data.client` 只能与头一致或省略，不一致打回，堵跨宿主冒充）；stdio 无头时 `data.client` > 本 env。agent_id 与 mema 侧偏好存储桶均写死为 `mema-twin`（子 agent 范式）——按 agent_id 一次查出所有经 twin 落库的偏好，配合 `twin:*` 标签双保险 |
 
 ## 多 Agent 共接（http 模式）
 
 mema 天然多 Agent，twin 同样支持：一个 http 进程服务所有客户端，偏好汇入同一
-人级画像，`data.client` 区分写入来源（mema 侧审计可见）：
+人级画像，各宿主用 MCP 配置里的 `X-Mema-Client` 头标识自己（twin 透传给 mema
+审计可见，mema 同款形态）：
 
 ```bash
 MEMA_TWIN_TRANSPORT=http .venv/bin/mema-twin   # 监听 127.0.0.1:8765/mcp
@@ -144,11 +143,16 @@ MEMA_TWIN_TRANSPORT=http .venv/bin/mema-twin   # 监听 127.0.0.1:8765/mcp
 
 ```json
 { "mcpServers": { "mema-twin": {
-    "type": "http", "url": "http://127.0.0.1:8765/mcp" } } }
+    "type": "http", "url": "http://127.0.0.1:8765/mcp",
+    "headers": { "X-Mema-Client": "zcode" } } } }
 ```
 
-各 Agent 调 `twin.write` 时带 `"client": "kimi"`（例）即可；会话 todo / 任务流
-按 `session` 参数隔离。stdio 模式不受影响，仍是单机默认。
+宿主身份规则：http 模式下 `X-Mema-Client` 头是权威（mema `_identity_mismatch`
+同款语义——`data.client` 与头不一致直接打回，`data.client` 只在 stdio 无头时
+作为显式归属手段，兜底回落 `MEMA_TWIN_CLIENT_ID` env）。脏值/重复头/非字符串
+一律打回，不会静默记错归属；http 绑定仅允许 loopback（X-Mema-* 头不是鉴权，
+对外暴露等于开放身份伪造）。会话 todo / 任务流按 `session` 参数隔离。stdio 模式
+不受影响，仍是单机默认。
 
 ## 开发
 

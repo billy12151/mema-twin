@@ -8,7 +8,9 @@ task_recent/task_get/todo，机制改造自 plan-mode：可审计、可中断、
 from __future__ import annotations
 
 import datetime as _dt
+import ipaddress
 import os
+import re
 import sqlite3
 
 from mcp.server.fastmcp import FastMCP
@@ -20,15 +22,8 @@ mcp = FastMCP("mema-twin", stateless_http=True)  # http 模式免 initialize 直
 _KIND_PREFIX = {"work_type": "wt", "audience": "au", "purpose": "pu"}
 _RAW_MAX_CHARS = 200      # 三维度值：短枚举说法
 _CONTENT_MAX_CHARS = 8000  # 偏好正文
-
-
-def _safe_ws_segment(value: str) -> str:
-    """桶名/canonical code 会进文件路径（prompts/、deliverables/）：拒绝路径段
-    分隔符与穿越（review#11）。"""
-    v = (value or "").strip()
-    if not v or "/" in v or "\\" in v or ".." in v or "\x00" in v or len(v) > 64:
-        raise ValueError(f"unsafe path segment: {value!r}")
-    return v
+_BUCKET = "mema-twin"  # mema 侧偏好存储桶：固定值（画像人级全局），0.3.3 起写死、无 env 覆盖
+_CLIENT_RE = re.compile(r"^[A-Za-z0-9._:@-]{1,64}$")  # 与 mema X-Mema-Client 同款字符集
 
 
 @mcp.tool()
@@ -48,7 +43,9 @@ def twin(action: str, data: dict | None = None) -> dict:
         return {"ok": False, "error": "invalid_input",
                 "reason": f"unknown action {action!r}", "actions": sorted(_ACTIONS)}
     try:
-        _bucket()  # 入口校验：坏桶名（含路径穿越）立即打回，与动作无关
+        # 入口统一校验宿主身份：脏/重复头、脏或不一致 data.client 无论动作
+        # 立即打回（fail-fast，也避免 handler 先写 pending 再炸留幽灵行）
+        _effective_client(data)
         return handler(data)
     except sink.SinkError as e:
         return {"ok": False, "error": "mema_unreachable", "reason": str(e)}
@@ -78,9 +75,68 @@ def _memory_id_of(data) -> int | None:
 
 
 def _bucket() -> str:
-    """mema 侧偏好存储桶（固定值，画像人级全局后不再随调用变化）：
-    与项目记忆隔离，去重/冲突只在偏好内部比对。仅来自 env，无 per-call 覆盖。"""
-    return _safe_ws_segment(os.environ.get("MEMA_TWIN_WORKSPACE", "mema-twin"))
+    """mema 侧偏好存储桶（0.3.3 起写死，保留函数以免调用点散改）。"""
+    return _BUCKET
+
+
+def _request_client() -> str | None:
+    """http 模式下读宿主连接自带的 X-Mema-Client 头（mema 同款取头方式）；
+    stdio/直调无活跃请求 → None（回落 env 默认）。带头即校验：脏值/重复头
+    打回而非静默忽略。"""
+    get_context = getattr(mcp, "get_context", None)
+    if not callable(get_context):
+        return None
+    try:
+        request = get_context().request_context.request
+        headers = getattr(request, "headers", None)
+    except (AttributeError, LookupError, TypeError, ValueError):
+        # stdio/无活跃请求（core request_identity 同款兜底）
+        return None
+    if headers is None:
+        return None
+    # 与 mema core 一致：重复头打回而非静默取第一个
+    getlist = getattr(headers, "getlist", None)
+    if callable(getlist):
+        values = list(getlist("X-Mema-Client"))
+        if len(values) > 1:
+            raise ValueError("X-Mema-Client 头必须恰好一个（收到多个）")
+    value = headers.get("x-mema-client")
+    if value is None:
+        # 非 starlette Headers 对象可能大小写敏感，casefold 兜底一次（core 同款）
+        for key, candidate in headers.items():
+            if str(key).casefold() == "x-mema-client":
+                value = candidate
+                break
+    if value is None:
+        return None
+    value = str(value)
+    if not _CLIENT_RE.fullmatch(value):
+        # 未 strip 的值不做修正直接拒（mema 同款：normalized != value 即拒）
+        raise ValueError(
+            f"X-Mema-Client 头非法（仅 [A-Za-z0-9._:@-]、≤64 字符、无首尾空白）: {value[:32]!r}")
+    return value
+
+
+def _effective_client(data: dict) -> str | None:
+    """本次调用的宿主身份。http 头存在时头是权威（连接身份），显式 data.client
+    只能与头一致或省略（mema _identity_mismatch 同款语义，堵跨宿主冒充）；
+    stdio 无头时 data.client > env。非字符串/带首尾空白一律打回。"""
+    header = _request_client()
+    raw = data.get("client")
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return header
+    if not isinstance(raw, str):
+        raise ValueError(f"client 必须是字符串，收到 {type(raw).__name__}")
+    if raw != raw.strip():
+        raise ValueError(f"client 非法（含首尾空白）: {raw[:32]!r}")
+    if not _CLIENT_RE.fullmatch(raw):
+        raise ValueError(
+            f"client 非法（仅 [A-Za-z0-9._:@-]、≤64 字符）: {raw[:32]!r}")
+    if header is not None and raw != header:
+        raise ValueError(
+            f"client 与连接身份不一致：X-Mema-Client 头为 {header!r}，data.client 为 {raw!r}"
+            "（http 模式下以连接头为准，请移除 data.client 或保持一致）")
+    return raw
 
 
 def _action_write(data: dict) -> dict:
@@ -128,7 +184,7 @@ def _action_write(data: dict) -> dict:
         workspace=_bucket(),
         source_ref=str(data.get("source_ref") or ""),
         event_time=_today(),
-        client=str(data.get("client") or "") or None,  # 多 Agent：client 身份随调用
+        client=_effective_client(data),  # 多 Agent：显式 data.client > 头 > env
     )
     ok = bool(resp.get("ok"))
     out: dict = {"ok": ok, "memory": resp.get("data") if ok else resp,
@@ -187,12 +243,12 @@ def _action_status(data: dict) -> dict:
     return out
 
 
-def _fetch_evidence_find(conn, code: str) -> list[dict]:
+def _fetch_evidence_find(conn, code: str, client: str | None = None) -> list[dict]:
     """兜底召回：twin_evidence 索引为空时（索引落地前的存量数据）退回
     mema find 语义召回（include_content=true，0.15.4 起默认索引页无正文）。"""
     t = taxonomy.by_code("work_type", code)
     q = f"{t.zh if t else code} 用户偏好 规则 结构"
-    resp = sink.find(q, _bucket())
+    resp = sink.find(q, _bucket(), client=client)
     if not resp.get("ok"):
         return []
     payload = resp.get("data") or {}
@@ -205,7 +261,7 @@ def _fetch_evidence_find(conn, code: str) -> list[dict]:
             if tag in (r.get("tags") or []) and str(r.get("id")) not in compiled]
 
 
-def _fetch_evidence(conn, code: str) -> tuple[list[dict], list[dict]]:
+def _fetch_evidence(conn, code: str, client: str | None = None) -> tuple[list[dict], list[dict]]:
     """compile 证据：优先 twin_evidence 索引 + 按 id 精确 read 取全文（召回
     精确无丢失，M1.3）；索引为空退回 find 兜底。返回 (evidence, skipped)。"""
     rows = db.uncompiled_evidence(conn, code)
@@ -216,7 +272,7 @@ def _fetch_evidence(conn, code: str) -> tuple[list[dict], list[dict]]:
     for r in rows:
         mid = r["memory_id"]
         try:
-            resp = sink.read_memory(mid, _bucket())
+            resp = sink.read_memory(mid, _bucket(), client=client)
         except sink.SinkError as e:
             skipped.append({"memory_id": mid, "reason": f"mema read 失败: {e}"})
             continue
@@ -239,6 +295,17 @@ def _fetch_evidence(conn, code: str) -> tuple[list[dict], list[dict]]:
     return evidence, skipped
 
 
+def _is_loopback_host(host: str) -> bool:
+    """http 绑定白名单：localhost / 127.x / ::1（core request_identity 同款）。"""
+    normalized = str(host or "").strip().strip("[]").casefold()
+    if normalized == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
 def _action_compile(data: dict) -> dict:
     wt = str(data.get("work_type") or "").strip()
     if not wt:
@@ -251,7 +318,7 @@ def _action_compile(data: dict) -> dict:
                     "reason": "unknown code；先 twin(action=\"taxonomy\") 查码或治理 pending"}
         t = taxonomy.by_code("work_type", code)
         active = store.get_active(conn, code)
-        evidence, skipped = _fetch_evidence(conn, code)
+        evidence, skipped = _fetch_evidence(conn, code, client=_effective_client(data))
     finally:
         conn.close()
     material = templates.compile_prompt_material(code, t.zh if t else code, active, evidence)
@@ -441,6 +508,7 @@ def _action_task_start(data: dict) -> dict:
         brief=brief, status="planning", dims=dims,
         interpreted_intent=str(data.get("interpreted_intent") or "") or None,
         persona_version=(persona or {}).get("version"),
+        client=_effective_client(data),
         session_todos=flow.current_todos(data.get("session")),
     )
     superseded = flow.supersede_open_tasks(record["id"])
@@ -579,6 +647,7 @@ def _action_task_resume(data: dict) -> dict:
         reason=f"resumed from task #{tid}",
         persona_version=(persona or {}).get("version"),
         parent_task_id=int(tid),
+        client=_effective_client(data),
         session_todos=flow.current_todos(data.get("session")),
     )
     flow.supersede_open_tasks(new_record["id"])
@@ -632,6 +701,7 @@ def _action_task_revise(data: dict) -> dict:
         persona_version=record.get("persona_version"),
         parent_task_id=int(tid), iteration=int(record.get("iteration") or 0) + 1,
         revision_reason=revision_reason or None,
+        client=_effective_client(data),
         session_todos=flow.current_todos(data.get("session")),
     )
     flow.set_status(int(tid), "superseded", reason=f"revised by task #{child['id']}",
@@ -716,7 +786,8 @@ def _action_help(data: dict) -> dict:
             "pending": "列待裁长尾。参数 status（默认 pending）。",
             "resolve": "治理待裁值。pending_id + decision ∈ map(带 code)|canonicalize(带 new_type{code,zh,en,domain})|reject。",
             "task_start": "开工建档（流程注入点）。必填 brief/work_type（audience/purpose 可选，原始值即可）；"
-                          "返回该工作性质的 persona prompt 与前置清单，开放任务自动让位。",
+                          "返回该工作性质的 persona prompt 与前置清单，开放任务自动让位。"
+                          "client 字段同 write（http 共接时头已带则无需传）。",
             "task_submit": "提交交付稿待评审。必填 task_id/deliverable_md；可带 todos/session。",
             "task_review": "评审裁定（append-only 审计）。task_id + verdict ∈ approved|changes_requested，"
                            "notes 记意见；approved 落交付物文件，changes 走 rejected 并提示沉淀偏好。",
@@ -765,14 +836,27 @@ def main() -> None:
     """传输：stdio（默认，单机零运维）或 http（多 Agent 共接，mema 同款形态）。
 
     MEMA_TWIN_TRANSPORT=stdio|http；http 时 MEMA_TWIN_HTTP_HOST/PORT 可调
-    （默认 127.0.0.1:8765），端点 /mcp 无状态直调，多 Agent 各带自己的
-    client 身份（write 可传 data.client，mema 侧审计可辨来源）。
+    （默认 127.0.0.1:8765，仅允许 loopback 绑定——X-Mema-Client 头不是鉴权，
+    非 loopback 暴露=任何人可伪造宿主身份，mema core 同款拒绝）。端点 /mcp
+    无状态直调。多宿主各在自己 MCP 配置里带 X-Mema-Client 头（stdio 无头时
+    data.client > env）。
     """
+    # 启动即校验 env 兜底身份，脏值清晰报错退出，不留给运行期中途炸
+    try:
+        sink._env_client()
+    except ValueError as e:
+        raise SystemExit(f"启动失败：{e}")
     transport = (os.environ.get("MEMA_TWIN_TRANSPORT") or "stdio").strip().lower()
     if transport in ("stdio", ""):
         mcp.run()
     elif transport in ("http", "streamable-http"):
-        mcp.settings.host = os.environ.get("MEMA_TWIN_HTTP_HOST", "127.0.0.1")
+        host = os.environ.get("MEMA_TWIN_HTTP_HOST", "127.0.0.1").strip()
+        if not _is_loopback_host(host):
+            raise SystemExit(
+                f"MEMA_TWIN_HTTP_HOST={host!r} 非 loopback 地址被拒绝："
+                "X-Mema-Client 头不是鉴权，对外暴露等于开放身份伪造（mema core 同款策略）。"
+                "twin 设计为本机单用户服务。")
+        mcp.settings.host = host
         mcp.settings.port = int(os.environ.get("MEMA_TWIN_HTTP_PORT", "8765"))
         mcp.run(transport="streamable-http")
     else:

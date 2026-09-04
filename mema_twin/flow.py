@@ -17,7 +17,7 @@ import os
 import sqlite3
 from pathlib import Path
 
-from . import db
+from . import db, sink
 
 # 状态机（与 plan-mode 同构）：planning → submitted → approved/rejected；
 # pending = 审批被搁置（中断未决）；superseded = 被新任务让位（历史保留）。
@@ -156,7 +156,7 @@ def insert_task(*, brief: str, status: str,
                 deliverable_md: str = "", reason: str | None = None,
                 persona_version: int | None = None,
                 parent_task_id: int | None = None, iteration: int = 0,
-                revision_reason: str | None = None,
+                revision_reason: str | None = None, client: str | None = None,
                 session_todos: list[dict] | None = None) -> dict:
     dims = dims or {}
 
@@ -179,7 +179,7 @@ def insert_task(*, brief: str, status: str,
              brief, interpreted_intent, deliverable_md or "",
              json.dumps(session_todos or [], ensure_ascii=False), status,
              (reason or "").strip() or None,
-             os.environ.get("MEMA_TWIN_CLIENT_ID", "zcode"),
+             client or sink._env_client(),
              "mema-twin",
              persona_version, db.now_iso(), parent_task_id, iteration,
              (revision_reason or "").strip() or None),

@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.3.3] — 2026-09-04
+
+- **偏好存储桶写死**：`workspace=mema-twin` 从 env（`MEMA_TWIN_WORKSPACE`）改为代码
+  常量，env 一律无效（含坏值，不再打回）。与 0.3.2 的 agent-id 写死对齐：身份类
+  配置（agent_id/workspace）产品内定，部署类配置（URL/TRANSPORT/CLIENT_ID）才留 env。
+- **client 头透传（http 多宿主归属）**：http 模式下 twin 读宿主连接自带的
+  `X-Mema-Client` 头并透传给 mema（取头方式与 mema core `request_identity` 同款）。
+  头是权威身份：`data.client` 只能与头一致或省略，不一致打回 invalid_input
+  （mema `_identity_mismatch` 同款语义，堵跨宿主冒充）；stdio 无头时
+  `data.client` > `MEMA_TWIN_CLIENT_ID` env。脏值/重复头/非字符串/含首尾空白
+  一律打回；http 绑定仅允许 loopback（非 loopback 拒绝启动）；
+  `MEMA_TWIN_CLIENT_ID` env 脏值启动即报错退出。
+- 建档归属修正：`task_start` / `task_resume` / `task_revise` 建（子）任务时 client
+  取当前调用者（头/显式），不再恒落 env 默认。resume/revise 子任务记录当前执行者
+  而非继承原档。注意归属覆盖建档动作；`task_submit` / `task_review` 行本身不带
+  client（评审审计沿任务链关联建档者）。
+- `sink.find` / `sink.read_memory` 增加 `client` 透传参数（compile 兜底召回路径同样
+  携带真实宿主身份）。
+- examples：stdio 模板删 `MEMA_TWIN_WORKSPACE`；新增 `examples/zcode.http.mcp.json`
+  （`type=http` + `X-Mema-Client` 头模板）。
+- 两轮 review（常规+对抗性）修复：入口统一身份校验（fail-fast）、重复头/空白/类型混淆拒绝、loopback 绑定守卫、env 启动校验、compile 路径身份统一。测试 58→75 全绿。
+
+## [0.3.2] — 2026-09-03
+
+- **agent-id 写死**：`X-Mema-Agent-Id` 从 env（`MEMA_TWIN_AGENT_ID`）改为模块常量
+  `mema-twin`（子 agent 范式：client 标识宿主、agent_id 标识写入者）。用户侧配置面
+  只剩 client；env 从代码/文档/配置模板全部移除。
+
+## [0.3.1] — 2026-09-03
+
+- **http 传输（多 Agent 共接）**：`MEMA_TWIN_TRANSPORT=stdio|http`（默认 stdio）；
+  http 时 `MEMA_TWIN_HTTP_HOST/PORT`（默认 `127.0.0.1:8765`），端点 `/mcp` 无状态
+  直调（免 initialize，mema 同款形态）。`twin.write` 的 `data.client` 可覆盖默认
+  client，共接宿主归属分离（agent_id 恒 `mema-twin`）。
+
 ## [0.3.0] — 2026-09-03
 
 - **移除 embed 近邻归一档**：归一收敛为 精确/别名 → pending 两档。候选枚举仅 53 项，
