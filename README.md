@@ -101,7 +101,6 @@ MCP 客户端配置（Claude Desktop / Cursor / 通用 stdio 均可）：
       "env": {
         "MEMA_TWIN_MEMA_URL": "http://127.0.0.1:8000/mcp",
         "MEMA_TWIN_CLIENT_ID": "你的客户端名",
-        "MEMA_TWIN_AGENT_ID": "mema-twin",
         "MEMA_TWIN_WORKSPACE": "mema-twin"
       }
     }
@@ -131,7 +130,7 @@ uv venv && uv pip install -e ".[test]"
 | `MEMA_TWIN_MEMA_URL` | `http://127.0.0.1:8000/mcp` | mema HTTP MCP 端点 |
 | `MEMA_TWIN_TRANSPORT` | `stdio` | `stdio`（默认，单机零运维）或 `http`（多 Agent 共接，mema 同款形态） |
 | `MEMA_TWIN_HTTP_HOST` / `MEMA_TWIN_HTTP_PORT` | `127.0.0.1` / `8765` | http 模式监听地址；端点 `/mcp`，无状态直调（免 initialize） |
-| `MEMA_TWIN_CLIENT_ID` / `MEMA_TWIN_AGENT_ID` | `zcode` / `mema-twin` | mema 必需的身份头。twin 作为**子 agent** 范式：client 标识宿主客户端（zcode/kimi/...），agent_id 固定为 `mema-twin` 标识写入者——按 agent_id 一次查出所有经 twin 落库的偏好，配合 `twin:*` 标签双保险。多 Agent 共接 http 时，write 可带 `data.client` 覆盖默认 client，归属各自宿主 |
+| `MEMA_TWIN_CLIENT_ID` | `zcode` | twin 调 mema 的 client 头，标识宿主客户端（zcode/kimi/...）。多 Agent 共接 http 时，write 可带 `data.client` 覆盖，归属各自宿主。agent_id 写死为 `mema-twin`（子 agent 范式，产品内部标识不暴露）——按 agent_id 一次查出所有经 twin 落库的偏好，配合 `twin:*` 标签双保险 |
 | `MEMA_TWIN_WORKSPACE` | `mema-twin` | mema 侧偏好**存储桶**（画像人级全局，twin 本地无 workspace 维度）。此值仅决定偏好记忆在 mema 里与项目记忆隔离；只来自本 env，无 per-call 覆盖 |
 
 ## 多 Agent 共接（http 模式）

@@ -62,3 +62,9 @@ M1 + M2 落地（mema-core 0.15.4 基线），两轮 review（常规+对抗性�
 - **多 Agent 身份**：`twin.write` 新增可选 `data.client`，随调用覆盖发往 mema 的
   `X-Mema-Client`（agent_id 仍固定 `mema-twin` 子 agent 范式）——多个宿主 Agent 共接
   一个 http twin 时，写入归属在 mema 审计中可辨。
+
+## [0.3.2] — 2026-09-03
+
+- **agent-id 写死不暴露**：`X-Mema-Agent-Id: mema-twin` 成为产品内部常量（子 agent
+  范式的写入者标识），移除 `MEMA_TWIN_AGENT_ID` 环境变量；用户可配置面只剩
+  `MEMA_TWIN_CLIENT_ID`（多 Agent 差异只走 client / `data.client`）。

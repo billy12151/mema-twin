@@ -180,7 +180,7 @@ def insert_task(*, brief: str, status: str,
              json.dumps(session_todos or [], ensure_ascii=False), status,
              (reason or "").strip() or None,
              os.environ.get("MEMA_TWIN_CLIENT_ID", "zcode"),
-             os.environ.get("MEMA_TWIN_AGENT_ID", "mema-twin"),
+             "mema-twin",
              persona_version, db.now_iso(), parent_task_id, iteration,
              (revision_reason or "").strip() or None),
         )
