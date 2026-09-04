@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import urllib.error
 import urllib.request
 
@@ -21,15 +22,26 @@ def _base_url() -> str:
 
 
 # twin 的 mema 身份：agent_id 写死（子 agent 范式，产品内部标识，不对用户暴露，
-# 多 Agent 差异只走 client）；client 随调用传入（write 的 data.client），未传回落 env。
+# 多 Agent 差异只走 client）；client 随调用传入（显式 data.client > http 头，见
+# server._effective_client），未传回落 env。env 是配置面兜底层，脏值就地打回
+# invalid_input 而非把脏头发给 mema 再吃 JSON-RPC 拒绝。
 _AGENT_ID = "mema-twin"
+_CLIENT_RE = re.compile(r"^[A-Za-z0-9._:@-]{1,64}$")
+
+
+def _env_client() -> str:
+    value = os.environ.get("MEMA_TWIN_CLIENT_ID", "zcode").strip()
+    if not _CLIENT_RE.fullmatch(value):
+        raise ValueError(
+            f"MEMA_TWIN_CLIENT_ID env 非法（仅 [A-Za-z0-9._:@-]、≤64 字符）: {value[:32]!r}")
+    return value
 
 
 def _headers(client: str | None = None) -> dict[str, str]:
     return {
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
-        "X-Mema-Client": client or os.environ.get("MEMA_TWIN_CLIENT_ID", "zcode"),
+        "X-Mema-Client": client or _env_client(),
         "X-Mema-Agent-Id": _AGENT_ID,
     }
 
@@ -88,18 +100,20 @@ def remember(content: str, subject: str, tags: list[str], workspace: str,
     return _call("memory", {"action": "remember", "data": data}, client=client)
 
 
-def find(query: str, workspace: str | None = None, include_content: bool = True) -> dict:
+def find(query: str, workspace: str | None = None, include_content: bool = True,
+         client: str | None = None) -> dict:
     """语义召回。0.15.4 起 find 默认是索引页（无 content），需要正文时必须
     传 include_content=true——compile 兜底路径靠它取偏好全文。"""
     data: dict = {"query": query, "include_content": include_content}
     if workspace:
         data["workspace"] = workspace
-    return _call("memory", {"action": "find", "data": data})
+    return _call("memory", {"action": "find", "data": data}, client=client)
 
 
-def read_memory(memory_id: int, workspace: str | None = None) -> dict:
+def read_memory(memory_id: int, workspace: str | None = None,
+                client: str | None = None) -> dict:
     """按 id 精确取单条全文（0.14+ read 始终返回完整原文）。"""
     data: dict = {"memory_id": int(memory_id)}
     if workspace:
         data["workspace"] = workspace
-    return _call("memory", {"action": "read", "data": data})
+    return _call("memory", {"action": "read", "data": data}, client=client)

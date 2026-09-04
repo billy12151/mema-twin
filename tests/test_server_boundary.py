@@ -37,13 +37,22 @@ def test_malformed_source_memory_ids():
     assert r2.get("ok") is False
 
 
-def test_bucket_env_traversal_rejected(monkeypatch):
-    """workspace 覆盖入口已删；桶名只来自 env，坏值必须拦在入口。"""
-    for bad in ("../escape", "a/b", "x" * 65):
-        monkeypatch.setenv("MEMA_TWIN_WORKSPACE", bad)
-        r = server.twin("status", {})
-        assert r.get("ok") is False and r.get("error") == "invalid_input", bad
-    monkeypatch.setenv("MEMA_TWIN_WORKSPACE", "mema-twin")
+def test_workspace_env_no_longer_overrides(monkeypatch):
+    """0.3.3 起桶名写死常量：MEMA_TWIN_WORKSPACE（含坏值）一律无效，
+    发往 mema 的 workspace 恒为 mema-twin。"""
+    from mema_twin import sink
+    captured = {}
+
+    def fake_remember(content, subject, tags, workspace, source_ref="", event_time="", client=None):
+        captured["workspace"] = workspace
+        return {"ok": True, "data": {"id": 1}}
+    monkeypatch.setattr(sink, "remember", fake_remember)
+    for env_value in ("../escape", "a/b", "other-bucket"):
+        monkeypatch.setenv("MEMA_TWIN_WORKSPACE", env_value)
+        r = server.twin("write", {"content": "c", "work_type": "周报",
+                                  "audience": "高层", "purpose": "同步"})
+        assert r.get("ok") is True, env_value
+    assert captured["workspace"] == "mema-twin"
 
 
 def test_write_rejects_oversized_dimension():
@@ -221,3 +230,193 @@ def test_write_client_identity_passthrough(monkeypatch):
     r2 = server.twin("write", {"content": "c", "work_type": "周报", "audience": "高层",
                                "purpose": "同步"})
     assert r2["ok"] and captured["client"] is None  # 回落 env 默认
+
+
+# ---- 0.3.3 client 头透传 ----
+
+class _FakeCtx:
+    """模拟 FastMCP 工具执行时的请求上下文。headers 用真 starlette Headers
+    （大小写不敏感、有 getlist）；本 SDK 版本的 Headers() 只吃 dict，重复头
+    场景绕过构造器直接填内部 _list（raw bytes pairs）。"""
+
+    def __init__(self, header_pairs=None, no_request=False):
+        from starlette.datastructures import Headers as _H
+        h = _H({})
+        if header_pairs:
+            h._list = [(str(k).lower().encode("latin-1"), str(v).encode("latin-1"))
+                       for k, v in header_pairs]
+        rc = type("RC", (), {})()
+        rc.request = None if no_request else type("R", (), {"headers": h})()
+        self.request_context = rc
+
+
+def test_request_client_reads_header(monkeypatch):
+    monkeypatch.setattr(server.mcp, "get_context", lambda: _FakeCtx([("x-mema-client", "kimi")]))
+    assert server._request_client() == "kimi"
+
+
+def test_request_client_no_header_is_none(monkeypatch):
+    monkeypatch.setattr(server.mcp, "get_context", lambda: _FakeCtx())
+    assert server._request_client() is None
+
+
+def test_request_client_no_request_is_none(monkeypatch):
+    # stdio/直调：无活跃请求（request 为 None / get_context 抛错）都回落 None
+    monkeypatch.setattr(server.mcp, "get_context", lambda: _FakeCtx(no_request=True))
+    assert server._request_client() is None
+
+    def _boom():
+        raise LookupError("no session")
+    monkeypatch.setattr(server.mcp, "get_context", _boom)
+    assert server._request_client() is None
+
+
+def test_request_client_rejects_dirty_header(monkeypatch):
+    monkeypatch.setattr(server.mcp, "get_context", lambda: _FakeCtx([("x-mema-client", "bad client!")]))
+    r = server.twin("write", {"content": "c", "work_type": "周报",
+                              "audience": "高层", "purpose": "同步"})
+    assert r.get("ok") is False and r.get("error") == "invalid_input"
+
+
+def test_write_client_header_authoritative(monkeypatch):
+    """对抗#1：http 头存在时头是权威——data.client 不一致打回（堵跨宿主冒充），
+    一致或省略放行。"""
+    from mema_twin import sink
+    captured = {}
+
+    def fake_call(name, arguments, client=None):
+        captured["client"] = client
+        return {"ok": True, "data": {"id": 7}}
+    monkeypatch.setattr(sink, "_call", fake_call)
+    monkeypatch.setattr(server.mcp, "get_context",
+                        lambda: _FakeCtx([("x-mema-client", "kimi")]))
+    r = server.twin("write", {"content": "c", "work_type": "周报", "audience": "高层",
+                              "purpose": "同步", "client": "zcode"})
+    assert r.get("ok") is False and r.get("error") == "invalid_input" and "不一致" in r.get("reason", "")
+    r2 = server.twin("write", {"content": "c", "work_type": "周报", "audience": "高层",
+                               "purpose": "同步", "client": "kimi"})
+    assert r2["ok"] and captured["client"] == "kimi"
+    r3 = server.twin("write", {"content": "c", "work_type": "周报",
+                               "audience": "高层", "purpose": "同步"})
+    assert r3["ok"] and captured["client"] == "kimi"
+
+
+def test_write_rejects_dirty_explicit_client():
+    r = server.twin("write", {"content": "c", "work_type": "周报",
+                              "audience": "高层", "purpose": "同步",
+                              "client": "no spaces"})
+    assert r.get("ok") is False and r.get("error") == "invalid_input"
+
+
+def test_task_start_records_header_client(monkeypatch):
+    """http 多宿主：task_start 建档的 client 来自头，不落 env 默认。"""
+    monkeypatch.setattr(server.mcp, "get_context",
+                        lambda: _FakeCtx([("x-mema-client", "kimi")]))
+    r = server.twin("task_start", {"brief": "B", "work_type": "周报"})
+    assert r.get("ok") is True
+    record = flow.get_task(r["task_id"])
+    assert record["client"] == "kimi"
+
+
+def test_dirty_explicit_client_rejected_at_entry():
+    """轮1#1：脏 data.client 在入口打回，任何动作（含 task_start）不留幽灵 pending。"""
+    r = server.twin("task_start", {"brief": "B", "work_type": "周报",
+                                   "client": "bad client!"})
+    assert r.get("ok") is False and r.get("error") == "invalid_input"
+    conn = db.connect()
+    n = conn.execute("SELECT COUNT(*) AS c FROM twin_pending_values").fetchone()["c"]
+    conn.close()
+    assert n == 0
+
+
+def test_sink_env_client_dirty_rejected(monkeypatch):
+    """轮1#9：MEMA_TWIN_CLIENT_ID env 脏值就地打回，不发脏头给 mema。"""
+    from mema_twin import sink
+    monkeypatch.setenv("MEMA_TWIN_CLIENT_ID", "has space")
+    with pytest.raises(ValueError):
+        sink._headers()
+    monkeypatch.setenv("MEMA_TWIN_CLIENT_ID", "zcode")
+    assert sink._headers()["X-Mema-Client"] == "zcode"
+
+
+# ---- 第二轮对抗性 review 回归（0.3.3）----
+
+def test_stdio_explicit_client_still_works(monkeypatch):
+    """对抗#1 正例：stdio 无头时 data.client 仍是唯一显式归属手段。"""
+    from mema_twin import sink
+    captured = {}
+
+    def fake_call(name, arguments, client=None):
+        captured["client"] = client
+        return {"ok": True, "data": {"id": 7}}
+    monkeypatch.setattr(sink, "_call", fake_call)
+    r = server.twin("write", {"content": "c", "work_type": "周报", "audience": "高层",
+                              "purpose": "同步", "client": "kimi"})
+    assert r["ok"] and captured["client"] == "kimi"
+
+
+def test_client_type_and_whitespace_rejected(monkeypatch):
+    """对抗#6：非字符串 / 首尾空白一律打回，不做 str() 修正。"""
+    for bad in ({"x": 1}, 123, True):
+        r = server.twin("write", {"content": "c", "work_type": "周报",
+                                  "audience": "高层", "purpose": "同步", "client": bad})
+        assert r.get("ok") is False and r.get("error") == "invalid_input", bad
+    r2 = server.twin("write", {"content": "c", "work_type": "周报",
+                               "audience": "高层", "purpose": "同步", "client": " kimi "})
+    assert r2.get("ok") is False and "空白" in r2.get("reason", "")
+
+
+def test_header_whitespace_rejected(monkeypatch):
+    """对抗#6：头值带首尾空白直接拒（mema 同款，不 strip 修正）。"""
+    monkeypatch.setattr(server.mcp, "get_context",
+                        lambda: _FakeCtx([("x-mema-client", " kimi ")]))
+    r = server.twin("status", {})
+    assert r.get("ok") is False and r.get("error") == "invalid_input"
+
+
+def test_duplicate_header_rejected(monkeypatch):
+    """对抗#8：重复头（含大小写变体）打回。"""
+    monkeypatch.setattr(server.mcp, "get_context",
+                        lambda: _FakeCtx([("X-Mema-Client", "a"), ("x-mema-client", "b")]))
+    r = server.twin("status", {})
+    assert r.get("ok") is False and "恰好一个" in r.get("reason", "")
+
+
+def test_header_case_insensitive(monkeypatch):
+    """对抗#8：大小写变体头也能读到（starlette Headers 天然不敏感）。"""
+    monkeypatch.setattr(server.mcp, "get_context",
+                        lambda: _FakeCtx([("X-MEMA-CLIENT", "kimi")]))
+    assert server._request_client() == "kimi"
+
+
+def test_main_rejects_non_loopback_host(monkeypatch):
+    """对抗#2：非 loopback 绑定拒绝（X-Mema-Client 头不是鉴权）。"""
+    monkeypatch.setenv("MEMA_TWIN_TRANSPORT", "http")
+    monkeypatch.setenv("MEMA_TWIN_HTTP_HOST", "0.0.0.0")
+    import pytest
+    with pytest.raises(SystemExit, match="loopback"):
+        server.main()
+    monkeypatch.setenv("MEMA_TWIN_HTTP_HOST", "192.168.1.5")
+    with pytest.raises(SystemExit, match="loopback"):
+        server.main()
+    calls = []
+    monkeypatch.setattr(server.mcp, "run", lambda transport=None: calls.append(transport))
+    for ok_host in ("127.0.0.1", "localhost", "::1"):
+        monkeypatch.setenv("MEMA_TWIN_HTTP_HOST", ok_host)
+        server.main()
+    assert calls == ["streamable-http"] * 3
+
+
+def test_main_rejects_dirty_env_client(monkeypatch):
+    """对抗#7：脏 MEMA_TWIN_CLIENT_ID 启动即拒，不留运行期中途炸。"""
+    monkeypatch.setenv("MEMA_TWIN_CLIENT_ID", "has space")
+    import pytest
+    with pytest.raises(SystemExit):
+        server.main()
+
+
+def test_flow_env_fallback_validated(monkeypatch):
+    """对抗#3：twin_tasks.client 的 env 回落同样过校验。"""
+    monkeypatch.setenv("MEMA_TWIN_CLIENT_ID", "dirty value")
+    r = server.twin("task_start", {"brief": "B", "work_type": "周报"})
+    assert r.get("ok") is False and r.get("error") == "invalid_input"
