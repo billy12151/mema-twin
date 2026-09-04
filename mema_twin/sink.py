@@ -20,15 +20,17 @@ def _base_url() -> str:
     return os.environ.get("MEMA_TWIN_MEMA_URL", "http://127.0.0.1:8000/mcp")
 
 
+# twin 的 mema 身份：agent_id 写死（子 agent 范式，产品内部标识，不对用户暴露，
+# 多 Agent 差异只走 client）；client 随调用传入（write 的 data.client），未传回落 env。
+_AGENT_ID = "mema-twin"
+
+
 def _headers(client: str | None = None) -> dict[str, str]:
-    """身份头：agent_id 固定 mema-twin（子 agent 范式，写入者标识）；
-    client 标识调用方宿主——多 Agent 共接 HTTP 时随调用传入（write 的 data.client），
-    未传回落 env。"""
     return {
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
         "X-Mema-Client": client or os.environ.get("MEMA_TWIN_CLIENT_ID", "zcode"),
-        "X-Mema-Agent-Id": os.environ.get("MEMA_TWIN_AGENT_ID", "mema-twin"),
+        "X-Mema-Agent-Id": _AGENT_ID,
     }
 
 
