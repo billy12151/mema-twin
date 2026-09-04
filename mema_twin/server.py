@@ -15,7 +15,7 @@ from mcp.server.fastmcp import FastMCP
 
 from . import db, flow, normalize, scan, sink, store, taxonomy, templates
 
-mcp = FastMCP("mema-twin")
+mcp = FastMCP("mema-twin", stateless_http=True)  # http 模式免 initialize 直调（mema 同款）
 
 _KIND_PREFIX = {"work_type": "wt", "audience": "au", "purpose": "pu"}
 _RAW_MAX_CHARS = 200      # 三维度值：短枚举说法
@@ -128,6 +128,7 @@ def _action_write(data: dict) -> dict:
         workspace=_bucket(),
         source_ref=str(data.get("source_ref") or ""),
         event_time=_today(),
+        client=str(data.get("client") or "") or None,  # 多 Agent：client 身份随调用
     )
     ok = bool(resp.get("ok"))
     out: dict = {"ok": ok, "memory": resp.get("data") if ok else resp,
@@ -704,7 +705,7 @@ def _action_help(data: dict) -> dict:
         "actions": {
             "write": "沉淀一条工作偏好。必填 content/work_type/audience/purpose"
                      "（先 taxonomy 查清单选码；清单无合适项给原始值，进 pending 由用户裁定）；"
-                     "可选 subject/tags/source_ref。",
+                     "可选 subject/tags/source_ref/client（多 Agent 共接时 client 填宿主标识，如 kimi/jinleai）。",
             "status": "查看各 work_type 的 prompt 版本概况与 pending 数量。",
             "compile": "取编译素材包（当前版本 prompt + 未编译偏好证据 + 编译规则），"
                        "由当前会话模型编译。参数 work_type。",
@@ -761,7 +762,21 @@ _ACTIONS = {
 
 
 def main() -> None:
-    mcp.run()
+    """传输：stdio（默认，单机零运维）或 http（多 Agent 共接，mema 同款形态）。
+
+    MEMA_TWIN_TRANSPORT=stdio|http；http 时 MEMA_TWIN_HTTP_HOST/PORT 可调
+    （默认 127.0.0.1:8765），端点 /mcp 无状态直调，多 Agent 各带自己的
+    client 身份（write 可传 data.client，mema 侧审计可辨来源）。
+    """
+    transport = (os.environ.get("MEMA_TWIN_TRANSPORT") or "stdio").strip().lower()
+    if transport in ("stdio", ""):
+        mcp.run()
+    elif transport in ("http", "streamable-http"):
+        mcp.settings.host = os.environ.get("MEMA_TWIN_HTTP_HOST", "127.0.0.1")
+        mcp.settings.port = int(os.environ.get("MEMA_TWIN_HTTP_PORT", "8765"))
+        mcp.run(transport="streamable-http")
+    else:
+        raise SystemExit(f"unknown MEMA_TWIN_TRANSPORT {transport!r}（期望 stdio|http）")
 
 
 if __name__ == "__main__":

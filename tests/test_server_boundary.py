@@ -129,7 +129,7 @@ def test_write_strips_twin_namespace_tags(monkeypatch):
     captured = {}
     from mema_twin import server as srv, sink
 
-    def fake_remember(content, subject, tags, workspace, source_ref="", event_time=""):
+    def fake_remember(content, subject, tags, workspace, source_ref="", event_time="", client=None):
         captured["tags"] = tags
         return {"ok": True, "data": {"id": 1}}
     monkeypatch.setattr(sink, "remember", fake_remember)
@@ -185,3 +185,39 @@ def test_submit_after_supersede_rejected():
     flow.set_status(t["id"], "superseded", reason="让位")
     r = server.twin("task_submit", {"task_id": t["id"], "deliverable_md": "x"})
     assert r.get("ok") is False
+
+
+# ---- HTTP 传输与多 Agent 身份 ----
+
+def test_main_transport_selection(monkeypatch):
+    """stdio 默认；http 走 streamable-http 并设 host/port；坏值报错。"""
+    calls = []
+    monkeypatch.setattr(server.mcp, "run", lambda transport=None: calls.append(transport))
+    server.main()
+    assert calls == [None]
+    monkeypatch.setenv("MEMA_TWIN_TRANSPORT", "http")
+    monkeypatch.setenv("MEMA_TWIN_HTTP_PORT", "9001")
+    server.main()
+    assert calls == [None, "streamable-http"]
+    assert server.mcp.settings.port == 9001
+    monkeypatch.setenv("MEMA_TWIN_TRANSPORT", "bogus")
+    import pytest
+    with pytest.raises(SystemExit):
+        server.main()
+
+
+def test_write_client_identity_passthrough(monkeypatch):
+    """多 Agent：write 的 data.client 决定发往 mema 的 X-Mema-Client。"""
+    from mema_twin import sink
+    captured = {}
+
+    def fake_call(name, arguments, client=None):
+        captured["client"] = client
+        return {"ok": True, "data": {"id": 7}}
+    monkeypatch.setattr(sink, "_call", fake_call)
+    r = server.twin("write", {"content": "c", "work_type": "周报", "audience": "高层",
+                              "purpose": "同步", "client": "kimi"})
+    assert r["ok"] and captured["client"] == "kimi"
+    r2 = server.twin("write", {"content": "c", "work_type": "周报", "audience": "高层",
+                               "purpose": "同步"})
+    assert r2["ok"] and captured["client"] is None  # 回落 env 默认
