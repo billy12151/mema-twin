@@ -20,11 +20,14 @@ def _base_url() -> str:
     return os.environ.get("MEMA_TWIN_MEMA_URL", "http://127.0.0.1:8000/mcp")
 
 
-def _headers() -> dict[str, str]:
+def _headers(client: str | None = None) -> dict[str, str]:
+    """身份头：agent_id 固定 mema-twin（子 agent 范式，写入者标识）；
+    client 标识调用方宿主——多 Agent 共接 HTTP 时随调用传入（write 的 data.client），
+    未传回落 env。"""
     return {
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
-        "X-Mema-Client": os.environ.get("MEMA_TWIN_CLIENT_ID", "zcode"),
+        "X-Mema-Client": client or os.environ.get("MEMA_TWIN_CLIENT_ID", "zcode"),
         "X-Mema-Agent-Id": os.environ.get("MEMA_TWIN_AGENT_ID", "mema-twin"),
     }
 
@@ -41,13 +44,13 @@ def _parse_sse(body: str) -> dict:
         raise SinkError(f"SSE data 帧不是合法 JSON: {e}") from e
 
 
-def _call(name: str, arguments: dict) -> dict:
+def _call(name: str, arguments: dict, client: str | None = None) -> dict:
     payload = json.dumps({
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": {"name": name, "arguments": arguments},
     })
     req = urllib.request.Request(_base_url(), data=payload.encode("utf-8"),
-                                 headers=_headers(), method="POST")
+                                 headers=_headers(client), method="POST")
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             body = resp.read().decode("utf-8")
@@ -72,14 +75,15 @@ def _call(name: str, arguments: dict) -> dict:
 
 
 def remember(content: str, subject: str, tags: list[str], workspace: str,
-             source_ref: str = "", event_time: str = "") -> dict:
+             source_ref: str = "", event_time: str = "",
+             client: str | None = None) -> dict:
     data = {"content": content, "subject": subject, "tags": tags,
             "source_type": "agent_generated", "workspace": workspace}
     if source_ref:
         data["source_ref"] = source_ref
     if event_time:
         data["event_time"] = event_time
-    return _call("memory", {"action": "remember", "data": data})
+    return _call("memory", {"action": "remember", "data": data}, client=client)
 
 
 def find(query: str, workspace: str | None = None, include_content: bool = True) -> dict:

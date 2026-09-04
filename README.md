@@ -129,8 +129,27 @@ uv venv && uv pip install -e ".[test]"
 | `MEMA_TWIN_PROMPTS_DIR` | `<项目>/prompts` | prompt 文件镜像目录 |
 | `MEMA_TWIN_DELIVERABLES_DIR` | `<项目>/deliverables` | 交付物文件目录 |
 | `MEMA_TWIN_MEMA_URL` | `http://127.0.0.1:8000/mcp` | mema HTTP MCP 端点 |
-| `MEMA_TWIN_CLIENT_ID` / `MEMA_TWIN_AGENT_ID` | `zcode` / `mema-twin` | mema 必需的身份头。twin 作为**子 agent** 范式：client 标识宿主客户端（zcode/kimi/...），agent_id 固定为 `mema-twin` 标识写入者——按 agent_id 一次查出所有经 twin 落库的偏好，配合 `twin:*` 标签双保险 |
+| `MEMA_TWIN_TRANSPORT` | `stdio` | `stdio`（默认，单机零运维）或 `http`（多 Agent 共接，mema 同款形态） |
+| `MEMA_TWIN_HTTP_HOST` / `MEMA_TWIN_HTTP_PORT` | `127.0.0.1` / `8765` | http 模式监听地址；端点 `/mcp`，无状态直调（免 initialize） |
+| `MEMA_TWIN_CLIENT_ID` / `MEMA_TWIN_AGENT_ID` | `zcode` / `mema-twin` | mema 必需的身份头。twin 作为**子 agent** 范式：client 标识宿主客户端（zcode/kimi/...），agent_id 固定为 `mema-twin` 标识写入者——按 agent_id 一次查出所有经 twin 落库的偏好，配合 `twin:*` 标签双保险。多 Agent 共接 http 时，write 可带 `data.client` 覆盖默认 client，归属各自宿主 |
 | `MEMA_TWIN_WORKSPACE` | `mema-twin` | mema 侧偏好**存储桶**（画像人级全局，twin 本地无 workspace 维度）。此值仅决定偏好记忆在 mema 里与项目记忆隔离；只来自本 env，无 per-call 覆盖 |
+
+## 多 Agent 共接（http 模式）
+
+mema 天然多 Agent，twin 同样支持：一个 http 进程服务所有客户端，偏好汇入同一
+人级画像，`data.client` 区分写入来源（mema 侧审计可见）：
+
+```bash
+MEMA_TWIN_TRANSPORT=http .venv/bin/mema-twin   # 监听 127.0.0.1:8765/mcp
+```
+
+```json
+{ "mcpServers": { "mema-twin": {
+    "type": "http", "url": "http://127.0.0.1:8765/mcp" } } }
+```
+
+各 Agent 调 `twin.write` 时带 `"client": "kimi"`（例）即可；会话 todo / 任务流
+按 `session` 参数隔离。stdio 模式不受影响，仍是单机默认。
 
 ## 开发
 
