@@ -326,6 +326,9 @@ def _action_compile(data: dict) -> dict:
                  "current_version": (active or {}).get("version"),
                  "evidence_count": len(evidence), "material": material,
                  "note": templates.STRONG_MODEL_NOTE,
+                 "session_note": ("本会话仅用于编译，完成 submit 后即弃："
+                                  "编译会话内新旧 persona 同屏，勿在同一会话继续交付任务；"
+                                  "后续任务开新会话 task_start 取新版 persona"),
                  "next": "用当前会话模型按素材包编译出 prompt_md 后，调 "
                          "twin(action=\"submit\", data={work_type, prompt_md, source_memory_ids, model})"}
     if skipped:
@@ -377,6 +380,9 @@ def _action_submit(data: dict) -> dict:
     rec["ok"] = True
     rec["supersedes"] = rec.pop("superseded_version")  # 落版即裁决：本版取代的旧 active 版本
     rec["evidence_marked_compiled"] = marked
+    rec["session_note"] = ("编译会话到此收尾即弃，后续任务开新会话 task_start 注入新版；"
+                           f"若继续用本会话，下次 task_start 传 have_persona_version={rec['version']}"
+                           " 即不再重复注入全文")
     return rec
 
 
@@ -872,7 +878,7 @@ def _action_help(data: dict) -> dict:
                      "可选 subject/tags/source_ref/client（多 Agent 共接时 client 填宿主标识，如 kimi/jinleai）。",
             "status": "查看各 work_type 的 prompt 版本概况与 pending 数量。",
             "compile": "取编译素材包（旧版本 prompt 编译参考 + 未编译偏好证据 + 编译规则），"
-                       "由当前会话模型编译。参数 work_type。",
+                       "由当前会话模型编译；独立会话执行、收尾即弃（session_note）。参数 work_type。",
             "submit": "提交编译产物落版本并写文件镜像。必填 work_type/prompt_md；"
                       "建议带 source_memory_ids 与 model。返回 supersedes（被取代的旧 active 版本）。",
             "rollback": "回滚 persona 版本（零阻力：无确认、无警告）。work_type 必填；"

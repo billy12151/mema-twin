@@ -26,6 +26,11 @@
   回收——标签必须出生即经得起时间。`submit` 响应新增 `supersedes`（被取代的旧 active
   版本号）：落版即裁决，不等下一次注入。SKILL.md 引导编译走独立会话、做完即弃（编译会话
   内新旧版本同屏，会话隔离是避免冲突 persona 的唯一硬手段）。
+- **会话分工提示下沉到服务端响应**（用户实测反馈：引导只写 SKILL.md 时，未装 skill 的
+  http 共接宿主完全看不到）：`compile` / `submit` 响应新增 `session_note`——compile 侧
+  「本会话仅用于编译，submit 后即弃，勿在同一会话继续交付任务，后续任务开新会话
+  task_start」；submit 侧「编译会话收尾即弃；若继续用本会话，下次 task_start 传
+  have_persona_version=<本次版本号> 即不再重复注入」。
 
 ## [0.3.3] — 2026-09-04
 
