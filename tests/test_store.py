@@ -73,3 +73,52 @@ def test_create_version_reports_superseded(env):
     assert v1["superseded_version"] is None
     v2 = store.create_version(conn, "work_report", "# v2", ["1"], model="m")
     assert v2["superseded_version"] == 1
+
+
+# ---- 0.3.4 rollback ----
+
+def test_activate_version_rollback_lifecycle(env):
+    conn = twin_db.connect()
+    for i in (1, 2, 3):
+        store.create_version(conn, "work_report", f"# v{i}", ["1"], model="m")
+    # 省略 version → 上一版（active v3 → v2）
+    r = store.activate_version(conn, "work_report")
+    assert r["version"] == 2 and r["superseded_version"] == 3
+    assert store.get_active(conn, "work_report")["prompt_md"] == "# v2"
+    assert (env / "prompts" / "work_report" / "active.md").read_text(encoding="utf-8") == "# v2"
+    # v{n}.md 镜像不动
+    assert (env / "prompts" / "work_report" / "v3.md").read_text(encoding="utf-8") == "# v3"
+    # 指定版本 → v1
+    assert store.activate_version(conn, "work_report", 1)["version"] == 1
+    # 已是 active → 幂等不写库
+    r3 = store.activate_version(conn, "work_report", 1)
+    assert r3.get("already_active") is True
+    assert [v["status"] for v in store.list_versions(conn, "work_report")] == \
+        ["retired", "retired", "active"]  # list_versions 按 version DESC：v3,v2,v1
+    # 版本号永不回收：回滚到 v1 后 submit 仍出 v4，且 supersedes 报 1
+    v4 = store.create_version(conn, "work_report", "# v4", ["1"], model="m")
+    assert v4["version"] == 4 and v4["superseded_version"] == 1
+
+
+def test_activate_version_errors(env):
+    conn = twin_db.connect()
+    with pytest.raises(ValueError):  # 无任何版本
+        store.activate_version(conn, "work_report")
+    store.create_version(conn, "work_report", "# v1", ["1"], model="m")
+    with pytest.raises(ValueError):  # 唯一版本，无历史可回滚
+        store.activate_version(conn, "work_report")
+    with pytest.raises(ValueError):  # 目标不存在
+        store.activate_version(conn, "work_report", 9)
+
+
+def test_activate_version_mirror_failure_degrades(env, monkeypatch):
+    """镜像写失败不击穿已切换的 active（create_version 同款降级）。"""
+    def boom(path, text):
+        raise OSError("disk full (simulated)")
+    monkeypatch.setattr(store, "_atomic_write", boom)
+    conn = twin_db.connect()
+    for i in (1, 2):
+        store.create_version(conn, "work_report", f"# v{i}", ["1"], model="m")
+    r = store.activate_version(conn, "work_report")
+    assert r["version"] == 1 and "disk full" in r["warnings"][0]
+    assert store.get_active(conn, "work_report")["prompt_md"] == "# v1"  # DB 已切换

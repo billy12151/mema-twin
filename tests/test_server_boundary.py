@@ -448,3 +448,32 @@ def test_submit_returns_supersedes():
     assert r["ok"] and r["supersedes"] is None
     r2 = server.twin("submit", {"work_type": "周报", "prompt_md": "# b", "model": "m"})
     assert r2["ok"] and r2["supersedes"] == 1
+
+
+# ---- 0.3.4 rollback ----
+
+def test_rollback_action_boundary():
+    r0 = server.twin("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m"})
+    server.twin("submit", {"work_type": "周报", "prompt_md": "# v2", "model": "m"})
+    r = server.twin("rollback", {"work_type": "周报"})
+    assert r["ok"] and r["version"] == 1 and r["rolled_back_from"] == 2
+    # 幂等 + 注记
+    r2 = server.twin("rollback", {"work_type": "周报", "version": 1})
+    assert r2["ok"] and r2.get("note") and "rolled_back_from" not in r2
+    # 目标不存在报错带可用版本
+    r3 = server.twin("rollback", {"work_type": "周报", "version": 99})
+    assert r3.get("ok") is False and "可用版本" in r3.get("reason", "")
+    # 脏 version / 浮点 / bool
+    for bad in ("abc", 2.9, True, "1.5", 0, -1):
+        r4 = server.twin("rollback", {"work_type": "周报", "version": bad})
+        assert r4.get("ok") is False and r4.get("field") == "version", bad
+    # unknown work_type / 缺 work_type
+    assert server.twin("rollback", {"work_type": "不存在"}).get("ok") is False
+    assert server.twin("rollback", {}).get("field") == "work_type"
+    # 唯一版本省略 version → 报错附 status 提示
+    server.twin("submit", {"work_type": "PPT", "prompt_md": "# only", "model": "m"})
+    r6 = server.twin("rollback", {"work_type": "PPT"})
+    assert r6.get("ok") is False and "status" in r6.get("reason", "")
+    # 回滚后 get 拿到的是回滚版本
+    g = server.twin("get", {"work_type": "周报"})
+    assert g["ok"] and g["version"] == 1 and g["prompt_md"] == "# v1"

@@ -31,9 +31,9 @@ def twin(action: str, data: dict | None = None) -> dict:
     """个人分身 twin：按工作性质沉淀用户工作偏好，编译版本化 persona prompt，
     经交付任务流注入执行，并提供定时扫描建议。
 
-    动作：write / get / compile / submit / status / taxonomy / pending / resolve /
-    task_start / task_submit / task_review / task_pending / task_resume / task_revise /
-    task_close / task_recent / task_get / todo / scan / help。
+    动作：write / get / compile / submit / rollback / status / taxonomy / pending /
+    resolve / task_start / task_submit / task_review / task_pending / task_resume /
+    task_revise / task_close / task_recent / task_get / todo / scan / help。
     先 twin(action="help") 查看各动作参数与引导。compile 返回素材包，由当前会话模型
     编译（建议在强模型会话中执行），submit 提交回库落版本并写文件镜像。
     """
@@ -378,6 +378,47 @@ def _action_submit(data: dict) -> dict:
     rec["supersedes"] = rec.pop("superseded_version")  # 落版即裁决：本版取代的旧 active 版本
     rec["evidence_marked_compiled"] = marked
     return rec
+
+
+def _action_rollback(data: dict) -> dict:
+    """回滚 persona 版本（零阻力：无确认、无警告、无拦截——即使效果是新版本
+    习得的能力从 active 消失）。version 省略回上一版，传 n 回指定版。"""
+    wt = str(data.get("work_type") or "").strip()
+    if not wt:
+        return {"ok": False, "error": "invalid_input", "field": "work_type", "reason": "required"}
+    version = data.get("version")
+    if version is not None:
+        if isinstance(version, bool) or not isinstance(version, (int, str)):
+            return {"ok": False, "error": "invalid_input", "field": "version",
+                    "reason": "version 需是版本号整数（或省略回上一版）"}
+        try:
+            n = int(version)
+        except ValueError:
+            n = None
+        if n is None or (str(n) != str(version).strip() and not isinstance(version, int)) or n < 1:
+            return {"ok": False, "error": "invalid_input", "field": "version",
+                    "reason": f"invalid version: {version!r}"}
+        version = n
+    conn = db.connect()
+    try:
+        code = store.resolve_work_type_code(conn, wt)
+        if not code:
+            return {"ok": False, "error": "invalid_input", "field": "work_type",
+                    "reason": "unknown code；先 twin(action=\"taxonomy\") 查码或治理 pending"}
+        try:
+            out = store.activate_version(conn, code, version)
+        except ValueError as e:
+            return {"ok": False, "error": "invalid_input", "reason": str(e)}
+    finally:
+        conn.close()
+    out["ok"] = True
+    if out.pop("already_active", None):
+        out["note"] = f"v{out['version']} 已是 active，未做变更"
+    else:
+        out["rolled_back_from"] = out.pop("superseded_version")
+        out["guidance"] = ("已切换 active 版本。旧版本仍在库、可再 rollback 回来"
+                           "（不删历史）；版本号不回收，下次 submit 继续 MAX+1。")
+    return out
 
 
 def _action_get(data: dict) -> dict:
@@ -781,7 +822,10 @@ def _action_help(data: dict) -> dict:
             "compile": "取编译素材包（当前版本 prompt + 未编译偏好证据 + 编译规则），"
                        "由当前会话模型编译。参数 work_type。",
             "submit": "提交编译产物落版本并写文件镜像。必填 work_type/prompt_md；"
-                      "建议带 source_memory_ids 与 model。",
+                      "建议带 source_memory_ids 与 model。返回 supersedes（被取代的旧 active 版本）。",
+            "rollback": "回滚 persona 版本（零阻力：无确认、无警告）。work_type 必填；"
+                        "version 省略回上一版本、传 n 回指定版本；不删历史（retired 可再激活），"
+                        "版本号不回收（下次 submit 继续 MAX+1）。",
             "get": "取某 work_type 的 active persona prompt（DB 优先，文件镜像降级）。参数 work_type。",
             "taxonomy": "列枚举。参数 kind ∈ work_type|audience|purpose。",
             "pending": "列待裁长尾。参数 status（默认 pending）。",
@@ -814,6 +858,7 @@ _ACTIONS = {
     "status": _action_status,
     "compile": _action_compile,
     "submit": _action_submit,
+    "rollback": _action_rollback,
     "get": _action_get,
     "taxonomy": _action_taxonomy,
     "pending": _action_pending,
