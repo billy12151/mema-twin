@@ -103,6 +103,65 @@ def create_version(conn: sqlite3.Connection, work_type: str,
     return out
 
 
+def activate_version(conn: sqlite3.Connection, work_type: str,
+                     version: int | None = None) -> dict:
+    """回滚（零阻力，2026-09-05 定案）：version 省略 → 上一版本（active 之外
+    version 号最大的行）；显式传 n → 指定版本。事务内切换 active 指针并刷新
+    activated_at、重写 active.md 镜像（v{n}.md 不动）。不删历史（retired 可再
+    激活）；版本号永不回收（create_version 仍 MAX+1）。目标已是 active → 幂等
+    成功不写库。ValueError：无版本可回滚 / 目标版本不存在（附可用列表）。"""
+    active_row = conn.execute(
+        "SELECT version FROM twin_prompt_versions"
+        " WHERE work_type=? AND status='active' ORDER BY version DESC LIMIT 1",
+        (work_type,),
+    ).fetchone()
+    if version is None:
+        if active_row is None:
+            raise ValueError(f"{work_type} 尚无任何 prompt 版本")
+        row = conn.execute(
+            "SELECT * FROM twin_prompt_versions"
+            " WHERE work_type=? AND version != ? ORDER BY version DESC LIMIT 1",
+            (work_type, active_row["version"]),
+        ).fetchone()
+        if row is None:
+            raise ValueError(
+                f"{work_type} 当前 v{active_row['version']} 已是唯一版本，"
+                "没有可回滚的历史版本；twin(action=\"status\") 查看版本概况")
+    else:
+        row = conn.execute(
+            "SELECT * FROM twin_prompt_versions WHERE work_type=? AND version=?",
+            (work_type, int(version)),
+        ).fetchone()
+        if row is None:
+            avail = [int(r["version"]) for r in conn.execute(
+                "SELECT version FROM twin_prompt_versions"
+                " WHERE work_type=? ORDER BY version", (work_type,))]
+            raise ValueError(f"{work_type} 不存在版本 v{version}；可用版本：{avail}")
+    target = int(row["version"])
+    if active_row is not None and target == int(active_row["version"]):
+        return {"work_type": work_type, "version": target, "already_active": True}
+    ts = db.now_iso()
+    conn.execute(
+        "UPDATE twin_prompt_versions SET status='retired'"
+        " WHERE work_type=? AND status='active'", (work_type,))
+    conn.execute(
+        "UPDATE twin_prompt_versions SET status='active', activated_at=?"
+        " WHERE work_type=? AND version=?", (ts, work_type, target))
+    conn.commit()
+    warnings: list[str] = []
+    try:
+        _atomic_write(_mirror_dir(work_type) / "active.md", row["prompt_md"] or "")
+    except OSError as e:
+        # 镜像是降级渠道，写失败不击穿已切换的 active（create_version 同款）
+        warnings.append(f"镜像写入失败（{_mirror_dir(work_type) / 'active.md'}）: {e}")
+    out = {"work_type": work_type, "version": target,
+           "superseded_version": int(active_row["version"]) if active_row else None,
+           "activated_at": ts, "mirror": str(_mirror_dir(work_type) / "active.md")}
+    if warnings:
+        out["warnings"] = warnings
+    return out
+
+
 def get_active(conn: sqlite3.Connection, work_type: str) -> dict | None:
     row = conn.execute(
         "SELECT * FROM twin_prompt_versions"

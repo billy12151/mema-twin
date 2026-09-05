@@ -65,6 +65,9 @@ description: 个人分身：工作类偏好沉淀与 persona prompt 编译，经
   **用独立会话执行、做完即弃**（建议强模型）：编译会话内新旧版本同屏，
   勿在同一会话继续交付任务——会话隔离是避免新旧 persona 冲突的唯一硬手段
 - submit 时 `data.model` 填当前模型名，`source_memory_ids` 用素材包里的证据 id 列表
+- 用户要求撤销/回退某版分身 → `twin(action="rollback", data={work_type, version?})`：
+  省略 version 回上一版，传 n 回指定版；零阻力直接执行（不删历史、版本号不回收），
+  不要建议重新编译代替回滚
 
 ## 治理
 
