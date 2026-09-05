@@ -326,9 +326,9 @@ def _action_compile(data: dict) -> dict:
                  "current_version": (active or {}).get("version"),
                  "evidence_count": len(evidence), "material": material,
                  "note": templates.STRONG_MODEL_NOTE,
-                 "session_note": ("本会话仅用于编译，完成 submit 后即弃："
-                                  "编译会话内新旧 persona 同屏，勿在同一会话继续交付任务；"
-                                  "后续任务开新会话 task_start 取新版 persona"),
+                 "session_note": ("本会话仅用于编译，完成 submit 后即弃。请告知用户："
+                                  "后续交付任务建议换新会话重新开始（编译会话内新旧 persona "
+                                  "同屏，换会话是唯一硬隔离）；新会话 task_start 会自动注入新版"),
                  "next": "用当前会话模型按素材包编译出 prompt_md 后，调 "
                          "twin(action=\"submit\", data={work_type, prompt_md, source_memory_ids, model})"}
     if skipped:
@@ -380,9 +380,11 @@ def _action_submit(data: dict) -> dict:
     rec["ok"] = True
     rec["supersedes"] = rec.pop("superseded_version")  # 落版即裁决：本版取代的旧 active 版本
     rec["evidence_marked_compiled"] = marked
-    rec["session_note"] = ("编译会话到此收尾即弃，后续任务开新会话 task_start 注入新版；"
-                           f"若继续用本会话，下次 task_start 传 have_persona_version={rec['version']}"
-                           " 即不再重复注入全文")
+    replaced = f"取代 v{rec['supersedes']}" if rec["supersedes"] is not None else "首个版本"
+    rec["session_note"] = (f"请提醒用户：v{rec['version']} 已生效（{replaced}），"
+                           "建议后续任务换新会话重新开始（新会话 task_start 自动注入新版 persona）；"
+                           f"若用户坚持在本会话继续，下次 task_start 传 have_persona_version={rec['version']}"
+                           " 即不再重复注入全文。本编译会话到此收尾即弃。")
     return rec
 
 

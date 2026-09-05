@@ -437,11 +437,11 @@ def test_compile_material_labels_old_version(monkeypatch):
     assert "## 旧版本 prompt（编译参考，非执行依据）" in r["material"]
     assert "当前版本 prompt" not in r["material"]
     assert "取代" in r["material"] and "与旧版本冲突" in r["material"]
-    # 会话分工提示下沉到响应（非 SKILL 宿主也可见）
-    assert "即弃" in r["session_note"] and "勿在同一会话" in r["session_note"]
+    # 会话分工提示下沉到响应（非 SKILL 宿主也可见），且是「转告用户」的显式指令
+    assert "告知用户" in r["session_note"] and "换新会话" in r["session_note"]
     # 首版场景（无旧版本）同样成立
     r2 = server.twin("compile", {"work_type": "PPT"})
-    assert r2["ok"] and "首个版本" in r2["material"] and "即弃" in r2["session_note"]
+    assert r2["ok"] and "首个版本" in r2["material"] and "告知用户" in r2["session_note"]
 
 
 def test_submit_returns_supersedes():
@@ -450,8 +450,9 @@ def test_submit_returns_supersedes():
     assert r["ok"] and r["supersedes"] is None
     r2 = server.twin("submit", {"work_type": "周报", "prompt_md": "# b", "model": "m"})
     assert r2["ok"] and r2["supersedes"] == 1
-    # 收尾提示带本次版本号（同会话继续则申报该号）
-    assert "即弃" in r2["session_note"] and "have_persona_version=2" in r2["session_note"]
+    # 收尾提示：显式指令 Agent 提醒用户换新会话，带本次版本号
+    assert "提醒用户" in r2["session_note"] and "换新会话" in r2["session_note"]
+    assert "have_persona_version=2" in r2["session_note"] and "v2 已生效（取代 v1）" in r2["session_note"]
 
 
 # ---- 0.3.4 rollback ----
