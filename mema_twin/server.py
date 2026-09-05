@@ -375,6 +375,7 @@ def _action_submit(data: dict) -> dict:
     finally:
         conn.close()
     rec["ok"] = True
+    rec["supersedes"] = rec.pop("superseded_version")  # 落版即裁决：本版取代的旧 active 版本
     rec["evidence_marked_compiled"] = marked
     return rec
 

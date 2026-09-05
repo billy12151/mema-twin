@@ -420,3 +420,31 @@ def test_flow_env_fallback_validated(monkeypatch):
     monkeypatch.setenv("MEMA_TWIN_CLIENT_ID", "dirty value")
     r = server.twin("task_start", {"brief": "B", "work_type": "周报"})
     assert r.get("ok") is False and r.get("error") == "invalid_input"
+
+
+# ---- 0.3.4 compile 会话治理 ----
+
+def test_compile_material_labels_old_version(monkeypatch):
+    """素材包旧版标签：出生即「编译参考，非执行依据」，不再自标当前版本
+    （submit 落新版后该标签会变假话且无法回收——从源头不产生）。"""
+    from mema_twin import sink, store
+    monkeypatch.setattr(sink, "find", lambda *a, **k: {"ok": True, "data": {"results": []}})
+    conn = db.connect()
+    store.create_version(conn, "work_report", "# v1 内容", ["1"], model="m")
+    conn.close()
+    r = server.twin("compile", {"work_type": "周报"})
+    assert r["ok"]
+    assert "## 旧版本 prompt（编译参考，非执行依据）" in r["material"]
+    assert "当前版本 prompt" not in r["material"]
+    assert "取代" in r["material"] and "与旧版本冲突" in r["material"]
+    # 首版场景（无旧版本）同样成立
+    r2 = server.twin("compile", {"work_type": "PPT"})
+    assert r2["ok"] and "首个版本" in r2["material"]
+
+
+def test_submit_returns_supersedes():
+    """submit 响应带 supersedes：落版即裁决，不等下一次注入。"""
+    r = server.twin("submit", {"work_type": "周报", "prompt_md": "# a", "model": "m"})
+    assert r["ok"] and r["supersedes"] is None
+    r2 = server.twin("submit", {"work_type": "周报", "prompt_md": "# b", "model": "m"})
+    assert r2["ok"] and r2["supersedes"] == 1
