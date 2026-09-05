@@ -61,7 +61,9 @@ description: 个人分身：工作类偏好沉淀与 persona prompt 编译，经
 
 ## compile / submit
 
-- compile 返回素材包：当前版本 prompt + 未编译证据 + 编译规则；建议在强模型会话中执行
+- compile 返回素材包：旧版本 prompt（编译参考，非执行依据）+ 未编译证据 + 编译规则；
+  **用独立会话执行、做完即弃**（建议强模型）：编译会话内新旧版本同屏，
+  勿在同一会话继续交付任务——会话隔离是避免新旧 persona 冲突的唯一硬手段
 - submit 时 `data.model` 填当前模型名，`source_memory_ids` 用素材包里的证据 id 列表
 
 ## 治理

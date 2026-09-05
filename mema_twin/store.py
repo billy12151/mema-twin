@@ -61,6 +61,12 @@ def create_version(conn: sqlite3.Connection, work_type: str,
             (work_type,),
         ).fetchone()
         version = int(row["v"]) + 1
+        prev = conn.execute(
+            "SELECT version FROM twin_prompt_versions"
+            " WHERE work_type=? AND status='active' ORDER BY version DESC LIMIT 1",
+            (work_type,),
+        ).fetchone()
+        superseded_version = int(prev["version"]) if prev else None
         conn.execute(
             "UPDATE twin_prompt_versions SET status='retired'"
             " WHERE work_type=? AND status='active'",
@@ -90,6 +96,7 @@ def create_version(conn: sqlite3.Connection, work_type: str,
             warnings.append(f"镜像写入失败（{d / f}）: {e}")
     out = {"work_type": work_type, "version": version,
            "model": model or "", "source_count": len(ids),
+           "superseded_version": superseded_version,
            "mirror": str(d / f"v{version}.md")}
     if warnings:
         out["warnings"] = warnings

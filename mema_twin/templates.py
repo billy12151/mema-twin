@@ -24,15 +24,15 @@ def compile_prompt_material(work_type: str, work_type_zh: str,
         "按固定分区组织：整体风格 / 结构与格式 / 话术与用语 / 受众适配（按 audience 分条件段）"
         "/ 用途适配（按 purpose 分条件段）/ 前置确认清单（开工前应核对的材料与问题）。",
         "每条规则后用 `<!-- src: <memory_id> -->` 标注来源记忆 id，保证可溯源。",
-        "与当前版本冲突的新证据以新证据为准，并在文末「版本间变更」一节列出差异。",
+        "与旧版本冲突的新证据以新证据为准，并在文末「版本间变更」一节列出差异。",
         "输出纯 Markdown 正文，不要复述本素材包。",
     ):
         parts.append(f"- {r}\n")
-    parts.append("\n## 当前版本 prompt\n\n")
+    parts.append("\n## 旧版本 prompt（编译参考，非执行依据）\n\n")
     if current:
         tag = "，镜像降级读取" if current.get("from_mirror") else ""
-        parts.append(f"（v{current.get('version')}{tag}）\n\n```markdown\n"
-                     f"{current.get('prompt_md') or ''}\n```\n")
+        parts.append(f"（v{current.get('version')}{tag}；你的新稿 submit 落版后即取代它）\n\n"
+                     f"```markdown\n{current.get('prompt_md') or ''}\n```\n")
     else:
         parts.append("（无——这是首个版本 v1）\n")
     parts.append(f"\n## 未编译偏好证据（{len(evidence)} 条）\n\n")

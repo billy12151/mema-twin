@@ -62,3 +62,14 @@ def test_mirror_failure_degrades_to_warning(env, monkeypatch):
     assert rec["warnings"] and "disk full" in rec["warnings"][0]
     active = store.get_active(conn, "work_report")
     assert active["prompt_md"] == "# v1"  # DB 版本完好
+
+
+# ---- 0.3.4 compile 会话治理 ----
+
+def test_create_version_reports_superseded(env):
+    """submit 落版前捕获被取代的 active 版本：v1 无、v2 报 1。"""
+    conn = twin_db.connect()
+    v1 = store.create_version(conn, "work_report", "# v1", ["1"], model="m")
+    assert v1["superseded_version"] is None
+    v2 = store.create_version(conn, "work_report", "# v2", ["1"], model="m")
+    assert v2["superseded_version"] == 1
