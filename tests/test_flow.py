@@ -165,3 +165,94 @@ def test_resubmit_from_empty_session_keeps_todos(env):
     r = server.twin("task_submit", {"task_id": t["id"], "deliverable_md": "v2", "session": "s-empty"})
     assert r["ok"]
     assert [x["content"] for x in flow.get_task(t["id"])["todos"]] == ["a"]
+
+
+# ---- 0.3.4 have_persona_version 注入短路（agent 申报式）----
+
+def _make_versions(n):
+    from mema_twin import db as twin_db, store
+    conn = twin_db.connect()
+    for i in range(1, n + 1):
+        store.create_version(conn, "work_report", f"# v{i}", ["1"], model="m")
+    conn.close()
+
+
+def test_task_start_short_circuit_same_version(env):
+    from mema_twin import server
+    _make_versions(2)
+    # 首次（未申报）→ 全文注入
+    r1 = server.twin("task_start", {"brief": "B", "work_type": "周报"})
+    assert r1["ok"] and r1["persona_version"] == 2 and r1["persona_prompt_md"] == "# v2"
+    assert "persona_unchanged" not in r1
+    # 申报相同版本 → 短路：无全文、有逃生口提示
+    r2 = server.twin("task_start", {"brief": "B2", "work_type": "周报",
+                                    "have_persona_version": 2})
+    assert r2["ok"] and r2["persona_unchanged"] is True
+    assert "persona_prompt_md" not in r2 and r2["persona_version"] == 2
+    assert "get" in r2["hint"]
+    # 短路不影响建档：任务行记录的仍是 active 版本
+    assert flow.get_task(r2["task_id"])["persona_version"] == 2
+
+
+def test_task_start_mismatch_reinjects(env):
+    from mema_twin import server
+    _make_versions(2)
+    r = server.twin("task_start", {"brief": "B", "work_type": "周报",
+                                   "have_persona_version": 1})
+    assert r["ok"] and r["persona_prompt_md"] == "# v2"
+    assert "已从 v1 变更为 v2" in r["note"]
+
+
+def test_task_start_rollback_wording_neutral(env):
+    """回滚也是版本变更：失配注记用中性「变更」而非「更新」。"""
+    from mema_twin import server
+    _make_versions(3)
+    server.twin("rollback", {"work_type": "周报"})  # v3 → v2
+    r = server.twin("task_start", {"brief": "B", "work_type": "周报",
+                                   "have_persona_version": 3})
+    assert r["ok"] and r["persona_prompt_md"] == "# v2"
+    assert "已从 v3 变更为 v2" in r["note"] and "更新" not in r["note"]
+
+
+def test_task_start_mirror_never_short_circuits(env):
+    """mirror 降级（无版本身份）永不短路：申报了也全文注入。"""
+    from mema_twin import server
+    from mema_twin import db as twin_db, store
+    conn = twin_db.connect()
+    store.create_version(conn, "work_report", "# v1 mirror", ["1"], model="m")
+    conn.close()
+    conn = twin_db.connect()
+    conn.execute("DELETE FROM twin_prompt_versions")
+    conn.commit()
+    conn.close()
+    r = server.twin("task_start", {"brief": "B", "work_type": "周报",
+                                   "have_persona_version": 1})
+    assert r["ok"] and r["persona_prompt_md"] == "# v1 mirror"
+    assert "persona_unchanged" not in r and r["persona_version"] is None
+
+
+def test_task_resume_short_circuit(env):
+    from mema_twin import server
+    _make_versions(1)
+    t = flow.insert_task(brief="T", status="approved", dims=_dims())
+    r = server.twin("task_resume", {"task_id": t["id"], "have_persona_version": 1})
+    assert r["ok"] and r["persona_unchanged"] is True and "persona_prompt_md" not in r
+
+
+def test_have_version_garbage_rejected(env):
+    from mema_twin import server
+    for bad in ("abc", 2.9, True, "1.5", 0, -1, {"x": 1}):
+        r = server.twin("task_start", {"brief": "B", "work_type": "周报",
+                                       "have_persona_version": bad})
+        assert r.get("ok") is False and r.get("field") == "have_persona_version", bad
+    t = flow.insert_task(brief="T", status="planning", dims=_dims())
+    r2 = server.twin("task_resume", {"task_id": t["id"], "have_persona_version": "x"})
+    assert r2.get("ok") is False and r2.get("field") == "have_persona_version"
+
+
+def test_have_ignored_without_persona(env):
+    """无 persona 时申报被忽略，走通用标准提示。"""
+    from mema_twin import server
+    r = server.twin("task_start", {"brief": "B", "work_type": "周报",
+                                   "have_persona_version": 5})
+    assert r["ok"] and "尚无 persona prompt" in r["hint"]
