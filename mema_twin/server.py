@@ -519,6 +519,47 @@ def _task_persona(conn, code: str | None) -> dict | None:
     return store.get_active(conn, code)
 
 
+def _coerce_have_version(data: dict) -> int | None:
+    """have_persona_version 矫正（#895）：int / 数字串，≥1；脏值打回。
+    口径与 rollback version / _coerce_source_ids 一致。"""
+    v = data.get("have_persona_version")
+    if v is None:
+        return None
+    if isinstance(v, bool) or not isinstance(v, (int, str)):
+        raise ValueError("have_persona_version 需是版本号整数")
+    try:
+        n = int(v)
+    except ValueError:
+        n = None
+    if n is None or n < 1 or (str(n) != str(v).strip() and not isinstance(v, int)):
+        raise ValueError(f"invalid have_persona_version: {v!r}")
+    return n
+
+
+def _persona_injection(persona: dict | None, have: int | None) -> dict:
+    """task_start/task_resume 共用的注入分支（#895，agent 申报式短路）。
+
+    服务端看不见会话，「已注入过」由 agent 申报（have_persona_version=上文
+    注入返回的版本号）。失败模式全软：忘传/传错/mirror 降级（无版本身份）
+    一律回落全文注入，绝不出现分身静默不在场。相等→短路省重复全文；
+    不等（中途重编/回滚过）→全文重注入+中性变更说明（覆盖回滚场景）。"""
+    if not persona:
+        return {}
+    cur = persona.get("version")
+    declarable = not persona.get("from_mirror") and cur is not None and have is not None
+    if declarable and have == cur:
+        return {
+            "persona_version": cur,
+            "persona_unchanged": True,
+            "hint": (f"persona v{cur} 与本会话此前注入一致，沿用上文即可；"
+                     "若上文不可见（已被压缩），twin(action=\"get\") 取全文"),
+        }
+    out = {"persona_version": cur, "persona_prompt_md": persona.get("prompt_md")}
+    if declarable and have != cur:
+        out["note"] = f"persona 版本已从 v{have} 变更为 v{cur}，以本次注入为准"
+    return out
+
+
 def _action_task_start(data: dict) -> dict:
     brief = str(data.get("brief") or "").strip()
     if not brief:
@@ -526,6 +567,11 @@ def _action_task_start(data: dict) -> dict:
     wt_raw = str(data.get("work_type") or "").strip()
     if not wt_raw:
         return {"ok": False, "error": "invalid_input", "field": "work_type", "reason": "required"}
+    try:
+        have = _coerce_have_version(data)
+    except ValueError as e:
+        return {"ok": False, "error": "invalid_input",
+                "field": "have_persona_version", "reason": str(e)}
     flow.ensure_schema()
     conn = db.connect()
     try:
@@ -563,8 +609,7 @@ def _action_task_start(data: dict) -> dict:
             "用户确认或补齐。完成后 twin(action=\"task_submit\") 提交评审。"),
     }
     if persona:
-        out["persona_version"] = persona.get("version")
-        out["persona_prompt_md"] = persona.get("prompt_md")
+        out.update(_persona_injection(persona, have))
     else:
         reason = "work_type 未归一（先治理 pending）" if not wt.get("ok") else "该工作性质尚无 persona prompt"
         out["hint"] = (f"{reason}；可先喂历史产出物或积累偏好后 "
@@ -663,6 +708,11 @@ def _action_task_resume(data: dict) -> dict:
     tid = data.get("task_id")
     if tid is None:
         return {"ok": False, "error": "invalid_input", "reason": "需要 task_id"}
+    try:
+        have = _coerce_have_version(data)
+    except ValueError as e:
+        return {"ok": False, "error": "invalid_input",
+                "field": "have_persona_version", "reason": str(e)}
     flow.ensure_schema()
     record = flow.get_task(int(tid))
     if not record:
@@ -704,8 +754,7 @@ def _action_task_resume(data: dict) -> dict:
     if not old_todos:
         out["warnings"] = ["原任务没有 todos——可能已全部完成"]
     if persona:
-        out["persona_version"] = persona.get("version")
-        out["persona_prompt_md"] = persona.get("prompt_md")
+        out.update(_persona_injection(persona, have))
     else:
         out["hint"] = "该工作性质尚无 persona prompt；可先 compile 生成或按通用标准执行"
     return out
@@ -832,12 +881,15 @@ def _action_help(data: dict) -> dict:
             "resolve": "治理待裁值。pending_id + decision ∈ map(带 code)|canonicalize(带 new_type{code,zh,en,domain})|reject。",
             "task_start": "开工建档（流程注入点）。必填 brief/work_type（audience/purpose 可选，原始值即可）；"
                           "返回该工作性质的 persona prompt 与前置清单，开放任务自动让位。"
+                          "可选 have_persona_version：同一会话此前注入过同 work_type 且版本号仍在场时申报，"
+                          "版本未变则不再重复注入全文，变了则重注入并附变更说明。"
                           "client 字段同 write（http 共接时头已带则无需传）。",
             "task_submit": "提交交付稿待评审。必填 task_id/deliverable_md；可带 todos/session。",
             "task_review": "评审裁定（append-only 审计）。task_id + verdict ∈ approved|changes_requested，"
                            "notes 记意见；approved 落交付物文件，changes 走 rejected 并提示沉淀偏好。",
             "task_pending": "评审搁置（中断未决）。task_id。",
-            "task_resume": "续作历史任务（可中断可继续）。task_id；恢复 todos、新建 planning 任务并再注入 persona。",
+            "task_resume": "续作历史任务（可中断可继续）。task_id；恢复 todos、新建 planning 任务并再注入 persona。"
+                           "have_persona_version 申报口径同 task_start。",
             "task_revise": "修订进行中的任务。task_id + brief/deliverable_md/revision_reason 至少其一；"
                            "子任务回 planning 重走执行并记 lineage。",
             "task_close": "显式关闭开放任务（planning/submitted/pending），历史保留可审计。",

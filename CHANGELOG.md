@@ -2,6 +2,14 @@
 
 ## [0.3.4] — 2026-09-05
 
+- **have_persona_version 注入短路（agent 申报式）**：`task_start` / `task_resume` 接受
+  可选 `have_persona_version`——同一会话此前注入过同 work_type 且版本号仍在场时由
+  agent 申报（服务端看不见会话，「已注入」的事实归看得见上下文的一方）。与 active
+  相等 → 不再返回 `persona_prompt_md`，改回 `persona_unchanged: true` + 一行引导
+  （沿用上文；不可见调 `get` 取全文）；不等（中途重编/回滚过）→ 全文重注入并附中性
+  变更说明「版本已从 v{n} 变更为 v{m}」；未传/mirror 降级（无版本身份）→ 照常全文
+  注入。失败模式全软：忘传/传错/上下文被压缩都回落现状行为，绝不出现分身静默不在场。
+  零服务端状态，stdio/http 行为一致。
 - **rollback 动作（persona 版本回滚，零阻力）**：`twin(action="rollback")`，`work_type`
   必填，`version` 省略回上一版本（active 之外号最大的行）、传 n 回指定版本。事务内切换
   active 指针、刷新 activated_at、重写 `active.md` 镜像（v{n}.md 不动；镜像失败降级为

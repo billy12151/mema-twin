@@ -32,6 +32,10 @@ description: 个人分身：工作类偏好沉淀与 persona prompt 编译，经
 - 中断/隔日继续 → `twin(action="task_resume", data={"task_id": ...})`
   （进行中、已提交、被搁置、已通过的任务都可续作）；长期不动的开放任务用
   `twin(action="task_close")` 显式关闭（关闭前先经用户确认，不要自行清理）
+- **同会话重复注入省 token**：同一会话再次 task_start/task_resume 同 work_type，
+  且上文注入返回的 persona_version 仍在场（未被上下文压缩）→ 传
+  `have_persona_version=<上文版本号>`，版本未变则服务端不再重复注入全文；
+  上文不可见就**不要传**（服务端会照常全文注入，宁可重复不可缺席）
 - write 响应提示"有偏好未编译" → **不要**立即 compile，也不要每写一条就播报：
   任务收尾（或用户问起）时非阻塞汇总一句，如"分身积累了 N 条新偏好，要不要现在整理？"；
   是否整理由用户拍板，或等定时扫描统一汇总处理
