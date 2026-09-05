@@ -62,12 +62,13 @@ live in twin's own SQLite with a file mirror for fallback and human review.
 |------|------|
 | `write` | 沉淀一条工作偏好。必填 content/work_type/audience/purpose |
 | `get` | 取某工作性质的 active persona prompt（开工前调用） |
-| `compile` | 取编译素材包（当前版本 + 未编译证据 + 编译规则） |
-| `submit` | 提交编译产物，落版本并写镜像，回写证据编译标记 |
+| `compile` | 取编译素材包（旧版本 prompt 编译参考 + 未编译证据 + 编译规则），独立会话执行、做完即弃 |
+| `submit` | 提交编译产物，落版本并写镜像（返回 `supersedes`），回写证据编译标记 |
+| `rollback` | 回滚 persona 版本（零阻力）：`version` 省略回上一版，传 n 回指定版；不删历史、版本号不回收 |
 | `status` | 版本概况、未编译统计、pending 数量、scan 安装提醒 |
 | `taxonomy` | 列枚举（kind ∈ work_type/audience/purpose） |
 | `pending` / `resolve` | 待裁长尾的查看与治理 |
-| `task_start` | 开工建档并注入 persona prompt（audience/purpose 可选） |
+| `task_start` | 开工建档并注入 persona prompt（audience/purpose 可选；`have_persona_version` 申报同会话已注入版本，未变则省略重复注入） |
 | `task_submit` | 提交交付稿待评审（打回后同任务可再提交，轮次递增） |
 | `task_review` | 评审裁定（approved 落交付文件 / changes_requested 走修订），append-only 审计 |
 | `task_pending` | 评审搁置（中断未决） |

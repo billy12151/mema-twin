@@ -395,7 +395,10 @@ def _action_rollback(data: dict) -> dict:
             n = int(version)
         except ValueError:
             n = None
-        if n is None or (str(n) != str(version).strip() and not isinstance(version, int)) or n < 1:
+        # 上界 2^63-1：超范围 int 到 SQLite 绑定会抛 OverflowError（对抗#1），
+        # 属调用方参数错误，应在矫正层打回而非落兜底 internal_error
+        if (n is None or n < 1 or n > 2**63 - 1
+                or (str(n) != str(version).strip() and not isinstance(version, int))):
             return {"ok": False, "error": "invalid_input", "field": "version",
                     "reason": f"invalid version: {version!r}"}
         version = n
@@ -868,7 +871,7 @@ def _action_help(data: dict) -> dict:
                      "（先 taxonomy 查清单选码；清单无合适项给原始值，进 pending 由用户裁定）；"
                      "可选 subject/tags/source_ref/client（多 Agent 共接时 client 填宿主标识，如 kimi/jinleai）。",
             "status": "查看各 work_type 的 prompt 版本概况与 pending 数量。",
-            "compile": "取编译素材包（当前版本 prompt + 未编译偏好证据 + 编译规则），"
+            "compile": "取编译素材包（旧版本 prompt 编译参考 + 未编译偏好证据 + 编译规则），"
                        "由当前会话模型编译。参数 work_type。",
             "submit": "提交编译产物落版本并写文件镜像。必填 work_type/prompt_md；"
                       "建议带 source_memory_ids 与 model。返回 supersedes（被取代的旧 active 版本）。",

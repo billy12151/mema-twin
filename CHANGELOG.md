@@ -10,6 +10,10 @@
   变更说明「版本已从 v{n} 变更为 v{m}」；未传/mirror 降级（无版本身份）→ 照常全文
   注入。失败模式全软：忘传/传错/上下文被压缩都回落现状行为，绝不出现分身静默不在场。
   零服务端状态，stdio/http 行为一致。
+- 两轮 review（常规+对抗性）修复：help/README 动作口径同步（compile 描述、rollback 行、
+  have_persona_version 说明）；超范围版本号（>2^63-1）在矫正层打回 invalid_input，
+  不再溢出到兜底 internal_error；underscore/符号前缀数字串（"1_0"/"+2"）实测拦截。
+  测试 75→89 全绿。
 - **rollback 动作（persona 版本回滚，零阻力）**：`twin(action="rollback")`，`work_type`
   必填，`version` 省略回上一版本（active 之外号最大的行）、传 n 回指定版本。事务内切换
   active 指针、刷新 activated_at、重写 `active.md` 镜像（v{n}.md 不动；镜像失败降级为
