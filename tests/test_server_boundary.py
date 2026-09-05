@@ -463,8 +463,8 @@ def test_rollback_action_boundary():
     # 目标不存在报错带可用版本
     r3 = server.twin("rollback", {"work_type": "周报", "version": 99})
     assert r3.get("ok") is False and "可用版本" in r3.get("reason", "")
-    # 脏 version / 浮点 / bool
-    for bad in ("abc", 2.9, True, "1.5", 0, -1):
+    # 脏 version / 浮点 / bool / 超范围（对抗#1：超大 int 会 Overflow 到 internal_error）
+    for bad in ("abc", 2.9, True, "1.5", 0, -1, 10**20, "1_0", "+2"):
         r4 = server.twin("rollback", {"work_type": "周报", "version": bad})
         assert r4.get("ok") is False and r4.get("field") == "version", bad
     # unknown work_type / 缺 work_type
