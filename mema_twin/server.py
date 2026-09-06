@@ -214,7 +214,9 @@ def _action_write(data: dict) -> dict:
                  if not str(t).startswith("twin:") and str(t) != "twin-preference"]
     resp = sink.remember(
         content=content,
-        subject=str(data.get("subject") or f"工作偏好：{dims['work_type'].get('raw')}"),
+        subject=str(data.get("subject") or (
+            f"受众级偏好：{dims['audience'].get('label_zh') or dims['audience'].get('raw')}"
+            if audience_scoped else f"工作偏好：{dims['work_type'].get('raw')}")),
         tags=tags + user_tags,
         workspace=_bucket(),
         source_ref=str(data.get("source_ref") or ""),
@@ -277,7 +279,8 @@ def _action_status(data: dict) -> dict:
         # 受众画像触发器（AR-2）：证据数 ≠ 画像 evidence_count（或尚无画像）→ 需重抽象
         aud_counts = conn.execute(
             "SELECT audience, COUNT(*) AS n FROM twin_evidence"
-            " WHERE audience IS NOT NULL GROUP BY audience",
+            " WHERE audience IS NOT NULL AND work_type IS NOT NULL"
+            " GROUP BY audience",
         ).fetchall()
         audience_stale: dict = {}
         prof_ev: dict = {}
@@ -385,11 +388,14 @@ def _is_loopback_host(host: str) -> bool:
 
 def _compile_audience_profiles(conn, code: str, client: str | None = None) -> list[dict]:
     """compile 素材包的受众画像参考（AR-4）：按该类型证据出现频次取 ≤3 个
-    已有画像的受众；无画像的受众不塞原始证据（原始通道只有注入雏形一条）。"""
+    **已有画像**的受众（轮1 P2-4：先过滤有画像再 LIMIT，防无画像受众挤占名额）；
+    无画像的受众不塞原始证据（原始通道只有注入雏形一条）。"""
     rows = conn.execute(
-        "SELECT audience, COUNT(*) AS n FROM twin_evidence"
-        " WHERE work_type=? AND audience IS NOT NULL AND work_type NOT LIKE 'aud-%'"
-        " GROUP BY audience ORDER BY n DESC LIMIT 3",
+        "SELECT e.audience AS audience, COUNT(*) AS n FROM twin_evidence e"
+        " WHERE e.work_type=? AND e.audience IS NOT NULL AND e.work_type NOT LIKE 'aud-%'"
+        " AND EXISTS (SELECT 1 FROM twin_prompt_versions p"
+        "             WHERE p.work_type='aud-'||e.audience AND p.status='active')"
+        " GROUP BY e.audience ORDER BY n DESC LIMIT 3",
         (code,),
     ).fetchall()
     out: list[dict] = []
@@ -528,6 +534,22 @@ def _action_submit(data: dict) -> dict:
         rec["derived"] = True
         rec["note"] = ("受众画像版本：派生自该受众全部证据，不消耗证据"
                        "（对应类型证据仍属各自编译队列）")
+        if origin == "scheduled":
+            # 画像没有双跑提议，但夜间体系在转的信号要照刷（轮1 P2-3）：
+            # 只建受众证据的用户不该被 scan_notice 永久提醒
+            flow.ensure_schema()
+            flow.set_meta("last_scheduled_compile_at", db.now_iso())
+        # 轮1 P2-6：吸收数 ≠ 该受众证据总数 → stale 永不清零（夜夜重编），当场点破
+        conn = db.connect()
+        try:
+            total_ev = len(db.audience_evidence(
+                conn, store.split_audience_profile(code) or code))
+        finally:
+            conn.close()
+        if len(source_ids) < total_ev:
+            rec.setdefault("warnings", []).append(
+                f"source_memory_ids 仅 {len(source_ids)} 条，该受众共 {total_ev} 条证据"
+                "（漏列或读取跳过？）：audience_stale 将持续触发夜间重抽象")
     elif origin == "scheduled":
         # #905-④：夜间落版标记来源 + 记对比基线（AR-1：previous_version 只在落版时
         # 可靠，事后推导会被 rollback/多版历史失真）；v1 无旧版可比则不记 → 永不提议
@@ -585,10 +607,18 @@ def _action_rollback(data: dict) -> dict:
         version = n
     conn = db.connect()
     try:
-        code = store.resolve_work_type_code(conn, wt)
-        if not code:
-            return {"ok": False, "error": "invalid_input", "field": "work_type",
-                    "reason": "unknown code；先 twin(action=\"taxonomy\") 查码或治理 pending"}
+        aud = store.split_audience_profile(wt)
+        if aud is not None:
+            # 受众画像同样可回滚（轮1 P1-2）：夜间抽象坏了也要能一键回上一版
+            if not store._is_known_audience(conn, aud):
+                return {"ok": False, "error": "invalid_input", "field": "work_type",
+                        "reason": f"unknown audience code: {aud!r}"}
+            code = wt
+        else:
+            code = store.resolve_work_type_code(conn, wt)
+            if not code:
+                return {"ok": False, "error": "invalid_input", "field": "work_type",
+                        "reason": "unknown code；先 twin(action=\"taxonomy\") 查码或治理 pending"}
         try:
             out = store.activate_version(conn, code, version)
         except ValueError as e:
@@ -909,11 +939,14 @@ def _audience_payload(audience: str | None, exclude_work_type: str | None,
     evidence, skipped = _read_evidence_rows(rows, client, fail_fast=True)
     if not evidence:
         return {"audience_profile_skipped": skipped} if skipped else {}
-    return {"audience_profile_proto": evidence,
-            "audience_profile_note": (
-                "尚无该受众画像，以下为对同一受众在其他类型产出中的偏好（雏形）："
-                "口径/详略/禁忌类可参考，格式与结构以本类型为准；冲突时本类型增补/"
-                "persona 优先")}
+    out = {"audience_profile_proto": evidence,
+           "audience_profile_note": (
+               "尚无该受众画像，以下为对同一受众在其他类型产出中的偏好（雏形）："
+               "口径/详略/禁忌类可参考，格式与结构以本类型为准；冲突时本类型增补/"
+               "persona 优先")}
+    if skipped:
+        out["audience_profile_skipped"] = skipped
+    return out
 
 
 def _action_task_start(data: dict) -> dict:
@@ -1273,17 +1306,20 @@ def _action_help(data: dict) -> dict:
                      "audience 必须归一成功）。",
             "status": "查看各 work_type 的 prompt 版本概况、受众画像（audience_profiles）、"
                       "需重抽象的受众（audience_stale）、pending 数量与未编译统计。",
-            "compile": "取编译素材包（旧版本 prompt 编译参考 + 未编译偏好证据 + 编译规则），"
-                       "由当前会话模型编译；独立会话执行、收尾即弃（session_note）。参数 work_type。",
+            "compile": "取编译素材包（旧版本 prompt 编译参考 + 未编译证据 + 同受众画像参考 + 编译规则），"
+                       "由当前会话模型编译；独立会话执行、收尾即弃（session_note）。参数 work_type；"
+                       "传 aud-{受众} 取受众画像素材包（该受众全部证据）。",
             "submit": "提交编译产物落版本并写文件镜像。必填 work_type/prompt_md；"
                       "建议带 source_memory_ids 与 model。返回 supersedes（被取代的旧 active 版本）；"
                       "夜间定时任务落版必传 origin=scheduled（其余场景不要传）；"
-                      "取代旧版的交互式落版返回 compare_hint（双跑对比提示，转告用户；首个版本无）。",
+                      "取代旧版的交互式落版返回 compare_hint（双跑对比提示，转告用户；首个版本无）；"
+                      "work_type 传 aud-{受众} 即受众画像落版（derived，不消耗证据）。",
             "rollback": "回滚 persona 版本（零阻力：无确认、无警告）。work_type 必填；"
                         "version 省略回上一版本、传 n 回指定版本；不删历史（retired 可再激活），"
                         "版本号不回收（下次 submit 继续 MAX+1）。",
             "get": "取某 work_type 的 persona prompt（DB 优先，文件镜像降级）。参数 work_type；"
-                   "可选 version 取指定历史版本全文（双跑对比取旧版用）。",
+                   "可选 version 取指定历史版本全文（双跑对比取旧版用）；"
+                   "work_type 传 aud-{受众} 可读受众画像。",
             "taxonomy": "列枚举。参数 kind ∈ work_type|audience|purpose。",
             "pending": "列待裁长尾。参数 status（默认 pending）。",
             "resolve": "治理待裁值。pending_id + decision ∈ map(带 code)|canonicalize(带 new_type{code,zh,en,domain})|reject。",

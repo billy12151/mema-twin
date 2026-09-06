@@ -980,7 +980,6 @@ def test_compile_audience_mode_material(monkeypatch):
 
 def test_audience_stale_trigger():
     """证据数≠画像吸收数（或无画像）→ stale；吸收齐 → 清；新证据 → 再 stale。"""
-    _stub_read(None) if False else None
     from mema_twin import sink
     import unittest.mock as _mock
     with _mock.patch.object(sink, "read_memory",
@@ -1034,3 +1033,120 @@ def test_write_audience_scope_validations(monkeypatch):
     r2 = server.twin("write", {"content": "x", "audience": "外星领导",
                                "purpose": "同步", "scope": "audience"})
     assert r2.get("ok") is False and r2.get("field") == "audience"
+
+
+# ---- v0.3.6 轮1 review 修复的回归 ----
+
+def test_aud_submit_derived_nonconsuming_with_warning(monkeypatch):
+    """aud- 落版：derived、不 mark_compiled、漏列 id 时当场警告（stale 会持续触发）。"""
+    _stub_read(monkeypatch)
+    _mk_uncompiled([951, 952])
+    conn = db.connect()
+    before = {r["memory_id"]: r["status"] for r in conn.execute(
+        "SELECT memory_id, status FROM twin_evidence").fetchall()}
+    conn.close()
+    r = server.twin("submit", {"work_type": "aud-leadership", "prompt_md": "# 画像",
+                               "model": "m", "source_memory_ids": [951]})
+    assert r["ok"] and r["derived"] is True
+    assert any("共 2 条证据" in w for w in r["warnings"])
+    conn = db.connect()
+    after = {r2["memory_id"]: r2["status"] for r2 in conn.execute(
+        "SELECT memory_id, status FROM twin_evidence").fetchall()}
+    conn.close()
+    assert after == before  # 证据未被消耗
+    assert "compare_hint" not in r
+
+
+def test_rollback_audience_profile():
+    server.twin("submit", {"work_type": "aud-leadership", "prompt_md": "# 画像v1",
+                           "model": "m", "source_memory_ids": [1]})
+    server.twin("submit", {"work_type": "aud-leadership", "prompt_md": "# 画像v2",
+                           "model": "m", "source_memory_ids": [1]})
+    r = server.twin("rollback", {"work_type": "aud-leadership"})
+    assert r["ok"] and r["version"] == 1
+    g = server.twin("get", {"work_type": "aud-leadership"})
+    assert g["prompt_md"] == "# 画像v1"
+
+
+def test_aud_scheduled_submit_refreshes_night_signal():
+    from mema_twin import scan
+    assert scan.scan_notice() is not None
+    server.twin("submit", {"work_type": "aud-leadership", "prompt_md": "# 画像",
+                           "model": "m", "origin": "scheduled", "source_memory_ids": []})
+    assert scan.scan_notice() is None  # 受众型夜间在转也消提醒
+
+
+def test_stale_ignores_worktype_null_rows(monkeypatch):
+    """work_type 待裁的滞留证据不进 stale 计数（否则夜夜重编永不清零）。"""
+    conn = db.connect()
+    from mema_twin import normalize
+    r = normalize.normalize_value("work_type", "灵能审计年报", conn, defer_pending=True)
+    db.record_evidence(conn, 961, {
+        "work_type": r, "audience": {"ok": True, "code": "leadership", "raw": "领导"},
+        "purpose": {"ok": True, "code": "sync_info", "raw": "同步"}})
+    conn.close()
+    s = server.twin("status", {})
+    assert "leadership" not in s["audience_stale"]
+
+
+def test_unknown_aud_suffix_rejected_everywhere():
+    for action in ("get", "compile", "submit", "rollback"):
+        payload = {"work_type": "aud-nope"}
+        if action == "submit":
+            payload["prompt_md"] = "# x"
+        r = server.twin(action, payload)
+        assert r.get("ok") is False and "unknown audience" in r.get("reason", ""), action
+
+
+def test_proto_truncation_and_partial_skips(monkeypatch):
+    from mema_twin import sink
+    def fake(mid, workspace=None, client=None):
+        if mid == 976:  # 在最新 5 条窗口内失败：进 skipped 而非无声消失
+            return {"ok": False, "error": "not_found"}
+        return {"ok": True, "data": {"memory": {"id": mid, "subject": "s",
+                                                "content": f"偏好{mid}"}}}
+    monkeypatch.setattr(sink, "read_memory", fake)
+    conn = db.connect()
+    for mid in range(971, 979):  # 8 条跨类型证据（971-978），截断只留最新 5（974-978）
+        db.record_evidence(conn, mid, {
+            "work_type": {"ok": True, "code": "presentation", "raw": "PPT"},
+            "audience": {"ok": True, "code": "leadership", "raw": "领导"},
+            "purpose": {"ok": True, "code": "sync_info", "raw": "s"}})
+    conn.close()
+    r = server.twin("task_start", {"brief": "B", "work_type": "周报", "audience": "领导"})
+    proto = r["audience_profile_proto"]
+    assert [e["id"] for e in proto] == [974, 975, 977, 978]
+    assert r["audience_profile_skipped"] == [{"memory_id": 976, "reason": "not_found"}]
+
+
+def test_profiled_audience_not_crowded_out(monkeypatch):
+    """无画像的高频受众不挤掉有画像的低频受众（先过滤后 LIMIT）。"""
+    _stub_read(monkeypatch)
+    server.twin("submit", {"work_type": "aud-leadership", "prompt_md": "# 领导画像",
+                           "model": "m"})
+    conn = db.connect()
+    aud_l = {"ok": True, "code": "leadership", "raw": "领导"}
+    aud_p = {"ok": True, "code": "team_peers", "raw": "同事"}
+    for i, aud in enumerate([aud_p] * 3 + [aud_l]):
+        db.record_evidence(conn, 980 + i, {
+            "work_type": {"ok": True, "code": "work_report", "raw": "周报"},
+            "audience": aud,
+            "purpose": {"ok": True, "code": "sync_info", "raw": "s"}})
+    conn.close()
+    r = server.twin("compile", {"work_type": "周报"})
+    assert "aud-leadership 画像 v1" in r["material"]
+    assert "aud-team_peers" not in r["material"]
+
+
+def test_write_scope_ignores_supplied_worktype(monkeypatch):
+    from mema_twin import sink
+    captured = {}
+    def fake_remember(content, subject, tags, workspace, source_ref="", event_time="", client=None):
+        captured["subject"] = subject
+        return {"ok": True, "data": {"id": 991}}
+    monkeypatch.setattr(sink, "remember", fake_remember)
+    r = server.twin("write", {"content": "对领导要白话", "work_type": "周报",
+                              "audience": "领导", "purpose": "同步",
+                              "scope": "audience"})
+    assert r["ok"] and r["dimensions"]["work_type"]["code"] == "aud-leadership"
+    assert "受众级偏好" in captured["subject"]
