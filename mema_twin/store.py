@@ -8,6 +8,28 @@ from pathlib import Path
 
 from . import db, taxonomy
 
+# 受众画像伪类型前缀（v0.3.6）：aud-{audience_code} 存于 twin_prompt_versions，
+# 复用版本/rollback/镜像全套；画像派生自该受众的全部证据，不消耗证据。
+AUD_PREFIX = "aud-"
+
+
+def audience_profile_code(audience_code: str) -> str:
+    return f"{AUD_PREFIX}{audience_code}"
+
+
+def split_audience_profile(work_type: str) -> str | None:
+    """aud-leadership → leadership；非画像码返回 None。"""
+    wt = str(work_type or "")
+    if wt.startswith(AUD_PREFIX) and len(wt) > len(AUD_PREFIX):
+        return wt[len(AUD_PREFIX):]
+    return None
+
+
+def _is_known_audience(conn: sqlite3.Connection, audience_code: str) -> bool:
+    if taxonomy.by_code("audience", audience_code):
+        return True
+    return any(r["code"] == audience_code for r in db.custom_types(conn, "audience"))
+
 
 def prompts_dir() -> Path:
     return Path(os.environ.get("MEMA_TWIN_PROMPTS_DIR") or db.PROJECT_ROOT / "prompts")
@@ -50,7 +72,12 @@ def create_version(conn: sqlite3.Connection, work_type: str,
                    prompt_md: str, source_memory_ids: list, model: str = "") -> dict:
     if not (prompt_md or "").strip():
         raise ValueError("prompt_md must not be empty")
-    if not is_known_work_type(conn, work_type):
+    aud_code = split_audience_profile(work_type)
+    if aud_code is not None:
+        # 受众画像伪类型（AR-1）：code 段必须是已知受众码，不走 work_type 枚举
+        if not _is_known_audience(conn, aud_code):
+            raise ValueError(f"unknown audience code: {aud_code!r}；画像码形如 aud-{aud_code}")
+    elif not is_known_work_type(conn, work_type):
         raise ValueError(f"unknown work_type code: {work_type!r}；先 twin(action=\"taxonomy\") 查码或治理 pending")
     ids = [str(i) for i in (source_memory_ids or [])]
     ts = db.now_iso()
