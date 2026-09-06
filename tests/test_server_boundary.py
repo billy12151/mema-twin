@@ -997,3 +997,40 @@ def test_audience_stale_trigger():
         _mk_uncompiled([933])
         s3 = server.twin("status", {})
         assert s3["audience_stale"]["leadership"] == {"evidence": 3, "profile_evidence": 2}
+
+
+# ---- v0.3.6 受众画像 ⑤：write 受众 scope ----
+
+def test_write_audience_scope(monkeypatch):
+    """scope=audience：work_type 可省略，证据落 aud- 行、tag 走 twin:aud 命名空间。"""
+    from mema_twin import sink
+    captured = {}
+    def fake_remember(content, subject, tags, workspace, source_ref="", event_time="", client=None):
+        captured["tags"] = tags
+        return {"ok": True, "data": {"id": 941}}
+    monkeypatch.setattr(sink, "remember", fake_remember)
+    r = server.twin("write", {"content": "对领导汇报永远要简洁白话",
+                              "audience": "领导", "purpose": "同步",
+                              "scope": "audience"})
+    assert r["ok"] and r["evidence_id"] == 941
+    assert r["dimensions"]["work_type"]["code"] == "aud-leadership"
+    assert "twin:aud:leadership" in captured["tags"]
+    assert not any(t.startswith("twin:wt:aud-") for t in captured["tags"])
+    conn = db.connect()
+    rows = db.uncompiled_evidence(conn, "aud-leadership")
+    conn.close()
+    assert [x["memory_id"] for x in rows] == [941]
+
+
+def test_write_audience_scope_validations(monkeypatch):
+    # scope 白名单
+    r = server.twin("write", {"content": "x", "work_type": "周报", "audience": "领导",
+                              "purpose": "同步", "scope": "global"})
+    assert r.get("ok") is False and r.get("field") == "scope"
+    # audience 未归一 → 显式打回（不落 stranded 证据）
+    from mema_twin import sink
+    monkeypatch.setattr(sink, "remember",
+                        lambda *a, **k: {"ok": True, "data": {"id": 1}})
+    r2 = server.twin("write", {"content": "x", "audience": "外星领导",
+                               "purpose": "同步", "scope": "audience"})
+    assert r2.get("ok") is False and r2.get("field") == "audience"

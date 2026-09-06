@@ -22,10 +22,17 @@ description: 个人分身：工作类偏好沉淀与 persona prompt 编译，经
   不要每改一处就写一条；拿不准且复用价值不高的，不写
   - 评审轮次里用户的**采纳 / 忽略 / 跳过询问**等隐式行为同样是偏好信号，一并观察沉淀
     （判据不变："下次干同类活还适用吗"）；一次性异常不写
+- 用户表述是「对该受众的通用要求」（如"给领导的东西都要简洁白话"，不限工作类型）
+  → `twin(action="write", data={..., "scope": "audience"})`：audience/purpose 必填、
+  work_type 省略；落为受众级偏好，夜间自动抽象进该受众画像，对该受众的任何任务
+  开工时自动注入（audience_profile_md / 雏形）
+- 用户**重复强调**已沉淀过的偏好（同一件事说了第二遍）→ 检查它的 scope：若此前只
+  沉淀在单个工作类型下，当场确认"是否对该受众都适用"，是则按上一条补写受众级沉淀
 - 开始一件工作类产出任务（先于 plan、先于动手）
   → `twin(action="task_start", data={"work_type": ..., "brief": ...})`：
   建档并返回该工作性质的分身 prompt，严格按其中的偏好/结构/前置清单执行；
-  材料不齐全按前置清单向用户确认或要求补齐
+  带了 audience 时还会注入该受众的画像（audience_profile_md，通用口径参考，
+  格式结构以本类型为准）；材料不齐全按前置清单向用户确认或要求补齐
 - 交付稿完成 → `twin(action="task_submit")`；用户审阅后
   → `twin(action="task_review", verdict=approved|changes_requested, notes=...)`
   通过即收口；changes 的意见**合并后** twin.write 沉淀（一轮 review 出少量条目，

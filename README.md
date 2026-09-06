@@ -65,14 +65,15 @@ live in twin's own SQLite with a file mirror for fallback and human review.
 | 动作 | 说明 |
 |------|------|
 | `write` | 沉淀一条工作偏好。必填 content/work_type/audience/purpose |
-| `get` | 取某工作性质的 persona prompt（开工前调用）；可选 `version` 取历史版本全文（双跑对比取旧版用） |
+| `write` | 沉淀一条工作偏好。必填 content/work_type/audience/purpose；对某受众的通用偏好传 `scope=audience`（work_type 省略），进该受众画像 |
+| `get` | 取某工作性质的 persona prompt（开工前调用）；可选 `version` 取历史版本全文（双跑对比取旧版用）；`aud-{受众}` 可读受众画像 |
 | `compile` | 取编译素材包（旧版本 prompt 编译参考 + 未编译证据 + 编译规则），独立会话执行、做完即弃 |
 | `submit` | 提交编译产物，落版本并写镜像（返回 `supersedes`），回写证据编译标记；夜间定时任务落版传 `origin=scheduled`，取代旧版的交互式落版返回 `compare_hint`（双跑提示） |
 | `rollback` | 回滚 persona 版本（零阻力）：`version` 省略回上一版，传 n 回指定版；不删历史、版本号不回收 |
-| `status` | 版本概况、未编译统计、pending 数量、scan 安装提醒 |
+| `status` | 版本概况、受众画像（audience_profiles）与重抽象队列（audience_stale）、未编译统计、pending 数量、scan 安装提醒 |
 | `taxonomy` | 列枚举（kind ∈ work_type/audience/purpose） |
 | `pending` / `resolve` | 待裁长尾的查看与治理 |
-| `task_start` | 开工建档并注入 persona prompt + 未编译增补（`have_persona_version` 申报同会话已注入版本，未变则省略重复注入；夜间落版的新版首任务附一次性 `persona_compare_offer`） |
+| `task_start` | 开工建档并注入 persona prompt + 未编译增补（`have_persona_version` 申报同会话已注入版本，未变则省略重复注入；夜间落版的新版首任务附一次性 `persona_compare_offer`；带 audience 时注入受众画像 `audience_profile_md`/雏形） |
 | `task_submit` | 提交交付稿待评审（打回后同任务可再提交，轮次递增） |
 | `task_review` | 评审裁定（approved 落交付文件 / changes_requested 走修订），append-only 审计 |
 | `task_pending` | 评审搁置（中断未决） |

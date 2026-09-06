@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.3.6] — 未发布
+
+- **受众画像（audience profiles）**：解决"对同一受众跨类型产出要重复说同一批要求"——
+  `aud-{受众}` 伪类型存于 twin_prompt_versions（复用版本/rollback/镜像，零 DDL）。
+  task_start/task_resume 带 audience 时注入 `audience_profile_md`（画像全文，note 显式
+  优先级链：本类型增补 > 类型 persona > 受众画像）；画像未编出时以雏形（跨类型证据
+  ≤5 条，排除本类型行防与增补重复）垫底。write 新增 `scope=audience`（受众级偏好，
+  work_type 省略、audience 必须归一成功，tag 走 twin:aud 命名空间）。compile 素材包内嵌
+  ≤3 个已有画像作跨类型参考（守门句：只迁口径类）；`compile(aud-x)` 切换为画像素材
+  模式（该受众全部证据不分 compiled、受众专属规则）。夜间任务扩展：status 新增
+  `audience_stale` 触发器（证据数≠画像吸收数才重抽象），spec 增加 compile/submit
+  受众步骤；受众编译为派生投影，不消耗证据（不 mark_compiled、不触发双跑提议）。
+  防串味：`aud-` 为保留前缀（canonicalize 禁用）、status/统计/resolve 全程过滤。
+  taxonomy：leadership 补"领导"别名。
+
 ## [0.3.5] — 2026-09-06
 
 - 两轮 review（常规 + 对抗性）修复：增补/提议的优先级声明一律钉死版本号（漏列 source id
