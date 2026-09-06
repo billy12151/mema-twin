@@ -19,11 +19,11 @@ SCAN_FRESH_DAYS = 7
 AGENT_INSTRUCTION = (
     "Tell the user: mema-twin 建议创建两个定时任务：①夜间 persona 编译（每天，"
     "专用一次性会话跑 status→compile→submit，把当天未编译偏好自动整理进 persona "
-    "并落版，无证据不编）；②每周治理扫描（twin scan，发现 pending 积压与未收口"
-    "交付任务）。Ask whether to set them up now（可只选其一）; on consent, create "
-    "the equivalent task(s) on your own platform from setup.tasks. The notice "
-    "disappears by itself once either task has run recently — no report-back "
-    "needed."
+    "并落版，无证据不编；证据变动的受众画像同场重抽象落版）；②每周治理扫描"
+    "（twin scan，发现 pending 积压与未收口交付任务）。Ask whether to set "
+    "them up now（可只选其一）; on consent, create the equivalent task(s) on your "
+    "own platform from setup.tasks. The notice disappears by itself once either "
+    "task has run recently — no report-back needed."
 )
 
 SCHEDULED_TASKS_SPEC: dict = {
@@ -54,8 +54,10 @@ SCHEDULED_TASKS_SPEC: dict = {
                                   "\"aud-{audience}\") 取画像素材包（该受众全部证据），"
                                   "按画像规则写出受众画像"}},
                 {"tool": "twin", "action": "submit",
-                 "data": {"rule": "受众画像 submit 用 work_type=\"aud-{audience}\"、"
-                                  "source_memory_ids=素材包全部证据 id；画像派生不消耗证据；"
+                 "data": {"origin": "scheduled",
+                          "rule": "受众画像 submit 用 work_type=\"aud-{audience}\"、"
+                                  "source_memory_ids=素材包全部证据 id（多报漏报都会让"
+                                  "audience_stale 永不清零）；画像派生不消耗证据；"
                                   "audience_stale 为空则整体跳过"}},
             ],
         },

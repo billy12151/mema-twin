@@ -55,8 +55,10 @@ def compile_prompt_material(work_type: str, work_type_zh: str,
         parts.append(f"- {r}\n")
     parts.append("\n## 旧版本 prompt（编译参考，非执行依据）\n\n")
     if current:
-        tag = "，镜像降级读取" if current.get("from_mirror") else ""
-        parts.append(f"（v{current.get('version')}{tag}；你的新稿 submit 落版后即取代它）\n\n"
+        v = current.get("version")
+        tag = "，镜像降级读取" if current.get("from_mirror") or v is None else ""
+        vt = f"v{v}" if v is not None else ""
+        parts.append(f"（{vt}{tag}；你的新稿 submit 落版后即取代它）\n\n"
                      f"```markdown\n{current.get('prompt_md') or ''}\n```\n")
     else:
         parts.append("（无——这是首个版本 v1）\n")

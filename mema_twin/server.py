@@ -242,7 +242,8 @@ def _action_write(data: dict) -> dict:
             if audience_scoped:
                 zh = dims["audience"].get("label_zh") or dims["audience"]["raw"]
                 out["hint"] = (f"已沉淀为对「{zh}」的受众级通用偏好（不绑定工作类型）；"
-                               "夜间任务会把画像重抽象，对该受众的任何任务开工时自动带上")
+                               "该受众有新证据时，夜间任务会重抽象其画像，"
+                               "对该受众的任何任务开工时自动带上")
             elif dims["work_type"].get("ok"):
                 active = store.get_active(conn, dims["work_type"]["code"])
                 if active and active.get("version") is not None:
@@ -300,6 +301,14 @@ def _action_status(data: dict) -> dict:
                      "audience_stale": audience_stale,
                      "pending_count": len(pending),
                      "uncompiled": db.evidence_stats(conn)}
+        # 轮2 P2-3：存量自定义 work_type 若撞上保留前缀 aud-（旧版校验允许过），
+        # 升级后会被画像通道劫持——显式告警给迁移提示，不静默
+        hijacked = [r["code"] for r in db.type_rows(conn, "work_type")
+                    if str(r["code"]).startswith(store.AUD_PREFIX)]
+        if hijacked:
+            out["warnings"] = [
+                f"自定义 work_type 撞上保留前缀：{hijacked}——已被受众画像通道劫持，"
+                "请用 twin(action=\"resolve\", decision=\"canonicalize\") 改名迁移"]
     finally:
         conn.close()
     notice = scan.scan_notice()
@@ -504,7 +513,7 @@ def _action_submit(data: dict) -> dict:
                 "reason": f"过长（{len(prompt_md)} 字符，上限 100000）——编译产物应精炼"}
     conn = db.connect()
     try:
-        aud = store.split_audience_profile(str(data["work_type"]))
+        aud = store.split_audience_profile(str(data["work_type"]).strip())
         if aud is not None:
             # 受众画像伪类型（AR-1/AR-6）：不走 work_type 枚举，校验受众段
             if not store._is_known_audience(conn, aud):
@@ -539,17 +548,18 @@ def _action_submit(data: dict) -> dict:
             # 只建受众证据的用户不该被 scan_notice 永久提醒
             flow.ensure_schema()
             flow.set_meta("last_scheduled_compile_at", db.now_iso())
-        # 轮1 P2-6：吸收数 ≠ 该受众证据总数 → stale 永不清零（夜夜重编），当场点破
+        # 轮2 P2-1：吸收数 ≠ 该受众证据总数（无论多报/漏报/混入他受众 id）
+        # → stale 永不清零（夜夜重编），当场点破
         conn = db.connect()
         try:
             total_ev = len(db.audience_evidence(
                 conn, store.split_audience_profile(code) or code))
         finally:
             conn.close()
-        if len(source_ids) < total_ev:
+        if len(source_ids) != total_ev:
             rec.setdefault("warnings", []).append(
-                f"source_memory_ids 仅 {len(source_ids)} 条，该受众共 {total_ev} 条证据"
-                "（漏列或读取跳过？）：audience_stale 将持续触发夜间重抽象")
+                f"source_memory_ids {len(source_ids)} 条，该受众共 {total_ev} 条证据"
+                "（漏列/多报/混入他受众 id？）：audience_stale 将持续触发夜间重抽象")
     elif origin == "scheduled":
         # #905-④：夜间落版标记来源 + 记对比基线（AR-1：previous_version 只在落版时
         # 可靠，事后推导会被 rollback/多版历史失真）；v1 无旧版可比则不记 → 永不提议
@@ -941,9 +951,9 @@ def _audience_payload(audience: str | None, exclude_work_type: str | None,
         return {"audience_profile_skipped": skipped} if skipped else {}
     out = {"audience_profile_proto": evidence,
            "audience_profile_note": (
-               "尚无该受众画像，以下为对同一受众在其他类型产出中的偏好（雏形）："
-               "口径/详略/禁忌类可参考，格式与结构以本类型为准；冲突时本类型增补/"
-               "persona 优先")}
+               "尚无该受众画像，以下为对同一受众的其他产出沉淀（含受众级偏好，"
+               "可能与增补内容重叠，重叠时以增补为准）：口径/详略/禁忌类可参考，"
+               "格式与结构以本任务所属类型为准；冲突时该类型的增补/persona 优先")}
     if skipped:
         out["audience_profile_skipped"] = skipped
     return out

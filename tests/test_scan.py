@@ -64,8 +64,9 @@ def test_spec_single_source(env):
     nightly = spec["tasks"][0]
     assert nightly["cadence"] == "daily"
     assert [c["action"] for c in nightly["calls"]] == ["status", "compile", "submit", "compile", "submit"]
-    # 受众抽象步骤在场
+    # 受众抽象步骤在场，且受众 submit 同样带 origin（轮2 P2-2）
     assert nightly["calls"][3]["data"]["audience"] is True
+    assert nightly["calls"][4]["data"]["origin"] == "scheduled"
     # 夜间 submit 必带 origin=scheduled（次日双跑提议的触发标记）
     submit_call = nightly["calls"][2]
     assert submit_call["data"]["origin"] == "scheduled"

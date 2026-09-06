@@ -12,8 +12,9 @@
   模式（该受众全部证据不分 compiled、受众专属规则）。夜间任务扩展：status 新增
   `audience_stale` 触发器（证据数≠画像吸收数才重抽象），spec 增加 compile/submit
   受众步骤；受众编译为派生投影，不消耗证据（不 mark_compiled、不触发双跑提议）。
-  防串味：`aud-` 为保留前缀（canonicalize 禁用）、status/统计/resolve 全程过滤。
-  taxonomy：leadership 补"领导"别名。
+  防串味：`aud-` 为保留前缀（canonicalize 禁用）、status/统计/resolve 全程过滤、
+  存量撞名类型 status 显式告警。注意：内置枚举未新增"领导"别名——用户既有治理裁定
+  （领导→direct_manager 一类）优先于内置枚举，不得静默翻转。
 
 ## [0.3.5] — 2026-09-06
 
