@@ -36,7 +36,7 @@ SCHEDULED_TASKS_SPEC: dict = {
             "cadence": "daily",
             "calls": [
                 {"tool": "twin", "action": "status",
-                 "data": {"note": "取 uncompiled_by_work_type，只处理数量 >0 的 work_type"}},
+                 "data": {"note": "取响应键 uncompiled（各 work_type 未编译数），只处理数量 >0 的类型"}},
                 {"tool": "twin", "action": "compile",
                  "data": {"rule": "严格按素材包编译规则产出新版：与旧版本冲突以新证据为准，"
                                   "文末列出版本间变更"}},
@@ -74,11 +74,16 @@ def _parse_iso(ts: str | None) -> _dt.datetime | None:
 
 
 def scan_notice() -> dict | None:
-    """scan 过期/从未跑过时返回提醒载荷；近期跑过返回 None（提醒自消失）。"""
+    """scan 过期/从未跑过时返回提醒载荷；近期跑过返回 None（提醒自消失）。
+    夜间编译任务在转也算"定时体系在转"（scheduled submit 刷
+    last_scheduled_compile_at）——只建夜间任务、不建周扫描的用户不该被
+    永久提醒（AGENT_INSTRUCTION 承诺可只选其一，轮1 review P2）。"""
     flow.ensure_schema()
-    last = _parse_iso(flow.get_meta("last_scan_at"))
-    if last is not None and (_dt.datetime.now(_dt.timezone.utc) - last).days < SCAN_FRESH_DAYS:
-        return None
+    now = _dt.datetime.now(_dt.timezone.utc)
+    for key in ("last_scan_at", "last_scheduled_compile_at"):
+        last = _parse_iso(flow.get_meta(key))
+        if last is not None and (now - last).days < SCAN_FRESH_DAYS:
+            return None
     return {
         "type": "twin_scan_setup",
         "agent_instruction": AGENT_INSTRUCTION,

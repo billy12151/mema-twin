@@ -50,9 +50,13 @@ live in twin's own SQLite with a file mirror for fallback and human review.
 - **交付任务流（机制改造自 plan-mode）**：可审计（任务行不可变追加 + append-only
   评审记录）、可中断（pending 搁置）、可继续（task_resume 恢复 todos 续作）；task_start /
   task_resume 即 persona prompt 注入点。
-- **定时扫描挂 Agent 端**：twin 自身不起调度；status 里的 scan_notice 提醒 Agent
-  征询用户后在宿主平台建周任务调 `twin(action="scan")`，跑过 7 天内提醒自消失
-  （mema 首装提醒同款模式）。
+- **定时任务挂 Agent 端**：twin 自身不起调度；status 里的 scan_notice 提醒 Agent
+  征询用户后在宿主平台建任务（夜间 persona 编译 + 每周治理扫描，可只选其一），
+  任一任务近期在转则提醒自消失（mema 首装提醒同款模式）。
+- **新偏好即时生效**：task_start/task_resume 注入 persona 时同步携带该工作性质的
+  未编译偏好增补（persona_supplement，冲突以增补为准，上限 10 条）；夜间定时任务把
+  增补自动编译进新版本，次日首任务附双跑对比提议（persona_compare_offer，一次性，
+  不带旧版全文——同意对比才按需取）。
 
 ## 工具（单工具动作式）
 
@@ -61,14 +65,14 @@ live in twin's own SQLite with a file mirror for fallback and human review.
 | 动作 | 说明 |
 |------|------|
 | `write` | 沉淀一条工作偏好。必填 content/work_type/audience/purpose |
-| `get` | 取某工作性质的 active persona prompt（开工前调用） |
+| `get` | 取某工作性质的 persona prompt（开工前调用）；可选 `version` 取历史版本全文（双跑对比取旧版用） |
 | `compile` | 取编译素材包（旧版本 prompt 编译参考 + 未编译证据 + 编译规则），独立会话执行、做完即弃 |
-| `submit` | 提交编译产物，落版本并写镜像（返回 `supersedes`），回写证据编译标记 |
+| `submit` | 提交编译产物，落版本并写镜像（返回 `supersedes`），回写证据编译标记；夜间定时任务落版传 `origin=scheduled`，交互式落版返回 `compare_hint`（双跑提示） |
 | `rollback` | 回滚 persona 版本（零阻力）：`version` 省略回上一版，传 n 回指定版；不删历史、版本号不回收 |
 | `status` | 版本概况、未编译统计、pending 数量、scan 安装提醒 |
 | `taxonomy` | 列枚举（kind ∈ work_type/audience/purpose） |
 | `pending` / `resolve` | 待裁长尾的查看与治理 |
-| `task_start` | 开工建档并注入 persona prompt（audience/purpose 可选；`have_persona_version` 申报同会话已注入版本，未变则省略重复注入） |
+| `task_start` | 开工建档并注入 persona prompt + 未编译增补（`have_persona_version` 申报同会话已注入版本，未变则省略重复注入；夜间落版的新版首任务附一次性 `persona_compare_offer`） |
 | `task_submit` | 提交交付稿待评审（打回后同任务可再提交，轮次递增） |
 | `task_review` | 评审裁定（approved 落交付文件 / changes_requested 走修订），append-only 审计 |
 | `task_pending` | 评审搁置（中断未决） |

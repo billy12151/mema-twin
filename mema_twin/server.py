@@ -261,10 +261,12 @@ def _fetch_evidence_find(conn, code: str, client: str | None = None) -> list[dic
             if tag in (r.get("tags") or []) and str(r.get("id")) not in compiled]
 
 
-def _read_evidence_rows(rows: list[dict], client: str | None = None) -> tuple[list[dict], list[dict]]:
-    """按 id 逐条 read 全文（compile 与增补注入共用的读取通路）。连接级 SinkError
-    （mema 不可达）即跳过剩余条目——增补在 task_start 热路径上，不能被挂起的
-    mema 逐条拖慢；单条 not-found 不触发 fail-fast。"""
+def _read_evidence_rows(rows: list[dict], client: str | None = None,
+                        fail_fast: bool = False) -> tuple[list[dict], list[dict]]:
+    """按 id 逐条 read 全文（compile 与增补注入共用的读取通路）。fail_fast=True
+    （仅增补）时连接级 SinkError 即跳过剩余条目——增补在 task_start 热路径上，
+    不能被挂起的 mema 逐条拖慢；compile 保持逐条独立重试（0.3.4 行为，SinkError
+    也含单条 JSON-RPC 错误，不能当全局宕机）。单条 not-ok 不触发 fail-fast。"""
     evidence: list[dict] = []
     skipped: list[dict] = []
     mema_down = False
@@ -276,8 +278,9 @@ def _read_evidence_rows(rows: list[dict], client: str | None = None) -> tuple[li
         try:
             resp = sink.read_memory(mid, _bucket(), client=client)
         except sink.SinkError as e:
-            mema_down = True
             skipped.append({"memory_id": mid, "reason": f"mema read 失败: {e}"})
+            if fail_fast:
+                mema_down = True
             continue
         if not resp.get("ok"):
             skipped.append({"memory_id": mid,
@@ -401,6 +404,8 @@ def _action_submit(data: dict) -> dict:
         # 可靠，事后推导会被 rollback/多版历史失真）；v1 无旧版可比则不记 → 永不提议
         flow.ensure_schema()
         flow.set_meta(f"persona_origin:{code}:{rec['version']}", "scheduled")
+        # 夜间任务在转也算定时体系在转：只建夜间任务的用户不被 scan_notice 永久提醒
+        flow.set_meta("last_scheduled_compile_at", db.now_iso())
         if rec["supersedes"] is not None:
             flow.set_meta(f"compare_prev:{code}:{rec['version']}", str(rec["supersedes"]))
     elif rec["supersedes"] is not None:
@@ -464,8 +469,8 @@ def _action_rollback(data: dict) -> dict:
 
 
 def _coerce_version_field(data: dict):
-    """get/rollback 共用的 version 矫正（#905-④ 抽出）：int / 数字串，≥1、≤2^63-1；
-    脏值打回 None 由调用方组 invalid_input。"""
+    """version 参数矫正（#905-④，get 用）：int / 数字串，≥1、≤2^63-1；
+    缺省返回 None，脏值返回 False 由调用方组 invalid_input（口径同 rollback 内联版）。"""
     version = data.get("version")
     if version is None:
         return None
@@ -653,7 +658,7 @@ def _supplement_payload(code: str, has_persona: bool,
     total = len(rows)
     if total > SUPPLEMENT_MAX:
         rows = rows[-SUPPLEMENT_MAX:]  # ORDER BY id：尾部即最新
-    evidence, skipped = _read_evidence_rows(rows, client)
+    evidence, skipped = _read_evidence_rows(rows, client, fail_fast=True)
     if not evidence:
         return {}
     if has_persona:
@@ -684,12 +689,16 @@ def _compare_offer(code: str, persona: dict) -> dict:
     prev = flow.get_meta(f"compare_prev:{code}:{v}")
     if not prev:
         return {}
+    try:
+        prev_v = int(prev)
+    except ValueError:
+        return {}  # meta 脏值不让整个 task_start 报错（轮1 review P2）
     if flow.get_meta(f"compare_offered:{code}:{v}"):
         return {}
     flow.ensure_schema()
     flow.set_meta(f"compare_offered:{code}:{v}", db.now_iso())
     return {"persona_compare_offer": {
-        "current_version": v, "previous_version": int(prev),
+        "current_version": v, "previous_version": prev_v,
         "hint": (f"v{v} 由夜间定时任务自动编译落版，用户未亲审。请询问用户一次："
                  "本任务单用新版跑，还是新旧双跑对比（token 增加）。用户同意双跑时，调 "
                  f"twin(action=\"get\", data={{\"work_type\": \"{code}\", \"version\": {prev}}}) "
@@ -1010,7 +1019,7 @@ def _action_help(data: dict) -> dict:
     if topic == scan.SCHEDULED_TASKS_TOPIC:
         return {
             "ok": True, "topic": scan.SCHEDULED_TASKS_TOPIC,
-            "description": "twin 定时扫描任务 spec：Agent 据此在宿主平台创建等价任务。",
+            "description": "twin 定时任务 spec（夜间 persona 编译 + 每周治理扫描）：Agent 据此在宿主平台创建等价任务。",
             "agent_instruction": scan.AGENT_INSTRUCTION,
             "setup": scan.SCHEDULED_TASKS_SPEC,
             "note": "提醒自消失：twin(action=\"scan\") 在 7 天内跑过即不再提示。",
@@ -1041,12 +1050,15 @@ def _action_help(data: dict) -> dict:
                           "可选 have_persona_version：同一会话此前注入过同 work_type 且版本号仍在场时申报，"
                           "版本未变则不再重复注入全文，变了则重注入并附变更说明。"
                           "夜间自动落版的新版本会附 persona_compare_offer（双跑对比提议，一次性）。"
+                          "响应另带 persona_supplement：该 work_type 未编译偏好增补"
+                          "（与 prompt 冲突以增补为准；上限 10 条）。"
                           "client 字段同 write（http 共接时头已带则无需传）。",
             "task_submit": "提交交付稿待评审。必填 task_id/deliverable_md；可带 todos/session。",
             "task_review": "评审裁定（append-only 审计）。task_id + verdict ∈ approved|changes_requested，"
                            "notes 记意见；approved 落交付物文件，changes 走 rejected 并提示沉淀偏好。",
             "task_pending": "评审搁置（中断未决）。task_id。",
-            "task_resume": "续作历史任务（可中断可继续）。task_id；恢复 todos、新建 planning 任务并再注入 persona。"
+            "task_resume": "续作历史任务（可中断可继续）。task_id；恢复 todos、新建 planning 任务并再注入 persona"
+                           "（含未编译增补 persona_supplement，同 task_start）。"
                            "have_persona_version 申报口径同 task_start。",
             "task_revise": "修订进行中的任务。task_id + brief/deliverable_md/revision_reason 至少其一；"
                            "子任务回 planning 重走执行并记 lineage。",

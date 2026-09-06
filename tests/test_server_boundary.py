@@ -656,3 +656,86 @@ def test_get_version_param():
     for bad in ("abc", 2.9, True, "1.5", 0, -1, 10**20, "1_0", "+2"):
         gb = server.twin("get", {"work_type": "周报", "version": bad})
         assert gb.get("ok") is False and gb.get("field") == "version", bad
+
+
+# ---- 轮1 review 修复的回归 ----
+
+def test_task_resume_no_offer_and_does_not_burn():
+    """task_resume 不附提议（拍板），且不消耗一次性标记——留给下一个 task_start。"""
+    server.twin("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m"})
+    t1 = server.twin("task_start", {"brief": "B", "work_type": "周报"})
+    server.twin("submit", {"work_type": "周报", "prompt_md": "# v2", "model": "m",
+                           "origin": "scheduled"})
+    r = server.twin("task_resume", {"task_id": t1["task_id"]})
+    assert r["ok"] and "persona_compare_offer" not in r
+    t2 = server.twin("task_start", {"brief": "B2", "work_type": "周报"})
+    assert t2.get("persona_compare_offer", {}).get("current_version") == 2
+
+
+def test_supplement_failfast_discriminating(monkeypatch):
+    """首条连接级 SinkError → 跳过剩余（增补整体缺席），不是逐条重试。"""
+    from mema_twin import sink
+    calls = []
+    def fake(mid, workspace=None, client=None):
+        calls.append(mid)
+        raise sink.SinkError("mema HTTP MCP 不可达（127.0.0.1:8000）")
+    monkeypatch.setattr(sink, "read_memory", fake)
+    server.twin("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m"})
+    _mk_uncompiled([508, 509])
+    r = server.twin("task_start", {"brief": "B", "work_type": "周报"})
+    assert "persona_supplement" not in r
+    assert "persona_prompt_md" in r
+    assert len(calls) == 1  # 第二条没再打 mema
+
+
+def test_supplement_single_row_notok_no_failfast(monkeypatch):
+    """单条 read 未命中不熔断：后续条目照读，skipped 如实上报。"""
+    from mema_twin import sink
+    def fake(mid, workspace=None, client=None):
+        if mid == 508:
+            return {"ok": False, "error": "not_found"}
+        return {"ok": True, "data": {"memory": {"id": mid, "subject": "s",
+                                                "content": f"偏好{mid}"}}}
+    monkeypatch.setattr(sink, "read_memory", fake)
+    server.twin("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m"})
+    _mk_uncompiled([508, 509])
+    r = server.twin("task_start", {"brief": "B", "work_type": "周报"})
+    assert len(r["persona_supplement"]) == 1
+    assert r["persona_supplement"][0]["id"] == 509
+    assert r["persona_supplement_skipped"] == [{"memory_id": 508,
+                                                "reason": "not_found"}]
+
+
+def test_compare_offer_suppressed_for_mirror_persona(monkeypatch):
+    """mirror 降级无版本身份：全文照注入，提议不触发。"""
+    _stub_read(monkeypatch)
+    mirror = __import__("pathlib").Path(
+        __import__("os").environ["MEMA_TWIN_PROMPTS_DIR"]) / "work_report" / "active.md"
+    mirror.parent.mkdir(parents=True, exist_ok=True)
+    mirror.write_text("# 镜像降级版", encoding="utf-8")
+    _mk_uncompiled([510])
+    r = server.twin("task_start", {"brief": "B", "work_type": "周报"})
+    assert r["persona_prompt_md"] == "# 镜像降级版"
+    assert "persona_compare_offer" not in r
+    assert len(r["persona_supplement"]) == 1  # 增补与提议正交，照带
+
+
+def test_task_resume_empty_persona_supplement(monkeypatch):
+    """resume 的空 persona 分支同样走雏形注入。"""
+    _stub_read(monkeypatch)
+    _mk_uncompiled([511])
+    t1 = server.twin("task_start", {"brief": "B", "work_type": "周报"})
+    r = server.twin("task_resume", {"task_id": t1["task_id"]})
+    assert r["ok"]
+    assert len(r["persona_supplement"]) == 1
+    assert "尚无编译版 persona" in r["persona_supplement_note"]
+    assert "已沉淀偏好" in r["hint"]
+
+
+def test_notice_suppressed_by_scheduled_compile():
+    """只建夜间任务（scheduled submit 刷 last_scheduled_compile_at）也消提醒。"""
+    from mema_twin import scan
+    assert scan.scan_notice() is not None
+    server.twin("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m",
+                           "origin": "scheduled"})
+    assert scan.scan_notice() is None
