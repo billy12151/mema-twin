@@ -324,22 +324,66 @@ def _is_loopback_host(host: str) -> bool:
         return False
 
 
+def _compile_audience_profiles(conn, code: str, client: str | None = None) -> list[dict]:
+    """compile 素材包的受众画像参考（AR-4）：按该类型证据出现频次取 ≤3 个
+    已有画像的受众；无画像的受众不塞原始证据（原始通道只有注入雏形一条）。"""
+    rows = conn.execute(
+        "SELECT audience, COUNT(*) AS n FROM twin_evidence"
+        " WHERE work_type=? AND audience IS NOT NULL AND work_type NOT LIKE 'aud-%'"
+        " GROUP BY audience ORDER BY n DESC LIMIT 3",
+        (code,),
+    ).fetchall()
+    out: list[dict] = []
+    for r in rows:
+        prof = store.get_active(conn, store.audience_profile_code(r["audience"]))
+        if prof is None or not (prof.get("prompt_md") or "").strip():
+            continue
+        t = taxonomy.by_code("audience", r["audience"])
+        out.append({"audience": r["audience"],
+                    "zh": (t.zh if t else r["audience"]),
+                    "version": prof.get("version"),
+                    "prompt_md": prof["prompt_md"]})
+    return out
+
+
 def _action_compile(data: dict) -> dict:
     wt = str(data.get("work_type") or "").strip()
     if not wt:
         return {"ok": False, "error": "invalid_input", "field": "work_type", "reason": "required"}
     conn = db.connect()
     try:
-        code = store.resolve_work_type_code(conn, wt)
-        if not code:
-            return {"ok": False, "error": "invalid_input", "field": "work_type",
-                    "reason": "unknown code；先 twin(action=\"taxonomy\") 查码或治理 pending"}
+        aud = store.split_audience_profile(wt)
+        if aud is not None:
+            if not store._is_known_audience(conn, aud):
+                return {"ok": False, "error": "invalid_input", "field": "work_type",
+                        "reason": f"unknown audience code: {aud!r}"}
+            code = wt
+        else:
+            code = store.resolve_work_type_code(conn, wt)
+            if not code:
+                return {"ok": False, "error": "invalid_input", "field": "work_type",
+                        "reason": "unknown code；先 twin(action=\"taxonomy\") 查码或治理 pending"}
         t = taxonomy.by_code("work_type", code)
         active = store.get_active(conn, code)
-        evidence, skipped = _fetch_evidence(conn, code, client=_effective_client(data))
+        client = _effective_client(data)
+        if aud is not None:
+            # 受众画像素材（AR-2）：该受众全部证据（不分 compiled），逐条 read
+            rows = db.audience_evidence(conn, aud)
+            evidence, skipped = _read_evidence_rows(rows, client=client)
+            audience_profiles = None
+        else:
+            evidence, skipped = _fetch_evidence(conn, code, client=client)
+            audience_profiles = _compile_audience_profiles(conn, code)
     finally:
         conn.close()
-    material = templates.compile_prompt_material(code, t.zh if t else code, active, evidence)
+    if aud is not None:
+        at = taxonomy.by_code("audience", aud)
+        title_zh = at.zh if at else aud
+    else:
+        title_zh = t.zh if t else code
+    material = templates.compile_prompt_material(
+        aud or code, title_zh, active, evidence,
+        audience_profiles=audience_profiles, audience_mode=aud is not None)
     out: dict = {"ok": True, "work_type": code,
                  "current_version": (active or {}).get("version"),
                  "evidence_count": len(evidence), "material": material,
