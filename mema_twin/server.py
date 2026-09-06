@@ -146,7 +146,15 @@ def _action_write(data: dict) -> dict:
     if len(content) > _CONTENT_MAX_CHARS:
         return {"ok": False, "error": "invalid_input", "field": "content",
                 "reason": f"超出 {_CONTENT_MAX_CHARS} 字符上限"}
-    for f in ("work_type", "audience", "purpose"):
+    # 受众级沉淀（v0.3.6 AR-5）：scope=audience 表示"对该受众的通用偏好"，
+    # 不属于任何工作类型——work_type 可省略，落到 aud-{audience} 证据行
+    scope = data.get("scope")
+    if scope is not None and scope != "audience":
+        return {"ok": False, "error": "invalid_input", "field": "scope",
+                "reason": "scope 仅接受 audience（受众级偏好）；普通类型偏好不要传"}
+    audience_scoped = scope == "audience"
+    required = ("audience", "purpose") if audience_scoped else ("work_type", "audience", "purpose")
+    for f in required:
         if not str(data.get(f) or "").strip():
             return {"ok": False, "error": "invalid_input", "field": f, "reason": "required"}
         if len(str(data[f])) > _RAW_MAX_CHARS:
@@ -157,17 +165,44 @@ def _action_write(data: dict) -> dict:
     pendings: list[dict] = []
     tags = ["twin-preference"]
     try:
-        for kind in taxonomy.KINDS:
-            # defer：mema 写成功才 upsert pending，失败重试不留幽灵计数（对抗 review#14）
-            r = normalize.normalize_value(kind, str(data[kind]), conn, defer_pending=True)
-            if r.get("error"):
-                return {"ok": False, "error": "invalid_input", "field": kind, "reason": r.get("reason")}
-            dims[kind] = r
-            if r.get("ok"):
-                tags.append(f"twin:{_KIND_PREFIX[kind]}:{r['code']}")
-            else:
-                pendings.append(r)
-                tags.append(f"twin:{_KIND_PREFIX[kind]}:raw:{r['raw']}")
+        if audience_scoped:
+            r = normalize.normalize_value("audience", str(data["audience"]), conn,
+                                          defer_pending=True)
+            if not r.get("ok"):
+                # AR-5：受众级沉淀要求 audience 归一成功——落 pending 会造出
+                # 无处安放的证据行（work_type/audience 双 NULL），显式打回
+                return {"ok": False, "error": "invalid_input", "field": "audience",
+                        "reason": "受众级沉淀需 audience 归一成功"
+                                  "（先 twin(action=\"taxonomy\", kind=\"audience\") 查清单或治理 pending）"}
+            aud_code = r["code"]
+            dims["audience"] = r
+            dims["work_type"] = {"ok": True, "kind": "work_type", "raw": "(受众级偏好)",
+                                 "code": store.audience_profile_code(aud_code),
+                                 "label_zh": r.get("label_zh"), "matched_by": "audience_scope"}
+            tags.append(f"twin:aud:{aud_code}")
+            for kind in ("purpose",):
+                r2 = normalize.normalize_value(kind, str(data[kind]), conn, defer_pending=True)
+                if r2.get("error"):
+                    return {"ok": False, "error": "invalid_input", "field": kind,
+                            "reason": r2.get("reason")}
+                dims[kind] = r2
+                if r2.get("ok"):
+                    tags.append(f"twin:{_KIND_PREFIX[kind]}:{r2['code']}")
+                else:
+                    pendings.append(r2)
+                    tags.append(f"twin:{_KIND_PREFIX[kind]}:raw:{r2['raw']}")
+        else:
+            for kind in taxonomy.KINDS:
+                # defer：mema 写成功才 upsert pending，失败重试不留幽灵计数（对抗 review#14）
+                r = normalize.normalize_value(kind, str(data[kind]), conn, defer_pending=True)
+                if r.get("error"):
+                    return {"ok": False, "error": "invalid_input", "field": kind, "reason": r.get("reason")}
+                dims[kind] = r
+                if r.get("ok"):
+                    tags.append(f"twin:{_KIND_PREFIX[kind]}:{r['code']}")
+                else:
+                    pendings.append(r)
+                    tags.append(f"twin:{_KIND_PREFIX[kind]}:raw:{r['raw']}")
     finally:
         conn.close()  # 后续是 30s 级 HTTP 调用，连接不能跨调用挂着（review#7）
     # 用户 tags 剥离 twin: 前缀（对抗 review#13）：维度命名空间只归归一层管
@@ -202,7 +237,11 @@ def _action_write(data: dict) -> dict:
                 db.record_evidence(conn, mid, dims,
                                    subject=str(data.get("subject") or ""))
                 out["evidence_id"] = mid
-            if dims["work_type"].get("ok"):
+            if audience_scoped:
+                zh = dims["audience"].get("label_zh") or dims["audience"]["raw"]
+                out["hint"] = (f"已沉淀为对「{zh}」的受众级通用偏好（不绑定工作类型）；"
+                               "夜间任务会把画像重抽象，对该受众的任何任务开工时自动带上")
+            elif dims["work_type"].get("ok"):
                 active = store.get_active(conn, dims["work_type"]["code"])
                 if active and active.get("version") is not None:
                     out["hint"] = (f"{dims['work_type']['label_zh']} 已有 persona prompt v{active['version']}；"
@@ -1229,8 +1268,11 @@ def _action_help(data: dict) -> dict:
         "actions": {
             "write": "沉淀一条工作偏好。必填 content/work_type/audience/purpose"
                      "（先 taxonomy 查清单选码；清单无合适项给原始值，进 pending 由用户裁定）；"
-                     "可选 subject/tags/source_ref/client（多 Agent 共接时 client 填宿主标识，如 kimi/jinleai）。",
-            "status": "查看各 work_type 的 prompt 版本概况与 pending 数量。",
+                     "可选 subject/tags/source_ref/client（多 Agent 共接时 client 填宿主标识，如 kimi/jinleai）。"
+                     "对该受众的通用偏好（不限工作类型）传 scope=audience（此时 work_type 省略，"
+                     "audience 必须归一成功）。",
+            "status": "查看各 work_type 的 prompt 版本概况、受众画像（audience_profiles）、"
+                      "需重抽象的受众（audience_stale）、pending 数量与未编译统计。",
             "compile": "取编译素材包（旧版本 prompt 编译参考 + 未编译偏好证据 + 编译规则），"
                        "由当前会话模型编译；独立会话执行、收尾即弃（session_note）。参数 work_type。",
             "submit": "提交编译产物落版本并写文件镜像。必填 work_type/prompt_md；"
