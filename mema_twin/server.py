@@ -234,9 +234,29 @@ def _action_status(data: dict) -> dict:
             v["versions"].append(dict(r))
             if r["status"] == "active":
                 v["active"] = r["version"]
+        pending = db.list_pending(conn)
+        # 受众画像触发器（AR-2）：证据数 ≠ 画像 evidence_count（或尚无画像）→ 需重抽象
+        aud_counts = conn.execute(
+            "SELECT audience, COUNT(*) AS n FROM twin_evidence"
+            " WHERE audience IS NOT NULL GROUP BY audience",
+        ).fetchall()
+        audience_stale: dict = {}
+        prof_ev: dict = {}
+        for prof in audience_profiles.values():
+            if prof["active"] is not None:
+                for vr in prof["versions"]:
+                    if vr["version"] == prof["active"]:
+                        prof_ev[prof["work_type"]] = vr.get("evidence_count")
+        for r in aud_counts:
+            aud = r["audience"]
+            pcode = store.audience_profile_code(aud)
+            m = prof_ev.get(pcode)
+            if m != r["n"]:
+                audience_stale[aud] = {"evidence": r["n"], "profile_evidence": m}
         out: dict = {"ok": True, "prompts": list(versions.values()),
                      "audience_profiles": list(audience_profiles.values()),
-                     "pending_count": len(db.list_pending(conn)),
+                     "audience_stale": audience_stale,
+                     "pending_count": len(pending),
                      "uncompiled": db.evidence_stats(conn)}
     finally:
         conn.close()
