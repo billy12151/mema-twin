@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.3.5] — 未发布
+
+- **夜间编译定时任务进单一真源 spec**：`SCHEDULED_TASKS_SPEC` 新增 `twin_nightly_compile`
+  （cadence daily，status→compile→submit；无证据不编不落版，避免版本号空转；凌晨无人值守
+  不向用户提问）。`scan_notice` 的 agent_instruction 从只提每周扫描改为两项任务一起建议
+  （夜间编译 + 每周治理扫描，可只选其一）；`scan` 的未编译建议补夜间任务出口；SKILL.md
+  口径同步（版本更新触发条件、scan_notice 引导）。产品仍不起任何调度——Agent 拿 spec 在
+  宿主平台创建等价任务（与 twin_scan 同款平台无关模式）。
+
 ## [0.3.4] — 2026-09-05
 
 - **have_persona_version 注入短路（agent 申报式）**：`task_start` / `task_resume` 接受

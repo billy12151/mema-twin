@@ -17,15 +17,34 @@ SCHEDULED_TASKS_TOPIC = "scheduled_tasks"
 SCAN_FRESH_DAYS = 7
 
 AGENT_INSTRUCTION = (
-    "Tell the user: mema-twin 建议创建一个定时扫描任务（每周一次 twin scan），"
-    "用于发现未编译偏好、pending 治理积压和未收口的交付任务。Ask whether to set "
-    "them up now; on consent, create the equivalent task on your own platform from "
-    "setup.tasks. The notice disappears by itself once the task has run recently — "
-    "no report-back needed."
+    "Tell the user: mema-twin 建议创建两个定时任务：①夜间 persona 编译（每天，"
+    "专用一次性会话跑 status→compile→submit，把当天未编译偏好自动整理进 persona "
+    "并落版，无证据不编）；②每周治理扫描（twin scan，发现 pending 积压与未收口"
+    "交付任务）。Ask whether to set them up now（可只选其一）; on consent, create "
+    "the equivalent task(s) on your own platform from setup.tasks. The notice "
+    "disappears by itself once the weekly scan has run recently — no report-back "
+    "needed."
 )
 
 SCHEDULED_TASKS_SPEC: dict = {
     "tasks": [
+        {
+            "name": "twin_nightly_compile",
+            "purpose": ("夜间无人值守的专用一次性编译会话（凌晨用户不在场，不向用户提问）："
+                        "把各 work_type 当天未编译的偏好证据编译进 persona prompt 并 "
+                        "submit 落版；未编译数为 0 的类型不编译不落版，避免版本号空转。"),
+            "cadence": "daily",
+            "calls": [
+                {"tool": "twin", "action": "status",
+                 "data": {"note": "取 uncompiled_by_work_type，只处理数量 >0 的 work_type"}},
+                {"tool": "twin", "action": "compile",
+                 "data": {"rule": "严格按素材包编译规则产出新版：与旧版本冲突以新证据为准，"
+                                  "文末列出版本间变更"}},
+                {"tool": "twin", "action": "submit",
+                 "data": {"rule": "source ids 用素材包证据 id；结束输出各类型前后版本号与"
+                                  "吸收证据数汇总；工具出错跳过并如实记录，同一项最多重试一次"}},
+            ],
+        },
         {
             "name": "twin_scan",
             "purpose": "汇总各 work_type 未编译偏好数、pending 积压与开放交付任务，产出给用户的治理建议。",
@@ -83,7 +102,8 @@ def run_scan() -> dict:
         top_s = "、".join(f"{k}（{v} 条）" for k, v in top)
         suggestions.append(
             f"有 {total_uncompiled} 条偏好未编译进 persona prompt（{top_s}）；"
-            "建议在强模型会话执行 twin(action=\"compile\") 后 submit 落版本")
+            "建议在强模型会话执行 twin(action=\"compile\") 后 submit 落版本，"
+            "或由夜间编译定时任务统一处理（help topic scheduled_tasks 有 spec）")
     if pending:
         suggestions.append(
             f"pending 治理积压 {len(pending)} 条（三维度未识别值）；"
