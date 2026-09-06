@@ -385,15 +385,21 @@ def _action_submit(data: dict) -> dict:
         # AR-7 白名单：origin 只标记夜间定时任务来源，交互式编译不要传
         return {"ok": False, "error": "invalid_input", "field": "origin",
                 "reason": "origin 仅接受 scheduled（夜间定时任务来源标记），交互式编译不要传"}
+    prompt_md = str(data["prompt_md"])
+    if len(prompt_md) > 100_000:
+        # 轮2 P3-3：失控的编译会话不配变成每次注入的全额负担
+        return {"ok": False, "error": "invalid_input", "field": "prompt_md",
+                "reason": f"过长（{len(prompt_md)} 字符，上限 100000）——编译产物应精炼"}
     conn = db.connect()
     try:
         code = store.resolve_work_type_code(conn, str(data["work_type"]))
         if not code:
             return {"ok": False, "error": "invalid_input", "field": "work_type", "reason": "unknown code"}
         rec = store.create_version(conn, code,
-                                   str(data["prompt_md"]),
+                                   prompt_md,
                                    source_ids,
                                    model=str(data.get("model") or ""))
+        pre_uncompiled = len(db.uncompiled_evidence(conn, code))
         marked = db.mark_compiled(conn, source_ids, rec["version"], code)
     finally:
         conn.close()
@@ -413,8 +419,16 @@ def _action_submit(data: dict) -> dict:
         rec["compare_hint"] = (
             f"下一任务如需新旧对比（双跑）：用户同意后调 twin(action=\"get\", data="
             f"{{\"work_type\": \"{code}\", \"version\": {rec['supersedes']}}}) 取旧版 "
-            f"v{rec['supersedes']} 全文，新旧各出一稿对比（旧版仅参考），对比后以新版"
-            "为执行依据；是否对比由用户决定，不追问。请把这句转告用户。")
+            f"v{rec['supersedes']} 全文，新旧各出一稿对比（旧版仅参考），对比后以 "
+            f"v{rec['version']} 为执行依据（若此后有更高版本，以更高版本为准）；"
+            "是否对比由用户决定，不追问。请把这句转告用户。")
+    leftover = pre_uncompiled - marked
+    if leftover > 0:
+        # 轮2 P2-1：漏列 source id 的证据会永久以增补在场且夜夜重编——当场点破
+        rec.setdefault("warnings", []).append(
+            f"该工作性质仍有 {leftover} 条未编译证据未被本版吸收"
+            "（source_memory_ids 漏列？）：它们将继续以增补注入，且夜间任务会因"
+            "未编译数>0 重复编译本类型")
     rec["evidence_marked_compiled"] = marked
     replaced = f"取代 v{rec['supersedes']}" if rec["supersedes"] is not None else "首个版本"
     rec["session_note"] = (f"请提醒用户：v{rec['version']} 已生效（{replaced}），"
@@ -466,6 +480,20 @@ def _action_rollback(data: dict) -> dict:
         out["guidance"] = ("已切换 active 版本。旧版本仍在库、可再 rollback 回来"
                            "（不删历史）；版本号不回收，下次 submit 继续 MAX+1。")
     return out
+
+
+def _coerce_task_id(tid) -> int:
+    """task_id 严格矫正（轮2 P3-4）：int / 纯数字串；浮点/bool/脏串打回——
+    4.9 不再静默截断成 4。ValueError 由调度器归 invalid_input。"""
+    if isinstance(tid, bool) or not isinstance(tid, (int, str)):
+        raise ValueError(f"task_id 需是任务号整数: {tid!r}")
+    try:
+        n = int(tid)
+    except ValueError:
+        raise ValueError(f"invalid task_id: {tid!r}") from None
+    if str(n) != str(tid).strip() and not isinstance(tid, int):
+        raise ValueError(f"invalid task_id: {tid!r}")
+    return n
 
 
 def _coerce_version_field(data: dict):
@@ -643,11 +671,13 @@ def _persona_injection(persona: dict | None, have: int | None) -> dict:
 SUPPLEMENT_MAX = 10
 
 
-def _supplement_payload(code: str, has_persona: bool,
-                         client: str | None = None) -> dict:
+def _supplement_payload(code: str, persona: dict | None,
+                        client: str | None = None) -> dict:
     """未编译增补（#905-②）：只走 twin_evidence 索引，绝不走 find 兜底
     （兜底会把全量历史证据当增补注入，AR-3）。返回可直接并进 task_start/
-    task_resume 响应的键；无可用增补返回 {}（软失败：mema 读挂→空，不影响注入）。"""
+    task_resume 响应的键；无可用增补返回 {}（软失败：mema 读挂→空，不影响注入）。
+    注意措辞不宣称"编译后新增"——source_memory_ids 漏列时旧证据也会以增补在场，
+    优先级声明一律钉死版本号（轮2 P2-1/P2-2，#896 出生标签要经得起时间）。"""
     conn = db.connect()
     try:
         rows = db.uncompiled_evidence(conn, code)
@@ -660,9 +690,14 @@ def _supplement_payload(code: str, has_persona: bool,
         rows = rows[-SUPPLEMENT_MAX:]  # ORDER BY id：尾部即最新
     evidence, skipped = _read_evidence_rows(rows, client, fail_fast=True)
     if not evidence:
-        return {}
-    if has_persona:
-        note = (f"以下为当前 persona 编译后新增的偏好（未编译增补），"
+        # 轮2 P3-6：全部读失败也要如实报 skipped，与"没有未编译证据"可区分
+        return {"persona_supplement_skipped": skipped} if skipped else {}
+    v = (persona or {}).get("version")
+    if persona is not None and v is not None:
+        note = (f"以下为尚未被 persona v{v} 吸收的偏好（未编译增补），"
+                f"与 v{v} 冲突时以增补为准；若本会话已注入更高版本，以注入版本为准")
+    elif persona is not None:  # mirror 降级无版本身份
+        note = ("以下为尚未被当前 persona 吸收的偏好（未编译增补），"
                 "与 persona prompt 冲突时以增补为准")
     else:
         note = ("尚无编译版 persona，以下为该工作性质已沉淀的偏好，按其执行；"
@@ -693,16 +728,15 @@ def _compare_offer(code: str, persona: dict) -> dict:
         prev_v = int(prev)
     except ValueError:
         return {}  # meta 脏值不让整个 task_start 报错（轮1 review P2）
-    if flow.get_meta(f"compare_offered:{code}:{v}"):
-        return {}
-    flow.ensure_schema()
-    flow.set_meta(f"compare_offered:{code}:{v}", db.now_iso())
+    if not flow.claim_meta(f"compare_offered:{code}:{v}", db.now_iso()):
+        return {}  # 已提议过：原子抢占（轮2 P2-3，多宿主并发只赢一个）
     return {"persona_compare_offer": {
         "current_version": v, "previous_version": prev_v,
         "hint": (f"v{v} 由夜间定时任务自动编译落版，用户未亲审。请询问用户一次："
                  "本任务单用新版跑，还是新旧双跑对比（token 增加）。用户同意双跑时，调 "
-                 f"twin(action=\"get\", data={{\"work_type\": \"{code}\", \"version\": {prev}}}) "
-                 "按需取旧版全文；旧版仅对比参考、非执行依据，对比后一律以新版为执行依据。"
+                 f"twin(action=\"get\", data={{\"work_type\": \"{code}\", \"version\": {prev_v}}}) "
+                 f"按需取旧版 v{prev_v} 全文；旧版仅对比参考、非执行依据，对比后一律以 v{v} "
+                 "为执行依据（若此后注入更高版本，以更高版本为准）。"
                  "用户不选或无人回应均照常单稿执行。")}}
 
 
@@ -730,7 +764,12 @@ def _action_task_start(data: dict) -> dict:
                     return {"ok": False, "error": "invalid_input", "field": kind, "reason": "required"}
                 dims[kind] = {"ok": False, "kind": kind, "raw": "", "code": None, "matched_by": None}
                 continue
-            r = normalize.normalize_value(kind, raw, conn)
+            if len(raw) > 200:
+                # 轮2 P3-8：与 write 同款限长，超长 pending raw 不入库
+                return {"ok": False, "error": "invalid_input", "field": kind,
+                        "reason": "过长（上限 200 字符）"}
+            # defer（轮2 P3-5）：建档成功才落 pending，读取/插入失败不留幽灵行
+            r = normalize.normalize_value(kind, raw, conn, defer_pending=True)
             dims[kind] = r
             if not r.get("ok"):
                 pendings.append(r)
@@ -739,8 +778,6 @@ def _action_task_start(data: dict) -> dict:
         persona = _task_persona(conn, code)
     finally:
         conn.close()
-    supplement = _supplement_payload(code, persona is not None,
-                                     client=_effective_client(data)) if code else {}
     record = flow.insert_task(
         brief=brief, status="planning", dims=dims,
         interpreted_intent=str(data.get("interpreted_intent") or "") or None,
@@ -749,6 +786,16 @@ def _action_task_start(data: dict) -> dict:
         session_todos=flow.current_todos(data.get("session")),
     )
     superseded = flow.supersede_open_tasks(record["id"])
+    if pendings:
+        conn = db.connect()
+        try:
+            for p in pendings:
+                p["pending_id"] = db.upsert_pending(conn, p["kind"], p["raw"], None)
+        finally:
+            conn.close()
+    # 增补取数放在建档/让位之后（轮2 P3-7）：慢 mema 读不再拉长并发让位竞窗
+    supplement = _supplement_payload(code, persona,
+                                     client=_effective_client(data)) if code else {}
     out: dict = {
         "ok": True, "task_id": record["id"], "status": "planning",
         "superseded_open_tasks": superseded,
@@ -779,6 +826,7 @@ def _action_task_submit(data: dict) -> dict:
     if tid is None or not deliverable:
         return {"ok": False, "error": "invalid_input",
                 "reason": "需要 task_id 与 deliverable_md"}
+    tid = _coerce_task_id(tid)
     flow.ensure_schema()
     record = flow.get_task(int(tid))
     if not record:
@@ -809,6 +857,7 @@ def _action_task_review(data: dict) -> dict:
     if tid is None or verdict not in ("approved", "changes_requested"):
         return {"ok": False, "error": "invalid_input",
                 "reason": "需要 task_id 与 verdict ∈ approved|changes_requested"}
+    tid = _coerce_task_id(tid)
     notes = str(data.get("notes") or "")
     flow.ensure_schema()
     record = flow.get_task(int(tid))
@@ -847,6 +896,7 @@ def _action_task_pending(data: dict) -> dict:
     tid = data.get("task_id")
     if tid is None:
         return {"ok": False, "error": "invalid_input", "reason": "需要 task_id"}
+    tid = _coerce_task_id(tid)
     flow.ensure_schema()
     record = flow.get_task(int(tid))
     if not record:
@@ -864,6 +914,7 @@ def _action_task_resume(data: dict) -> dict:
     tid = data.get("task_id")
     if tid is None:
         return {"ok": False, "error": "invalid_input", "reason": "需要 task_id"}
+    tid = _coerce_task_id(tid)
     try:
         have = _coerce_have_version(data)
     except ValueError as e:
@@ -889,7 +940,7 @@ def _action_task_resume(data: dict) -> dict:
         persona = _task_persona(conn, resume_code)
     finally:
         conn.close()
-    supplement = _supplement_payload(resume_code, persona is not None,
+    supplement = _supplement_payload(resume_code, persona,
                                      client=_effective_client(data)) if resume_code else {}
     new_record = flow.insert_task(
         brief=record["brief"], status="planning",
@@ -927,6 +978,7 @@ def _action_task_revise(data: dict) -> dict:
     tid = data.get("task_id")
     if tid is None:
         return {"ok": False, "error": "invalid_input", "reason": "需要 task_id"}
+    tid = _coerce_task_id(tid)
     new_brief = str(data.get("brief") or "").strip()
     revision_reason = str(data.get("revision_reason") or "").strip()
     deliverable = str(data.get("deliverable_md") or "").strip()
@@ -971,6 +1023,7 @@ def _action_task_close(data: dict) -> dict:
     tid = data.get("task_id")
     if tid is None:
         return {"ok": False, "error": "invalid_input", "reason": "需要 task_id"}
+    tid = _coerce_task_id(tid)
     flow.ensure_schema()
     record = flow.get_task(int(tid))
     if not record:
@@ -996,6 +1049,7 @@ def _action_task_get(data: dict) -> dict:
     tid = data.get("task_id")
     if tid is None:
         return {"ok": False, "error": "invalid_input", "reason": "需要 task_id"}
+    tid = _coerce_task_id(tid)
     flow.ensure_schema()
     record = flow.get_task(int(tid))
     if not record:
@@ -1022,7 +1076,7 @@ def _action_help(data: dict) -> dict:
             "description": "twin 定时任务 spec（夜间 persona 编译 + 每周治理扫描）：Agent 据此在宿主平台创建等价任务。",
             "agent_instruction": scan.AGENT_INSTRUCTION,
             "setup": scan.SCHEDULED_TASKS_SPEC,
-            "note": "提醒自消失：twin(action=\"scan\") 在 7 天内跑过即不再提示。",
+            "note": "提醒自消失：夜间编译（scheduled submit）或 scan 任一在 7 天内跑过即不再提示。",
         }
     return {
         "ok": True,
@@ -1036,7 +1090,7 @@ def _action_help(data: dict) -> dict:
             "submit": "提交编译产物落版本并写文件镜像。必填 work_type/prompt_md；"
                       "建议带 source_memory_ids 与 model。返回 supersedes（被取代的旧 active 版本）；"
                       "夜间定时任务落版必传 origin=scheduled（其余场景不要传）；"
-                      "交互式落版返回 compare_hint（下一任务可双跑对比的提示，转告用户）。",
+                      "取代旧版的交互式落版返回 compare_hint（双跑对比提示，转告用户；首个版本无）。",
             "rollback": "回滚 persona 版本（零阻力：无确认、无警告）。work_type 必填；"
                         "version 省略回上一版本、传 n 回指定版本；不删历史（retired 可再激活），"
                         "版本号不回收（下次 submit 继续 MAX+1）。",
