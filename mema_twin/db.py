@@ -9,10 +9,13 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import os
+import re
 import sqlite3
 from pathlib import Path
 
 from . import taxonomy
+
+_CODE_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -82,11 +85,12 @@ def now_iso() -> str:
 
 
 def validate_code_segment(value: str) -> str:
-    """canonical code 会进文件路径（prompts/<code>/）：与 server 侧桶名守卫
-    同款规则（对抗 review#1：canonicalize 是自定义 code 的唯一入口）。"""
+    """canonical code 会进文件路径（prompts/<code>/）、meta 键与 hint 内嵌的
+    调用示例：白名单字符集（轮2 P3-1/P3-2——引号/冒号/换行会造出非法示例，
+    单点 "." 会把镜像写进 prompts/ 根）。"""
     v = (value or "").strip()
-    if not v or "/" in v or "\\" in v or ".." in v or "\x00" in v or len(v) > 64:
-        raise ValueError(f"unsafe code segment: {value!r}")
+    if not v or len(v) > 64 or not _CODE_RE.match(v):
+        raise ValueError(f"unsafe code segment: {value!r}（仅允许字母/数字/下划线/连字符）")
     return v
 
 

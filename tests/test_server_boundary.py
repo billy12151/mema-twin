@@ -739,3 +739,95 @@ def test_notice_suppressed_by_scheduled_compile():
     server.twin("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m",
                            "origin": "scheduled"})
     assert scan.scan_notice() is None
+
+
+# ---- 轮2 对抗性 review 修复的回归 ----
+
+def test_claim_meta_atomic_first_wins():
+    """一次性标记原子抢占：首个 claim 赢，第二个输（多宿主并发只问一次）。"""
+    from mema_twin import flow
+    assert flow.claim_meta("t:x:1", "a") is True
+    assert flow.claim_meta("t:x:1", "b") is False
+
+
+def test_supplement_note_pinned_to_version(monkeypatch):
+    """优先级声明钉死版本号，不宣称"编译后新增"（漏列 source id 时旧证据也走增补）。"""
+    _stub_read(monkeypatch)
+    server.twin("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m"})
+    _mk_uncompiled([520])
+    r = server.twin("task_start", {"brief": "B", "work_type": "周报"})
+    note = r["persona_supplement_note"]
+    assert "尚未被 persona v1 吸收" in note
+    assert "与 v1 冲突时以增补为准" in note
+    assert "编译后新增" not in note
+
+
+def test_offer_hint_pins_version():
+    server.twin("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m"})
+    server.twin("submit", {"work_type": "周报", "prompt_md": "# v2", "model": "m",
+                           "origin": "scheduled"})
+    r = server.twin("task_start", {"brief": "B", "work_type": "周报"})
+    hint = r["persona_compare_offer"]["hint"]
+    assert "以 v2 为执行依据" in hint and "更高版本" in hint
+    h = server.twin("submit", {"work_type": "PPT", "prompt_md": "# a", "model": "m"})
+    h2 = server.twin("submit", {"work_type": "PPT", "prompt_md": "# b", "model": "m"})
+    assert "以 v2 为执行依据" in h2["compare_hint"]
+
+
+def test_task_id_float_rejected():
+    # " 4" 不在拒绝列表：strip 后比对是仓库矫正惯例（#895 have_version 同款）
+    for bad in (4.9, True, "4_9", "+4", "4.0", [4]):
+        r = server.twin("task_get", {"task_id": bad})
+        assert r.get("ok") is False and r.get("error") == "invalid_input", bad
+    assert server.twin("task_get", {"task_id": "4"}).get("error") == "not_found"
+
+
+def test_submit_prompt_md_size_cap():
+    r = server.twin("submit", {"work_type": "周报", "prompt_md": "x" * 100_001})
+    assert r.get("ok") is False and r.get("field") == "prompt_md"
+    ok = server.twin("submit", {"work_type": "周报", "prompt_md": "x" * 100_000})
+    assert ok.get("ok") is True
+
+
+def test_submit_leftover_unabsorbed_warning(monkeypatch):
+    """source_memory_ids 漏列：当场警告 + 残留证据继续以增补在场。"""
+    _stub_read(monkeypatch)
+    _mk_uncompiled([601, 602])
+    r = server.twin("submit", {"work_type": "周报", "prompt_md": "# v1",
+                               "model": "m", "source_memory_ids": [601]})
+    assert r["ok"] and any("1 条未编译证据未被本版吸收" in w for w in r["warnings"])
+    t = server.twin("task_start", {"brief": "B", "work_type": "周报"})
+    assert [e["id"] for e in t["persona_supplement"]] == [602]
+
+
+def test_task_start_dim_length_cap():
+    r = server.twin("task_start", {"brief": "B", "work_type": "周报",
+                                   "audience": "长" * 201})
+    assert r.get("ok") is False and r.get("field") == "audience"
+    # 失败不留幽灵 pending（defer 生效）
+    conn = db.connect()
+    assert db.list_pending(conn) == []
+    conn.close()
+
+
+def test_custom_code_charset_whitelist():
+    from mema_twin import db as twin_db
+    conn = db.connect()
+    for bad in ('we"ird', "a:b", ".", "a b", "a\nb"):
+        import pytest as _pytest
+        with _pytest.raises(ValueError):
+            twin_db.add_canonical(conn, "work_type", bad, "测试")
+    conn.close()
+
+
+def test_supplement_all_skipped_reports_skipped(monkeypatch):
+    """全部条目读未命中：无增补字段，但 skipped 如实上报（可区分"没有未编译"）。"""
+    from mema_twin import sink
+    monkeypatch.setattr(sink, "read_memory",
+                        lambda mid, workspace=None, client=None:
+                        {"ok": False, "error": "not_found"})
+    server.twin("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m"})
+    _mk_uncompiled([611, 612])
+    r = server.twin("task_start", {"brief": "B", "work_type": "周报"})
+    assert "persona_supplement" not in r
+    assert len(r["persona_supplement_skipped"]) == 2

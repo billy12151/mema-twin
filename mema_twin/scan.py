@@ -22,7 +22,7 @@ AGENT_INSTRUCTION = (
     "并落版，无证据不编）；②每周治理扫描（twin scan，发现 pending 积压与未收口"
     "交付任务）。Ask whether to set them up now（可只选其一）; on consent, create "
     "the equivalent task(s) on your own platform from setup.tasks. The notice "
-    "disappears by itself once the weekly scan has run recently — no report-back "
+    "disappears by itself once either task has run recently — no report-back "
     "needed."
 )
 
@@ -88,7 +88,7 @@ def scan_notice() -> dict | None:
         "type": "twin_scan_setup",
         "agent_instruction": AGENT_INSTRUCTION,
         "setup": SCHEDULED_TASKS_SPEC,
-        "note": "提醒自消失：scan 在 7 天内跑过即不再提示",
+        "note": "提醒自消失：夜间编译（scheduled submit）或 scan 任一在 7 天内跑过即不再提示",
     }
 
 

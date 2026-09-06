@@ -397,3 +397,20 @@ def set_meta(key: str, value: str) -> None:
         conn.commit()
     finally:
         conn.close()
+
+
+def claim_meta(key: str, value: str) -> bool:
+    """原子抢占（轮2 P2-3）：key 不存在则写入返回 True，已存在返回 False。
+    get_meta+set_meta 两连接之间有竞窗——http 多宿主并发 task_start 抢同一
+    compare_offered 标记时必须只赢一个，否则"只问一次"被问两次。"""
+    conn = db.connect()
+    try:
+        cur = conn.execute(
+            "INSERT INTO twin_meta(key, value) VALUES(?,?)"
+            " ON CONFLICT(key) DO NOTHING",
+            (key, value),
+        )
+        conn.commit()
+        return cur.rowcount == 1
+    finally:
+        conn.close()
