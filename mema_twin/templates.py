@@ -60,7 +60,10 @@ def compile_prompt_material(work_type: str, work_type_zh: str,
                      f"```markdown\n{current.get('prompt_md') or ''}\n```\n")
     else:
         parts.append("（无——这是首个版本 v1）\n")
-    parts.append(f"\n## 未编译偏好证据（{len(evidence)} 条）\n\n")
+    if audience_mode:
+        parts.append(f"\n## 该受众全部证据（{len(evidence)} 条，含已编译——画像是全量投影）\n\n")
+    else:
+        parts.append(f"\n## 未编译偏好证据（{len(evidence)} 条）\n\n")
     if evidence:
         for e in evidence:
             mid = e.get("id", "?")
