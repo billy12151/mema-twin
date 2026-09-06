@@ -772,6 +772,47 @@ def _compare_offer(code: str, persona: dict) -> dict:
                  "用户不选或无人回应均照常单稿执行。")}}
 
 
+# 受众画像雏形上限（#v0.3.6 拍板 A）：画像未编出时跨类型证据摘要垫底，≤5 条。
+AUDIENCE_PROTO_MAX = 5
+
+
+def _audience_payload(audience: str | None, exclude_work_type: str | None,
+                      client: str | None = None) -> dict:
+    """受众画像注入（v0.3.6）：画像全文优先，未编出时雏形垫底；受众未归一或
+    无素材返回 {}（软失败）。优先级链在 note 里显式声明：本类型增补 > 类型
+    persona > 受众画像/雏形（类型 persona 编译素材含受众参考，分辨率更高）。"""
+    if not audience:
+        return {}
+    conn = db.connect()
+    try:
+        profile = store.get_active(conn, store.audience_profile_code(audience))
+        if profile is not None and (profile.get("prompt_md") or "").strip():
+            v = profile.get("version")
+            tag = f"画像 v{v}" if v is not None else "画像（镜像降级读取）"
+            out = {"audience_profile_md": profile["prompt_md"],
+                   "audience_profile_note": (
+                       f"以上为对当前受众的通用口径{tag}：口径/详略/禁忌类可参考，"
+                       "格式与结构以本类型为准；冲突时优先级：本类型增补 > 类型 persona > "
+                       "受众画像（若会话中后续注入更高版本画像，以更新者为准）")}
+            return out
+        rows = db.audience_evidence(conn, audience,
+                                    exclude_work_type=exclude_work_type)
+    finally:
+        conn.close()
+    if not rows:
+        return {}
+    if len(rows) > AUDIENCE_PROTO_MAX:
+        rows = rows[-AUDIENCE_PROTO_MAX:]  # 最新优先
+    evidence, skipped = _read_evidence_rows(rows, client, fail_fast=True)
+    if not evidence:
+        return {"audience_profile_skipped": skipped} if skipped else {}
+    return {"audience_profile_proto": evidence,
+            "audience_profile_note": (
+                "尚无该受众画像，以下为对同一受众在其他类型产出中的偏好（雏形）："
+                "口径/详略/禁忌类可参考，格式与结构以本类型为准；冲突时本类型增补/"
+                "persona 优先")}
+
+
 def _action_task_start(data: dict) -> dict:
     brief = str(data.get("brief") or "").strip()
     if not brief:
@@ -836,6 +877,11 @@ def _action_task_start(data: dict) -> dict:
             "任务已建档。按 persona prompt 的偏好/结构/前置清单执行；材料不齐全先向"
             "用户确认或补齐。完成后 twin(action=\"task_submit\") 提交评审。"),
     }
+    # 受众画像注入：与 persona/增补独立，任何分支都随响应进场（audience 未归一则空）
+    aud_dim = dims.get("audience") or {}
+    aud_code = aud_dim.get("code") if aud_dim.get("ok") else None
+    if aud_code:
+        out.update(_audience_payload(aud_code, code, client=_effective_client(data)))
     if persona:
         out.update(_persona_injection(persona, have))
         out.update(_compare_offer(code, persona))
@@ -995,6 +1041,10 @@ def _action_task_resume(data: dict) -> dict:
     }
     if not old_todos:
         out["warnings"] = ["原任务没有 todos——可能已全部完成"]
+    aud_code = record.get("audience")
+    if aud_code:
+        out.update(_audience_payload(aud_code, resume_code,
+                                     client=_effective_client(data)))
     if persona:
         out.update(_persona_injection(persona, have))
         out.update(supplement)

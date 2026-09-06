@@ -900,3 +900,47 @@ def test_audience_evidence_query_semantics():
     no_doc = twin_db.audience_evidence(conn, "leadership", exclude_work_type="work_report")
     assert [r["memory_id"] for r in no_doc] == [802, 803]  # 去重本类型，aud- 行保留
     conn.close()
+
+
+# ---- v0.3.6 受众画像 ②：注入贯通 ----
+
+def test_task_start_injects_audience_profile(monkeypatch):
+    """画像存在：audience_profile_md 全文 + 优先级链标签。"""
+    server.twin("submit", {"work_type": "aud-leadership", "prompt_md": "# 对领导要简洁白话",
+                           "model": "m"})
+    r = server.twin("task_start", {"brief": "B", "work_type": "周报", "audience": "领导"})
+    assert r["audience_profile_md"] == "# 对领导要简洁白话"
+    assert "画像 v1" in r["audience_profile_note"]
+    assert "本类型增补 > 类型 persona > 受众画像" in r["audience_profile_note"]
+
+
+def test_task_start_audience_proto(monkeypatch):
+    """画像未编出：雏形垫底（排除本类型行，防与增补重复）。"""
+    _stub_read(monkeypatch)
+    server.twin("submit", {"work_type": "PPT", "prompt_md": "# p", "model": "m"})
+    _mk_uncompiled([901])  # 周报+领导（本类型外）
+    conn = db.connect()
+    ppt_dims = {"work_type": {"ok": True, "code": "presentation", "raw": "PPT"},
+                "audience": {"ok": True, "code": "leadership", "raw": "领导"},
+                "purpose": {"ok": True, "code": "sync_info", "raw": "同步"}}
+    db.record_evidence(conn, 902, ppt_dims)  # 本类型行：不进雏形（在增补里）
+    conn.close()
+    r = server.twin("task_start", {"brief": "B", "work_type": "PPT", "audience": "领导"})
+    assert [e["id"] for e in r["audience_profile_proto"]] == [901]
+    assert "雏形" in r["audience_profile_note"]
+    assert [e["id"] for e in r["persona_supplement"]] == [902]
+
+
+def test_task_start_no_audience_no_profile(monkeypatch):
+    """audience 未传/未归一 → 无画像字段（软降级）。"""
+    r = server.twin("task_start", {"brief": "B", "work_type": "周报"})
+    for k in ("audience_profile_md", "audience_profile_proto"):
+        assert k not in r
+
+
+def test_task_resume_injects_audience_profile():
+    server.twin("submit", {"work_type": "aud-leadership", "prompt_md": "# 画像",
+                           "model": "m"})
+    t1 = server.twin("task_start", {"brief": "B", "work_type": "周报", "audience": "领导"})
+    r = server.twin("task_resume", {"task_id": t1["task_id"]})
+    assert r["audience_profile_md"] == "# 画像"
