@@ -44,6 +44,13 @@ description: 个人分身：工作类偏好沉淀与 persona prompt 编译，经
 - 用户明确要求更新分身、夜间编译定时任务自动执行、或定时扫描汇总后用户确认
   → `twin(action="compile")` 拿素材包 → 当前会话模型编译 → `twin(action="submit")` 落版本。
   用户要求在当前会话整理就直接执行，强模型建议提一次即可，不要反复劝说换会话
+- `task_start` 返回 `persona_compare_offer` 时：按 hint 询问用户一次（单用新版 / 新旧双跑），
+  同一版本只问这一次；用户同意双跑才调
+  `twin(action="get", data={"work_type":..., "version": previous_version})` 取旧版全文，
+  旧版仅对比参考、非执行依据，对比后一律以新版为执行依据；对比中用户挑出的不足照常
+  twin.write 沉淀
+- `submit` 返回 `compare_hint` 时：非阻塞转告用户一句"下一任务可要求新旧双跑对比"，
+  是否对比由用户决定，不追问
 - `status` 返回 scan_notice 时：按其 agent_instruction 询问用户是否创建定时任务
   ——夜间 persona 编译（每天，无人值守把未编译偏好整理落版）与每周治理扫描
   （调用 `twin(action="scan")`），spec 都在 `setup.tasks`；用户同意哪个建哪个

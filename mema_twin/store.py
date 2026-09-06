@@ -183,6 +183,21 @@ def get_active(conn: sqlite3.Connection, work_type: str) -> dict | None:
     return None
 
 
+def get_version(conn: sqlite3.Connection, work_type: str, version: int) -> dict | None:
+    """按版本号取历史版本（双跑对比取旧版用，#905-④）。DB 为准；镜像降级
+    无版本身份，不走镜像。"""
+    row = conn.execute(
+        "SELECT * FROM twin_prompt_versions WHERE work_type=? AND version=?",
+        (work_type, int(version)),
+    ).fetchone()
+    if not row:
+        return None
+    d = dict(row)
+    d["source_memory_ids"] = json.loads(d["source_memory_ids"])
+    d["from_mirror"] = False
+    return d
+
+
 def list_versions(conn: sqlite3.Connection, work_type: str) -> list[dict]:
     rows = conn.execute(
         "SELECT * FROM twin_prompt_versions WHERE work_type=? ORDER BY version DESC",

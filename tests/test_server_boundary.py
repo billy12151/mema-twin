@@ -596,3 +596,63 @@ def test_compile_material_conditional_and_prohibitions(monkeypatch):
     assert r["ok"]
     assert "条件化策略" in r["material"] and "适用条件与例外" in r["material"]
     assert "高优先级禁止项" in r["material"]
+
+
+# ---- v0.3.5 双跑对比（#905-④）----
+
+def test_compare_offer_scheduled_once():
+    """夜间 origin 落版 → 首个 task_start 附提议（不含旧版全文），且只附一次。"""
+    server.twin("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m"})
+    r2 = server.twin("submit", {"work_type": "周报", "prompt_md": "# v2", "model": "m",
+                                "origin": "scheduled"})
+    assert r2["ok"] and r2["supersedes"] == 1
+    assert "compare_hint" not in r2  # scheduled 落版走 task_start 提议，不走 hint
+    t1 = server.twin("task_start", {"brief": "B", "work_type": "周报"})
+    offer = t1.get("persona_compare_offer")
+    assert offer and offer["current_version"] == 2 and offer["previous_version"] == 1
+    assert "夜间定时任务" in offer["hint"] and "双跑" in offer["hint"]
+    assert "get" in offer["hint"] and "非执行依据" in offer["hint"]
+    assert "prompt_md" not in offer  # 提议不携带旧版全文
+    t2 = server.twin("task_start", {"brief": "B2", "work_type": "周报"})
+    assert "persona_compare_offer" not in t2
+
+
+def test_manual_submit_compare_hint_no_offer():
+    """交互式落版带 compare_hint（v1 无旧版不带）；手动编译永不触发提议。"""
+    r1 = server.twin("submit", {"work_type": "PPT", "prompt_md": "# a", "model": "m"})
+    assert r1["ok"] and "compare_hint" not in r1
+    r2 = server.twin("submit", {"work_type": "PPT", "prompt_md": "# b", "model": "m"})
+    assert r2["ok"] and "compare_hint" in r2
+    assert '"version": 1' in r2["compare_hint"] and "双跑" in r2["compare_hint"]
+    t = server.twin("task_start", {"brief": "B", "work_type": "PPT"})
+    assert "persona_compare_offer" not in t
+
+
+def test_scheduled_first_version_no_offer():
+    """scheduled 落 v1：无旧版可比（compare_prev 不记）→ 永不提议。"""
+    r = server.twin("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m",
+                               "origin": "scheduled"})
+    assert r["ok"] and r["supersedes"] is None and "compare_hint" not in r
+    t = server.twin("task_start", {"brief": "B", "work_type": "周报"})
+    assert "persona_compare_offer" not in t
+
+
+def test_submit_origin_whitelist():
+    r = server.twin("submit", {"work_type": "周报", "prompt_md": "# x",
+                               "origin": "cron"})
+    assert r.get("ok") is False and r.get("field") == "origin"
+
+
+def test_get_version_param():
+    server.twin("submit", {"work_type": "周报", "prompt_md": "# a", "model": "m"})
+    server.twin("submit", {"work_type": "周报", "prompt_md": "# b", "model": "m"})
+    g = server.twin("get", {"work_type": "周报"})
+    assert g["ok"] and g["version"] == 2 and g["prompt_md"] == "# b"
+    g1 = server.twin("get", {"work_type": "周报", "version": 1})
+    assert g1["ok"] and g1["version"] == 1 and g1["prompt_md"] == "# a"
+    gn = server.twin("get", {"work_type": "周报", "version": 99})
+    assert gn.get("ok") is False and gn.get("error") == "not_found"
+    assert "镜像降级" in gn.get("reason", "")
+    for bad in ("abc", 2.9, True, "1.5", 0, -1, 10**20, "1_0", "+2"):
+        gb = server.twin("get", {"work_type": "周报", "version": bad})
+        assert gb.get("ok") is False and gb.get("field") == "version", bad
