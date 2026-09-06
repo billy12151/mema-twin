@@ -54,9 +54,15 @@ def test_scan_report_and_suggestions(env):
     assert out["ok"] and out["uncompiled_total"] == 1
     assert out["open_tasks"] == 1
     assert any("compile" in s for s in out["suggestions"])
+    assert any("夜间" in s for s in out["suggestions"])
 
 
 def test_spec_single_source(env):
     spec = scan.SCHEDULED_TASKS_SPEC
-    assert spec["tasks"][0]["calls"][0]["action"] == "scan"
+    names = [t["name"] for t in spec["tasks"]]
+    assert names == ["twin_nightly_compile", "twin_scan"]
+    nightly = spec["tasks"][0]
+    assert nightly["cadence"] == "daily"
+    assert [c["action"] for c in nightly["calls"]] == ["status", "compile", "submit"]
     assert "twin" in scan.AGENT_INSTRUCTION
+    assert "夜间 persona 编译" in scan.AGENT_INSTRUCTION
