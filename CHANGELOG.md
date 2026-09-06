@@ -2,6 +2,13 @@
 
 ## [0.3.5] — 未发布
 
+- **未编译增补注入（overlay）**：`task_start` / `task_resume` 注入 active persona 时，同步携带
+  该 work_type 的未编译偏好证据全文（`persona_supplement` + `persona_supplement_note`），显式
+  优先级声明"与 prompt 冲突时以增补为准"——新偏好下一任务即生效，不等编译。短路相等分支
+  同样带增补（增补是新进场材料，上文没有）。上限 10 条截旧留新并提醒手动 compile（用户没建
+  夜间任务时的保险丝）。空 persona 分支（有证据无 prompt）原始证据当雏形注入，第一天就有
+  分身效果。软失败：mema 读挂跳过（连接级失败 fail-fast 跳过剩余，不拖慢开工）、全部失败
+  则无增补字段、persona 照常注入。增补只走 twin_evidence 索引，不走 compile 的 find 兜底。
 - **夜间编译定时任务进单一真源 spec**：`SCHEDULED_TASKS_SPEC` 新增 `twin_nightly_compile`
   （cadence daily，status→compile→submit；无证据不编不落版，避免版本号空转；凌晨无人值守
   不向用户提问）。`scan_notice` 的 agent_instruction 从只提每周扫描改为两项任务一起建议
