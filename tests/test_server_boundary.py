@@ -588,3 +588,11 @@ def test_task_resume_supplement(monkeypatch):
     assert r["ok"]
     assert len(r["persona_supplement"]) == 1
     assert "以增补为准" in r["persona_supplement_note"]
+
+
+def test_compile_material_conditional_and_prohibitions(monkeypatch):
+    """#905-③：编译规则带条件化策略与高优先禁止项两行。"""
+    r = server.twin("compile", {"work_type": "周报"})
+    assert r["ok"]
+    assert "条件化策略" in r["material"] and "适用条件与例外" in r["material"]
+    assert "高优先级禁止项" in r["material"]
