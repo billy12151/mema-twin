@@ -482,3 +482,109 @@ def test_rollback_action_boundary():
     # 回滚后 get 拿到的是回滚版本
     g = server.twin("get", {"work_type": "周报"})
     assert g["ok"] and g["version"] == 1 and g["prompt_md"] == "# v1"
+
+
+# ---- v0.3.5 增补注入（#905-②）----
+
+def _mk_uncompiled(mids, code="work_report"):
+    conn = db.connect()
+    dims = {"work_type": {"ok": True, "code": code, "raw": "周报"},
+            "audience": {"ok": True, "code": "leadership", "raw": "高层"},
+            "purpose": {"ok": True, "code": "sync_info", "raw": "同步"}}
+    for mid in mids:
+        db.record_evidence(conn, mid, dims)
+    conn.close()
+
+
+def _stub_read(monkeypatch, contents=None, fail=False):
+    from mema_twin import sink
+    if fail:
+        def boom(mid, workspace=None, client=None):
+            raise sink.SinkError("mema HTTP MCP 不可达（127.0.0.1:8000）")
+        monkeypatch.setattr(sink, "read_memory", boom)
+        return
+    def fake(mid, workspace=None, client=None):
+        return {"ok": True, "data": {"memory": {"id": mid,
+                "subject": f"s{mid}", "content": contents or f"偏好{mid}"}}}
+    monkeypatch.setattr(sink, "read_memory", fake)
+
+
+def test_task_start_supplement_injected(monkeypatch):
+    """有 persona + 未编译证据 → 增补随注入，优先级声明在场。"""
+    _stub_read(monkeypatch)
+    server.twin("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m"})
+    _mk_uncompiled([501, 502])
+    r = server.twin("task_start", {"brief": "B", "work_type": "周报"})
+    assert r["ok"]
+    assert r["persona_prompt_md"] == "# v1"
+    assert len(r["persona_supplement"]) == 2
+    assert r["persona_supplement"][0]["content"] == "偏好501"
+    assert "以增补为准" in r["persona_supplement_note"]
+
+
+def test_task_start_supplement_with_shortcircuit(monkeypatch):
+    """短路相等分支必须同样带增补：增补是新进场材料，上文没有（#895 陷阱）。"""
+    _stub_read(monkeypatch)
+    server.twin("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m"})
+    _mk_uncompiled([503])
+    r = server.twin("task_start", {"brief": "B", "work_type": "周报",
+                                   "have_persona_version": 1})
+    assert r["ok"] and r.get("persona_unchanged") is True
+    assert "persona_prompt_md" not in r
+    assert len(r["persona_supplement"]) == 1
+
+
+def test_task_start_supplement_cap(monkeypatch):
+    """上限 10 条截旧留新 + 积压提醒（#905-C 拍板）。"""
+    _stub_read(monkeypatch)
+    server.twin("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m"})
+    _mk_uncompiled(list(range(600, 612)))
+    r = server.twin("task_start", {"brief": "B", "work_type": "周报"})
+    assert len(r["persona_supplement"]) == 10
+    assert r["persona_supplement"][0]["id"] == 602  # 最旧两条被截
+    assert "另有 2 条" in r["persona_supplement_note"]
+    assert "compile" in r["persona_supplement_note"]
+
+
+def test_task_start_supplement_mema_fail_soft(monkeypatch):
+    """mema 全挂 → 无增补字段，persona 照常注入（软失败，绝不缺席）。"""
+    _stub_read(monkeypatch, fail=True)
+    server.twin("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m"})
+    _mk_uncompiled([504, 505])
+    r = server.twin("task_start", {"brief": "B", "work_type": "周报"})
+    assert r["ok"] and r["persona_prompt_md"] == "# v1"
+    assert "persona_supplement" not in r
+
+
+def test_task_start_empty_persona_proto(monkeypatch):
+    """空 persona 分支（#905-A 拍板：给）：原始证据当雏形注入。"""
+    _stub_read(monkeypatch)
+    _mk_uncompiled([506])
+    r = server.twin("task_start", {"brief": "B", "work_type": "周报"})
+    assert r["ok"]
+    assert len(r["persona_supplement"]) == 1
+    assert "尚无编译版 persona" in r["persona_supplement_note"]
+    assert "已沉淀偏好" in r["hint"]
+    assert "通用标准" not in r["hint"]
+
+
+def test_task_start_no_evidence_no_supplement(monkeypatch):
+    """无未编译证据 → 不产生增补字段（也不能走 find 兜底，AR-3）。"""
+    from mema_twin import sink
+    monkeypatch.setattr(sink, "find", lambda *a, **k: {"ok": True, "data": {"results": [
+        {"id": 999, "tags": ["twin:wt:work_report"], "content": "历史偏好"}]}})
+    server.twin("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m"})
+    r = server.twin("task_start", {"brief": "B", "work_type": "周报"})
+    assert "persona_supplement" not in r
+
+
+def test_task_resume_supplement(monkeypatch):
+    """task_resume 同一注入点：增补照带。"""
+    _stub_read(monkeypatch)
+    server.twin("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m"})
+    start = server.twin("task_start", {"brief": "B", "work_type": "周报"})
+    _mk_uncompiled([507])
+    r = server.twin("task_resume", {"task_id": start["task_id"]})
+    assert r["ok"]
+    assert len(r["persona_supplement"]) == 1
+    assert "以增补为准" in r["persona_supplement_note"]

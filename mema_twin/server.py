@@ -261,19 +261,22 @@ def _fetch_evidence_find(conn, code: str, client: str | None = None) -> list[dic
             if tag in (r.get("tags") or []) and str(r.get("id")) not in compiled]
 
 
-def _fetch_evidence(conn, code: str, client: str | None = None) -> tuple[list[dict], list[dict]]:
-    """compile 证据：优先 twin_evidence 索引 + 按 id 精确 read 取全文（召回
-    精确无丢失，M1.3）；索引为空退回 find 兜底。返回 (evidence, skipped)。"""
-    rows = db.uncompiled_evidence(conn, code)
-    if not rows:
-        return _fetch_evidence_find(conn, code), []
+def _read_evidence_rows(rows: list[dict], client: str | None = None) -> tuple[list[dict], list[dict]]:
+    """按 id 逐条 read 全文（compile 与增补注入共用的读取通路）。连接级 SinkError
+    （mema 不可达）即跳过剩余条目——增补在 task_start 热路径上，不能被挂起的
+    mema 逐条拖慢；单条 not-found 不触发 fail-fast。"""
     evidence: list[dict] = []
     skipped: list[dict] = []
+    mema_down = False
     for r in rows:
         mid = r["memory_id"]
+        if mema_down:
+            skipped.append({"memory_id": mid, "reason": "mema 不可达，跳过剩余"})
+            continue
         try:
             resp = sink.read_memory(mid, _bucket(), client=client)
         except sink.SinkError as e:
+            mema_down = True
             skipped.append({"memory_id": mid, "reason": f"mema read 失败: {e}"})
             continue
         if not resp.get("ok"):
@@ -282,7 +285,7 @@ def _fetch_evidence(conn, code: str, client: str | None = None) -> tuple[list[di
             continue
         mem = (resp.get("data") or {}).get("memory") or {}
         if not (mem.get("content") or "").strip():
-            # 对抗 review#9②：形状漂移不能产出空证据行进素材包
+            # 对抗 review#9②：形状漂移不能产出空证据行（compile 素材包/增补同规）
             skipped.append({"memory_id": mid, "reason": "read 响应缺 memory.content"})
             continue
         evidence.append({
@@ -293,6 +296,15 @@ def _fetch_evidence(conn, code: str, client: str | None = None) -> tuple[list[di
             "purpose": r.get("purpose"),
         })
     return evidence, skipped
+
+
+def _fetch_evidence(conn, code: str, client: str | None = None) -> tuple[list[dict], list[dict]]:
+    """compile 证据：优先 twin_evidence 索引 + 按 id 精确 read 取全文（召回
+    精确无丢失，M1.3）；索引为空退回 find 兜底。返回 (evidence, skipped)。"""
+    rows = db.uncompiled_evidence(conn, code)
+    if not rows:
+        return _fetch_evidence_find(conn, code, client), []
+    return _read_evidence_rows(rows, client)
 
 
 def _is_loopback_host(host: str) -> bool:
@@ -571,6 +583,44 @@ def _persona_injection(persona: dict | None, have: int | None) -> dict:
     return out
 
 
+# 未编译增补上限（#905-②拍板：10 条）：夜间任务收口后增补 ≤1 天写入量，
+# 上限是用户没建夜间任务时的保险丝——截旧留新 + 提醒手动编译，不无限膨胀。
+SUPPLEMENT_MAX = 10
+
+
+def _supplement_payload(code: str, has_persona: bool,
+                         client: str | None = None) -> dict:
+    """未编译增补（#905-②）：只走 twin_evidence 索引，绝不走 find 兜底
+    （兜底会把全量历史证据当增补注入，AR-3）。返回可直接并进 task_start/
+    task_resume 响应的键；无可用增补返回 {}（软失败：mema 读挂→空，不影响注入）。"""
+    conn = db.connect()
+    try:
+        rows = db.uncompiled_evidence(conn, code)
+    finally:
+        conn.close()
+    if not rows:
+        return {}
+    total = len(rows)
+    if total > SUPPLEMENT_MAX:
+        rows = rows[-SUPPLEMENT_MAX:]  # ORDER BY id：尾部即最新
+    evidence, skipped = _read_evidence_rows(rows, client)
+    if not evidence:
+        return {}
+    if has_persona:
+        note = (f"以下为当前 persona 编译后新增的偏好（未编译增补），"
+                "与 persona prompt 冲突时以增补为准")
+    else:
+        note = ("尚无编译版 persona，以下为该工作性质已沉淀的偏好，按其执行；"
+                "积累后可 twin(action=\"compile\") 生成 v1")
+    if total > len(rows):
+        note += (f"；另有 {total - len(rows)} 条更早的未编译偏好未带上，"
+                 "建议 twin(action=\"compile\") 手动整理")
+    out = {"persona_supplement": evidence, "persona_supplement_note": note}
+    if skipped:
+        out["persona_supplement_skipped"] = skipped
+    return out
+
+
 def _action_task_start(data: dict) -> dict:
     brief = str(data.get("brief") or "").strip()
     if not brief:
@@ -600,9 +650,12 @@ def _action_task_start(data: dict) -> dict:
             if not r.get("ok"):
                 pendings.append(r)
         wt = dims["work_type"]
-        persona = _task_persona(conn, wt.get("code") if wt.get("ok") else None)
+        code = wt.get("code") if wt.get("ok") else None
+        persona = _task_persona(conn, code)
     finally:
         conn.close()
+    supplement = _supplement_payload(code, persona is not None,
+                                     client=_effective_client(data)) if code else {}
     record = flow.insert_task(
         brief=brief, status="planning", dims=dims,
         interpreted_intent=str(data.get("interpreted_intent") or "") or None,
@@ -621,6 +674,12 @@ def _action_task_start(data: dict) -> dict:
     }
     if persona:
         out.update(_persona_injection(persona, have))
+        out.update(supplement)
+    elif supplement:
+        # 空 persona 分支（#905-A 拍板：给）：原始证据当雏形注入，第一天就有分身效果
+        out.update(supplement)
+        out["hint"] = ("该工作性质尚无编译版 persona，本次按上方已沉淀偏好执行；"
+                       "积累后可 twin(action=\"compile\") 生成 v1")
     else:
         reason = "work_type 未归一（先治理 pending）" if not wt.get("ok") else "该工作性质尚无 persona prompt"
         out["hint"] = (f"{reason}；可先喂历史产出物或积累偏好后 "
@@ -740,9 +799,12 @@ def _action_task_resume(data: dict) -> dict:
             for k in taxonomy.KINDS}
     conn = db.connect()
     try:
-        persona = _task_persona(conn, record.get("work_type"))
+        resume_code = record.get("work_type")
+        persona = _task_persona(conn, resume_code)
     finally:
         conn.close()
+    supplement = _supplement_payload(resume_code, persona is not None,
+                                     client=_effective_client(data)) if resume_code else {}
     new_record = flow.insert_task(
         brief=record["brief"], status="planning",
         dims=dims, interpreted_intent=record.get("interpreted_intent"),
@@ -766,6 +828,10 @@ def _action_task_resume(data: dict) -> dict:
         out["warnings"] = ["原任务没有 todos——可能已全部完成"]
     if persona:
         out.update(_persona_injection(persona, have))
+        out.update(supplement)
+    elif supplement:
+        out.update(supplement)
+        out["hint"] = "该工作性质尚无编译版 persona，按上方已沉淀偏好执行；可 compile 生成 v1"
     else:
         out["hint"] = "该工作性质尚无 persona prompt；可先 compile 生成或按通用标准执行"
     return out
