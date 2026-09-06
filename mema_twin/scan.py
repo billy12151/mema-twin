@@ -41,8 +41,11 @@ SCHEDULED_TASKS_SPEC: dict = {
                  "data": {"rule": "严格按素材包编译规则产出新版：与旧版本冲突以新证据为准，"
                                   "文末列出版本间变更"}},
                 {"tool": "twin", "action": "submit",
-                 "data": {"rule": "source ids 用素材包证据 id；结束输出各类型前后版本号与"
-                                  "吸收证据数汇总；工具出错跳过并如实记录，同一项最多重试一次"}},
+                 "data": {"origin": "scheduled",
+                          "rule": "source ids 用素材包证据 id；origin=scheduled 必传"
+                                  "（夜间落版标记，供次日首任务双跑对比提议）；"
+                                  "结束输出各类型前后版本号与吸收证据数汇总；"
+                                  "工具出错跳过并如实记录，同一项最多重试一次"}},
             ],
         },
         {

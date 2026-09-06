@@ -377,6 +377,11 @@ def _action_submit(data: dict) -> dict:
     except ValueError as e:
         return {"ok": False, "error": "invalid_input", "field": "source_memory_ids",
                 "reason": str(e)}
+    origin = data.get("origin")
+    if origin is not None and origin != "scheduled":
+        # AR-7 白名单：origin 只标记夜间定时任务来源，交互式编译不要传
+        return {"ok": False, "error": "invalid_input", "field": "origin",
+                "reason": "origin 仅接受 scheduled（夜间定时任务来源标记），交互式编译不要传"}
     conn = db.connect()
     try:
         code = store.resolve_work_type_code(conn, str(data["work_type"]))
@@ -391,6 +396,20 @@ def _action_submit(data: dict) -> dict:
         conn.close()
     rec["ok"] = True
     rec["supersedes"] = rec.pop("superseded_version")  # 落版即裁决：本版取代的旧 active 版本
+    if origin == "scheduled":
+        # #905-④：夜间落版标记来源 + 记对比基线（AR-1：previous_version 只在落版时
+        # 可靠，事后推导会被 rollback/多版历史失真）；v1 无旧版可比则不记 → 永不提议
+        flow.ensure_schema()
+        flow.set_meta(f"persona_origin:{code}:{rec['version']}", "scheduled")
+        if rec["supersedes"] is not None:
+            flow.set_meta(f"compare_prev:{code}:{rec['version']}", str(rec["supersedes"]))
+    elif rec["supersedes"] is not None:
+        # 交互式落版的可发现性（#905-④补充拍板）：告知双跑玩法，是否对比用户自决
+        rec["compare_hint"] = (
+            f"下一任务如需新旧对比（双跑）：用户同意后调 twin(action=\"get\", data="
+            f"{{\"work_type\": \"{code}\", \"version\": {rec['supersedes']}}}) 取旧版 "
+            f"v{rec['supersedes']} 全文，新旧各出一稿对比（旧版仅参考），对比后以新版"
+            "为执行依据；是否对比由用户决定，不追问。请把这句转告用户。")
     rec["evidence_marked_compiled"] = marked
     replaced = f"取代 v{rec['supersedes']}" if rec["supersedes"] is not None else "首个版本"
     rec["session_note"] = (f"请提醒用户：v{rec['version']} 已生效（{replaced}），"
@@ -444,18 +463,49 @@ def _action_rollback(data: dict) -> dict:
     return out
 
 
+def _coerce_version_field(data: dict):
+    """get/rollback 共用的 version 矫正（#905-④ 抽出）：int / 数字串，≥1、≤2^63-1；
+    脏值打回 None 由调用方组 invalid_input。"""
+    version = data.get("version")
+    if version is None:
+        return None
+    if isinstance(version, bool) or not isinstance(version, (int, str)):
+        return False
+    try:
+        n = int(version)
+    except ValueError:
+        n = None
+    if (n is None or n < 1 or n > 2**63 - 1
+            or (str(n) != str(version).strip() and not isinstance(version, int))):
+        return False
+    return n
+
+
 def _action_get(data: dict) -> dict:
     wt = str(data.get("work_type") or "").strip()
     if not wt:
         return {"ok": False, "error": "invalid_input", "field": "work_type", "reason": "required"}
+    version = _coerce_version_field(data)
+    if version is False:
+        return {"ok": False, "error": "invalid_input", "field": "version",
+                "reason": f"invalid version: {data.get('version')!r}"}
     conn = db.connect()
     try:
         code = store.resolve_work_type_code(conn, wt)
         if not code:
             return {"ok": False, "error": "invalid_input", "field": "work_type", "reason": "unknown code"}
-        rec = store.get_active(conn, code)
+        if version is not None:
+            rec = store.get_version(conn, code, version)
+        else:
+            rec = store.get_active(conn, code)
     finally:
         conn.close()
+    if version is not None and not rec:
+        # 镜像降级下无版本身份（AR-6）：明确报不可版本化读取，不猜
+        return {"ok": False, "error": "not_found",
+                "reason": f"{code} 不存在版本 v{version}；若处于镜像降级状态，"
+                          "版本化读取不可用——不带 version 调 get 可取 active 全文；"
+                          "twin(action=\"status\") 查看版本概况"}
     if not rec:
         return {"ok": True, "work_type": code, "prompt_md": None,
                 "hint": "尚无 persona prompt；可先喂历史产出物或积累偏好后 compile"}
@@ -621,6 +671,32 @@ def _supplement_payload(code: str, has_persona: bool,
     return out
 
 
+def _compare_offer(code: str, persona: dict) -> dict:
+    """夜间版首任务双跑提议（#905-④）：仅 origin=scheduled、有 compare_prev、
+    且未提议过的 active 版本，在 task_start 附加（task_resume 不提议——中途
+    换版照常重注入即可）。附加即落 compare_offered（一次性不依赖用户回应，AR-2）。
+    不含旧版全文：用户同意双跑后 Agent 才按需 get（防拿错版 + 省 token）。"""
+    v = persona.get("version")
+    if persona.get("from_mirror") or v is None:
+        return {}
+    if flow.get_meta(f"persona_origin:{code}:{v}") != "scheduled":
+        return {}
+    prev = flow.get_meta(f"compare_prev:{code}:{v}")
+    if not prev:
+        return {}
+    if flow.get_meta(f"compare_offered:{code}:{v}"):
+        return {}
+    flow.ensure_schema()
+    flow.set_meta(f"compare_offered:{code}:{v}", db.now_iso())
+    return {"persona_compare_offer": {
+        "current_version": v, "previous_version": int(prev),
+        "hint": (f"v{v} 由夜间定时任务自动编译落版，用户未亲审。请询问用户一次："
+                 "本任务单用新版跑，还是新旧双跑对比（token 增加）。用户同意双跑时，调 "
+                 f"twin(action=\"get\", data={{\"work_type\": \"{code}\", \"version\": {prev}}}) "
+                 "按需取旧版全文；旧版仅对比参考、非执行依据，对比后一律以新版为执行依据。"
+                 "用户不选或无人回应均照常单稿执行。")}}
+
+
 def _action_task_start(data: dict) -> dict:
     brief = str(data.get("brief") or "").strip()
     if not brief:
@@ -674,6 +750,7 @@ def _action_task_start(data: dict) -> dict:
     }
     if persona:
         out.update(_persona_injection(persona, have))
+        out.update(_compare_offer(code, persona))
         out.update(supplement)
     elif supplement:
         # 空 persona 分支（#905-A 拍板：给）：原始证据当雏形注入，第一天就有分身效果
@@ -948,11 +1025,14 @@ def _action_help(data: dict) -> dict:
             "compile": "取编译素材包（旧版本 prompt 编译参考 + 未编译偏好证据 + 编译规则），"
                        "由当前会话模型编译；独立会话执行、收尾即弃（session_note）。参数 work_type。",
             "submit": "提交编译产物落版本并写文件镜像。必填 work_type/prompt_md；"
-                      "建议带 source_memory_ids 与 model。返回 supersedes（被取代的旧 active 版本）。",
+                      "建议带 source_memory_ids 与 model。返回 supersedes（被取代的旧 active 版本）；"
+                      "夜间定时任务落版必传 origin=scheduled（其余场景不要传）；"
+                      "交互式落版返回 compare_hint（下一任务可双跑对比的提示，转告用户）。",
             "rollback": "回滚 persona 版本（零阻力：无确认、无警告）。work_type 必填；"
                         "version 省略回上一版本、传 n 回指定版本；不删历史（retired 可再激活），"
                         "版本号不回收（下次 submit 继续 MAX+1）。",
-            "get": "取某 work_type 的 active persona prompt（DB 优先，文件镜像降级）。参数 work_type。",
+            "get": "取某 work_type 的 persona prompt（DB 优先，文件镜像降级）。参数 work_type；"
+                   "可选 version 取指定历史版本全文（双跑对比取旧版用）。",
             "taxonomy": "列枚举。参数 kind ∈ work_type|audience|purpose。",
             "pending": "列待裁长尾。参数 status（默认 pending）。",
             "resolve": "治理待裁值。pending_id + decision ∈ map(带 code)|canonicalize(带 new_type{code,zh,en,domain})|reject。",
@@ -960,6 +1040,7 @@ def _action_help(data: dict) -> dict:
                           "返回该工作性质的 persona prompt 与前置清单，开放任务自动让位。"
                           "可选 have_persona_version：同一会话此前注入过同 work_type 且版本号仍在场时申报，"
                           "版本未变则不再重复注入全文，变了则重注入并附变更说明。"
+                          "夜间自动落版的新版本会附 persona_compare_offer（双跑对比提议，一次性）。"
                           "client 字段同 write（http 共接时头已带则无需传）。",
             "task_submit": "提交交付稿待评审。必填 task_id/deliverable_md；可带 todos/session。",
             "task_review": "评审裁定（append-only 审计）。task_id + verdict ∈ approved|changes_requested，"
