@@ -63,7 +63,9 @@ def test_spec_single_source(env):
     assert names == ["twin_nightly_compile", "twin_scan"]
     nightly = spec["tasks"][0]
     assert nightly["cadence"] == "daily"
-    assert [c["action"] for c in nightly["calls"]] == ["status", "compile", "submit"]
+    assert [c["action"] for c in nightly["calls"]] == ["status", "compile", "submit", "compile", "submit"]
+    # 受众抽象步骤在场
+    assert nightly["calls"][3]["data"]["audience"] is True
     # 夜间 submit 必带 origin=scheduled（次日双跑提议的触发标记）
     submit_call = nightly["calls"][2]
     assert submit_call["data"]["origin"] == "scheduled"

@@ -974,3 +974,26 @@ def test_compile_audience_mode_material(monkeypatch):
     assert "只保留对该受众稳定成立的口径类偏好" in r["material"]
     assert "[911]" in r["material"]  # 已 compiled 的证据也在画像素材里
     assert "条件段" in r["material"]
+
+
+# ---- v0.3.6 受众画像 ④：触发器 ----
+
+def test_audience_stale_trigger():
+    """证据数≠画像吸收数（或无画像）→ stale；吸收齐 → 清；新证据 → 再 stale。"""
+    _stub_read(None) if False else None
+    from mema_twin import sink
+    import unittest.mock as _mock
+    with _mock.patch.object(sink, "read_memory",
+                            lambda mid, workspace=None, client=None:
+                            {"ok": True, "data": {"memory": {"id": mid, "subject": "s",
+                                                             "content": "偏好"}}}):
+        _mk_uncompiled([931, 932])
+        s1 = server.twin("status", {})
+        assert s1["audience_stale"].get("leadership") == {"evidence": 2, "profile_evidence": None}
+        server.twin("submit", {"work_type": "aud-leadership", "prompt_md": "# 画像",
+                               "model": "m", "source_memory_ids": [931, 932]})
+        s2 = server.twin("status", {})
+        assert "leadership" not in s2["audience_stale"]
+        _mk_uncompiled([933])
+        s3 = server.twin("status", {})
+        assert s3["audience_stale"]["leadership"] == {"evidence": 3, "profile_evidence": 2}

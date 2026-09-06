@@ -32,11 +32,13 @@ SCHEDULED_TASKS_SPEC: dict = {
             "name": "twin_nightly_compile",
             "purpose": ("夜间无人值守的专用一次性编译会话（凌晨用户不在场，不向用户提问）："
                         "把各 work_type 当天未编译的偏好证据编译进 persona prompt 并 "
-                        "submit 落版；未编译数为 0 的类型不编译不落版，避免版本号空转。"),
+                        "submit 落版（未编译数为 0 的类型不编译不落版，避免版本号空转）；"
+                        "再把 audience_stale 里证据数变动的受众重抽象成受众画像落版。"),
             "cadence": "daily",
             "calls": [
                 {"tool": "twin", "action": "status",
-                 "data": {"note": "取响应键 uncompiled（各 work_type 未编译数），只处理数量 >0 的类型"}},
+                 "data": {"note": "uncompiled 是各 work_type 未编译数（只处理 >0 的类型）；"
+                                  "audience_stale 是需重抽象的受众（证据数≠画像吸收数或尚无画像）"}},
                 {"tool": "twin", "action": "compile",
                  "data": {"rule": "严格按素材包编译规则产出新版：与旧版本冲突以新证据为准，"
                                   "文末列出版本间变更"}},
@@ -46,6 +48,15 @@ SCHEDULED_TASKS_SPEC: dict = {
                                   "（夜间落版标记，供次日首任务双跑对比提议）；"
                                   "结束输出各类型前后版本号与吸收证据数汇总；"
                                   "工具出错跳过并如实记录，同一项最多重试一次"}},
+                {"tool": "twin", "action": "compile",
+                 "data": {"audience": True,
+                          "rule": "对 audience_stale 的每个受众调 compile(work_type="
+                                  "\"aud-{audience}\") 取画像素材包（该受众全部证据），"
+                                  "按画像规则写出受众画像"}},
+                {"tool": "twin", "action": "submit",
+                 "data": {"rule": "受众画像 submit 用 work_type=\"aud-{audience}\"、"
+                                  "source_memory_ids=素材包全部证据 id；画像派生不消耗证据；"
+                                  "audience_stale 为空则整体跳过"}},
             ],
         },
         {
