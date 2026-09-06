@@ -104,7 +104,7 @@ _AUDIENCES: tuple[CanonicalType, ...] = (
     CanonicalType("direct_manager", "直属上级", "direct manager", "受众",
                   ("上级", "老板", "直属领导", "主管", "line manager")),
     CanonicalType("leadership", "高层与决策层", "leadership", "受众",
-                  ("高层", "决策层", "管理层", "公司领导", "executives")),
+                  ("高层", "决策层", "管理层", "公司领导", "领导", "executives")),
     CanonicalType("board_investor", "董事会与投资人", "board & investors", "受众",
                   ("董事会", "投资人", "董事", "股东")),
     CanonicalType("team_peers", "团队与跨部门同事", "team & cross-dept peers", "受众",
