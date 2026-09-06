@@ -1,6 +1,12 @@
 # Changelog
 
-## [0.3.6] — 未发布
+## [0.3.6] — 2026-09-06
+
+- 两轮 review（常规 + 对抗性）修复：audience_stale 排除 work_type 滞留行（夜夜重编死循环）、
+  rollback 开放 aud- 通道（坏画像可回退）、受众型夜间落版同刷 last_scheduled_compile_at、
+  有画像受众先过滤再 LIMIT 3（防挤占）、aud- submit 吸收数不对称守卫（多报/漏报/混入他受众
+  id 均警告）、素材包 vNone 守卫、**内置"领导"别名回退**（用户治理裁定优先于内置枚举，
+  真实库存在 领导→direct_manager 裁定，不得静默翻转）、存量 aud- 撞名类型 status 告警。
 
 - **受众画像（audience profiles）**：解决"对同一受众跨类型产出要重复说同一批要求"——
   `aud-{受众}` 伪类型存于 twin_prompt_versions（复用版本/rollback/镜像，零 DDL）。
