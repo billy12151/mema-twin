@@ -64,7 +64,6 @@ live in twin's own SQLite with a file mirror for fallback and human review.
 
 | 动作 | 说明 |
 |------|------|
-| `write` | 沉淀一条工作偏好。必填 content/work_type/audience/purpose |
 | `write` | 沉淀一条工作偏好。必填 content/work_type/audience/purpose；对某受众的通用偏好传 `scope=audience`（work_type 省略），进该受众画像 |
 | `get` | 取某工作性质的 persona prompt（开工前调用）；可选 `version` 取历史版本全文（双跑对比取旧版用）；`aud-{受众}` 可读受众画像 |
 | `compile` | 取编译素材包（旧版本 prompt 编译参考 + 未编译证据 + 编译规则），独立会话执行、做完即弃 |

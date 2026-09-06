@@ -908,7 +908,7 @@ def test_task_start_injects_audience_profile(monkeypatch):
     """画像存在：audience_profile_md 全文 + 优先级链标签。"""
     server.twin("submit", {"work_type": "aud-leadership", "prompt_md": "# 对领导要简洁白话",
                            "model": "m"})
-    r = server.twin("task_start", {"brief": "B", "work_type": "周报", "audience": "领导"})
+    r = server.twin("task_start", {"brief": "B", "work_type": "周报", "audience": "高层"})
     assert r["audience_profile_md"] == "# 对领导要简洁白话"
     assert "画像 v1" in r["audience_profile_note"]
     assert "本类型增补 > 类型 persona > 受众画像" in r["audience_profile_note"]
@@ -925,9 +925,9 @@ def test_task_start_audience_proto(monkeypatch):
                 "purpose": {"ok": True, "code": "sync_info", "raw": "同步"}}
     db.record_evidence(conn, 902, ppt_dims)  # 本类型行：不进雏形（在增补里）
     conn.close()
-    r = server.twin("task_start", {"brief": "B", "work_type": "PPT", "audience": "领导"})
+    r = server.twin("task_start", {"brief": "B", "work_type": "PPT", "audience": "高层"})
     assert [e["id"] for e in r["audience_profile_proto"]] == [901]
-    assert "雏形" in r["audience_profile_note"]
+    assert "尚无该受众画像" in r["audience_profile_note"]
     assert [e["id"] for e in r["persona_supplement"]] == [902]
 
 
@@ -941,7 +941,7 @@ def test_task_start_no_audience_no_profile(monkeypatch):
 def test_task_resume_injects_audience_profile():
     server.twin("submit", {"work_type": "aud-leadership", "prompt_md": "# 画像",
                            "model": "m"})
-    t1 = server.twin("task_start", {"brief": "B", "work_type": "周报", "audience": "领导"})
+    t1 = server.twin("task_start", {"brief": "B", "work_type": "周报", "audience": "高层"})
     r = server.twin("task_resume", {"task_id": t1["task_id"]})
     assert r["audience_profile_md"] == "# 画像"
 
@@ -1008,8 +1008,8 @@ def test_write_audience_scope(monkeypatch):
         captured["tags"] = tags
         return {"ok": True, "data": {"id": 941}}
     monkeypatch.setattr(sink, "remember", fake_remember)
-    r = server.twin("write", {"content": "对领导汇报永远要简洁白话",
-                              "audience": "领导", "purpose": "同步",
+    r = server.twin("write", {"content": "对高层汇报永远要简洁白话",
+                              "audience": "高层", "purpose": "同步",
                               "scope": "audience"})
     assert r["ok"] and r["evidence_id"] == 941
     assert r["dimensions"]["work_type"]["code"] == "aud-leadership"
@@ -1023,7 +1023,7 @@ def test_write_audience_scope(monkeypatch):
 
 def test_write_audience_scope_validations(monkeypatch):
     # scope 白名单
-    r = server.twin("write", {"content": "x", "work_type": "周报", "audience": "领导",
+    r = server.twin("write", {"content": "x", "work_type": "周报", "audience": "高层",
                               "purpose": "同步", "scope": "global"})
     assert r.get("ok") is False and r.get("field") == "scope"
     # audience 未归一 → 显式打回（不落 stranded 证据）
@@ -1113,7 +1113,7 @@ def test_proto_truncation_and_partial_skips(monkeypatch):
             "audience": {"ok": True, "code": "leadership", "raw": "领导"},
             "purpose": {"ok": True, "code": "sync_info", "raw": "s"}})
     conn.close()
-    r = server.twin("task_start", {"brief": "B", "work_type": "周报", "audience": "领导"})
+    r = server.twin("task_start", {"brief": "B", "work_type": "周报", "audience": "高层"})
     proto = r["audience_profile_proto"]
     assert [e["id"] for e in proto] == [974, 975, 977, 978]
     assert r["audience_profile_skipped"] == [{"memory_id": 976, "reason": "not_found"}]
@@ -1145,8 +1145,8 @@ def test_write_scope_ignores_supplied_worktype(monkeypatch):
         captured["subject"] = subject
         return {"ok": True, "data": {"id": 991}}
     monkeypatch.setattr(sink, "remember", fake_remember)
-    r = server.twin("write", {"content": "对领导要白话", "work_type": "周报",
-                              "audience": "领导", "purpose": "同步",
+    r = server.twin("write", {"content": "对高层要白话", "work_type": "周报",
+                              "audience": "高层", "purpose": "同步",
                               "scope": "audience"})
     assert r["ok"] and r["dimensions"]["work_type"]["code"] == "aud-leadership"
     assert "受众级偏好" in captured["subject"]
