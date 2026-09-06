@@ -1,7 +1,14 @@
 # Changelog
 
-## [0.3.5] — 未发布
+## [0.3.5] — 2026-09-06
 
+- 两轮 review（常规 + 对抗性）修复：增补/提议的优先级声明一律钉死版本号（漏列 source id
+  时旧证据也走增补，不再宣称"编译后新增"；#896 出生标签经得起后续版本）；compare_offered
+  一次性标记改原子抢占（多宿主并发 task_start 只问一次）；submit 对未吸收证据当场警告并
+  限 prompt_md ≤100k；task_id 严格矫正（浮点不再静默截断）；task_start 延迟落 pending、
+  限维度长度、增补取数后置（缩小并发让位竞窗）；自定义 code 白名单字符集
+  （[A-Za-z0-9_-]，防 hint 内嵌示例破损与镜像路径污染）；增补全跳过时仍上报 skipped。
+  测试 89→117 全绿。
 - **新版首任务双跑对比提议（Shadow Twin 的人力裁决最小版）**：夜间定时任务落版
   （`submit` 新增 `origin=scheduled` 白名单标记）后的第一个 `task_start` 附
   `persona_compare_offer`（版本对 + 引导，**不含旧版全文**——用户同意双跑后 Agent 才按需
