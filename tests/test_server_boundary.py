@@ -944,3 +944,33 @@ def test_task_resume_injects_audience_profile():
     t1 = server.twin("task_start", {"brief": "B", "work_type": "周报", "audience": "领导"})
     r = server.twin("task_resume", {"task_id": t1["task_id"]})
     assert r["audience_profile_md"] == "# 画像"
+
+
+# ---- v0.3.6 受众画像 ③：compile 参考节 + ④画像素材 ----
+
+def test_compile_material_includes_audience_profiles(monkeypatch):
+    """类型编译素材包含已有受众画像 + 守门句；无画像时提示待生成。"""
+    _stub_read(monkeypatch)
+    server.twin("submit", {"work_type": "aud-leadership", "prompt_md": "# 简洁白话",
+                           "model": "m"})
+    _mk_uncompiled([921])  # 周报 + 领导：让类型证据能关联到该受众
+    r = server.twin("compile", {"work_type": "周报"})
+    assert "同受众跨类型偏好参考" in r["material"]
+    assert "aud-leadership 画像 v1" in r["material"] and "# 简洁白话" in r["material"]
+    assert "守门" in r["material"] and "格式与结构仍以本类型证据为准" in r["material"]
+    r2 = server.twin("compile", {"work_type": "PPT"})
+    assert "暂无" in r2["material"]
+
+
+def test_compile_audience_mode_material(monkeypatch):
+    """compile(aud-x)：受众画像素材包——全量证据（含已 compiled）、画像规则。"""
+    _stub_read(monkeypatch)
+    _mk_uncompiled([911])
+    server.twin("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m",
+                           "source_memory_ids": [911]})
+    r = server.twin("compile", {"work_type": "aud-leadership"})
+    assert r["ok"] and r["work_type"] == "aud-leadership"
+    assert "受众画像素材包" in r["material"]
+    assert "只保留对该受众稳定成立的口径类偏好" in r["material"]
+    assert "[911]" in r["material"]  # 已 compiled 的证据也在画像素材里
+    assert "条件段" in r["material"]
