@@ -86,11 +86,13 @@ def now_iso() -> str:
 
 def validate_code_segment(value: str) -> str:
     """canonical code 会进文件路径（prompts/<code>/）、meta 键与 hint 内嵌的
-    调用示例：白名单字符集（轮2 P3-1/P3-2——引号/冒号/换行会造出非法示例，
-    单点 "." 会把镜像写进 prompts/ 根）。"""
+    调用示例：白名单字符集（轮2 P3-1/P3-2）。aud- 前缀保留给受众画像伪类型
+    （v0.3.6 AR-1）：真类型不许伪装成画像。"""
     v = (value or "").strip()
     if not v or len(v) > 64 or not _CODE_RE.match(v):
         raise ValueError(f"unsafe code segment: {value!r}（仅允许字母/数字/下划线/连字符）")
+    if v.startswith("aud-"):
+        raise ValueError(f"保留前缀：{value!r}（aud- 专属受众画像伪类型，不可作普通 code）")
     return v
 
 
@@ -272,9 +274,25 @@ def evidence_stats(conn: sqlite3.Connection) -> dict[str, int]:
     rows = conn.execute(
         "SELECT work_type, COUNT(*) AS n FROM twin_evidence"
         " WHERE status='uncompiled' AND work_type IS NOT NULL"
+        " AND work_type NOT LIKE 'aud-%'"  # aud- 是受众画像证据行，不属于任何类型的编译队列
         " GROUP BY work_type",
     ).fetchall()
     return {r["work_type"]: int(r["n"]) for r in rows}
+
+
+def audience_evidence(conn: sqlite3.Connection, audience: str,
+                      exclude_work_type: str | None = None) -> list[dict]:
+    """某受众的全部证据（v0.3.6）：含跨类型行（work_type=真类型）与受众级行
+    （work_type=aud-{audience}），不分 compiled——画像是全量投影，compiled 状态
+    属于类型编译生命周期（AR-2）。exclude_work_type 用于注入雏形去重（该类型的
+    行已在 persona_supplement 里）；aud-{audience} 行永远包含（AR-3）。"""
+    rows = conn.execute(
+        "SELECT * FROM twin_evidence WHERE audience=?"
+        " AND (work_type LIKE 'aud-%' OR work_type IS NOT ?)"
+        " ORDER BY id",
+        (audience, exclude_work_type),
+    ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def mark_compiled(conn: sqlite3.Connection,

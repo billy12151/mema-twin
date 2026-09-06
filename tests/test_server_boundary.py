@@ -831,3 +831,72 @@ def test_supplement_all_skipped_reports_skipped(monkeypatch):
     r = server.twin("task_start", {"brief": "B", "work_type": "周报"})
     assert "persona_supplement" not in r
     assert len(r["persona_supplement_skipped"]) == 2
+
+
+# ---- v0.3.6 受众画像 ①：伪类型存储与防串味 ----
+
+def test_audience_profile_create_and_status_split():
+    """aud- 伪类型可落版；status 里与真类型分流（audience_profiles 单列）。"""
+    r = server.twin("submit", {"work_type": "aud-leadership", "prompt_md": "# 对领导画像",
+                               "model": "m", "source_memory_ids": [1, 2]})
+    assert r["ok"] and r["version"] == 1
+    s = server.twin("status", {})
+    wt_codes = [p["work_type"] for p in s["prompts"]]
+    aud_codes = [p["work_type"] for p in s["audience_profiles"]]
+    assert "aud-leadership" not in wt_codes and "aud-leadership" in aud_codes
+
+
+def test_audience_profile_unknown_audience_rejected():
+    r = server.twin("submit", {"work_type": "aud-nope", "prompt_md": "# x"})
+    assert r.get("ok") is False and "unknown audience" in r.get("reason", "")
+
+
+def test_aud_prefix_reserved_for_work_type_codes():
+    from mema_twin import db as twin_db
+    import pytest as _pytest
+    conn = db.connect()
+    with _pytest.raises(ValueError):
+        twin_db.add_canonical(conn, "work_type", "aud-fake", "伪装画像")
+    conn.close()
+
+
+def test_get_reads_audience_profile():
+    server.twin("submit", {"work_type": "aud-leadership", "prompt_md": "# 画像v1", "model": "m"})
+    g = server.twin("get", {"work_type": "aud-leadership"})
+    assert g["ok"] and g["prompt_md"] == "# 画像v1"
+    g2 = server.twin("get", {"work_type": "aud-leadership", "version": 99})
+    assert g2.get("ok") is False and g2.get("error") == "not_found"
+
+
+def test_evidence_stats_excludes_aud_rows():
+    from mema_twin import db as twin_db
+    conn = db.connect()
+    dims_l = {"work_type": {"ok": True, "code": "aud-leadership", "raw": "(受众级)"},
+              "audience": {"ok": True, "code": "leadership", "raw": "领导"},
+              "purpose": {"ok": True, "code": "sync_info", "raw": "同步"}}
+    dims_doc = {**dims_l, "work_type": {"ok": True, "code": "work_report", "raw": "周报"}}
+    twin_db.record_evidence(conn, 701, dims_l)
+    twin_db.record_evidence(conn, 702, dims_doc)
+    conn.close()
+    s = server.twin("status", {})
+    assert s["uncompiled"].get("work_report") == 1
+    assert "aud-leadership" not in s["uncompiled"]
+
+
+def test_audience_evidence_query_semantics():
+    from mema_twin import db as twin_db
+    conn = db.connect()
+    dims = {"work_type": {"ok": True, "code": "work_report", "raw": "周报"},
+            "audience": {"ok": True, "code": "leadership", "raw": "领导"},
+            "purpose": {"ok": True, "code": "sync_info", "raw": "同步"}}
+    ppt = {**dims, "work_type": {"ok": True, "code": "presentation", "raw": "PPT"}}
+    aud_dims = {"work_type": {"ok": True, "code": "aud-leadership", "raw": "(受众级)"},
+                **{k: dims[k] for k in ("audience", "purpose")}}
+    twin_db.record_evidence(conn, 801, dims)   # 周报+领导
+    twin_db.record_evidence(conn, 802, ppt)    # PPT+领导
+    twin_db.record_evidence(conn, 803, aud_dims)  # 受众级
+    all_rows = twin_db.audience_evidence(conn, "leadership")
+    assert [r["memory_id"] for r in all_rows] == [801, 802, 803]  # 不分 compiled
+    no_doc = twin_db.audience_evidence(conn, "leadership", exclude_work_type="work_report")
+    assert [r["memory_id"] for r in no_doc] == [802, 803]  # 去重本类型，aud- 行保留
+    conn.close()

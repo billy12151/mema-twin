@@ -225,16 +225,19 @@ def _action_status(data: dict) -> dict:
             " FROM twin_prompt_versions ORDER BY work_type, version",
         ).fetchall()
         versions: dict = {}
+        audience_profiles: dict = {}
         for r in rows:
-            v = versions.setdefault(r["work_type"],
-                                    {"work_type": r["work_type"], "active": None, "versions": []})
+            aud = store.split_audience_profile(r["work_type"])
+            bucket = audience_profiles if aud is not None else versions
+            v = bucket.setdefault(r["work_type"],
+                                  {"work_type": r["work_type"], "active": None, "versions": []})
             v["versions"].append(dict(r))
             if r["status"] == "active":
                 v["active"] = r["version"]
-        pending = db.list_pending(conn)
-        out = {"ok": True, "prompts": list(versions.values()),
-               "pending_count": len(pending),
-               "uncompiled": db.evidence_stats(conn)}
+        out: dict = {"ok": True, "prompts": list(versions.values()),
+                     "audience_profiles": list(audience_profiles.values()),
+                     "pending_count": len(db.list_pending(conn)),
+                     "uncompiled": db.evidence_stats(conn)}
     finally:
         conn.close()
     notice = scan.scan_notice()
@@ -392,20 +395,37 @@ def _action_submit(data: dict) -> dict:
                 "reason": f"过长（{len(prompt_md)} 字符，上限 100000）——编译产物应精炼"}
     conn = db.connect()
     try:
-        code = store.resolve_work_type_code(conn, str(data["work_type"]))
-        if not code:
-            return {"ok": False, "error": "invalid_input", "field": "work_type", "reason": "unknown code"}
+        aud = store.split_audience_profile(str(data["work_type"]))
+        if aud is not None:
+            # 受众画像伪类型（AR-1/AR-6）：不走 work_type 枚举，校验受众段
+            if not store._is_known_audience(conn, aud):
+                return {"ok": False, "error": "invalid_input", "field": "work_type",
+                        "reason": f"unknown audience code: {aud!r}"}
+            code = str(data["work_type"])
+        else:
+            code = store.resolve_work_type_code(conn, str(data["work_type"]))
+            if not code:
+                return {"ok": False, "error": "invalid_input", "field": "work_type", "reason": "unknown code"}
         rec = store.create_version(conn, code,
                                    prompt_md,
                                    source_ids,
                                    model=str(data.get("model") or ""))
-        pre_uncompiled = len(db.uncompiled_evidence(conn, code))
-        marked = db.mark_compiled(conn, source_ids, rec["version"], code)
+        if store.split_audience_profile(code) is None:
+            pre_uncompiled = len(db.uncompiled_evidence(conn, code))
+            marked = db.mark_compiled(conn, source_ids, rec["version"], code)
+        else:
+            # 画像派生不消耗证据（AR-2）：aud- 行永远保持 uncompiled 给类型编译
+            pre_uncompiled = marked = 0
     finally:
         conn.close()
     rec["ok"] = True
     rec["supersedes"] = rec.pop("superseded_version")  # 落版即裁决：本版取代的旧 active 版本
-    if origin == "scheduled":
+    is_profile = store.split_audience_profile(code) is not None
+    if is_profile:
+        rec["derived"] = True
+        rec["note"] = ("受众画像版本：派生自该受众全部证据，不消耗证据"
+                       "（对应类型证据仍属各自编译队列）")
+    elif origin == "scheduled":
         # #905-④：夜间落版标记来源 + 记对比基线（AR-1：previous_version 只在落版时
         # 可靠，事后推导会被 rollback/多版历史失真）；v1 无旧版可比则不记 → 永不提议
         flow.ensure_schema()
@@ -423,7 +443,7 @@ def _action_submit(data: dict) -> dict:
             f"v{rec['version']} 为执行依据（若此后有更高版本，以更高版本为准）；"
             "是否对比由用户决定，不追问。请把这句转告用户。")
     leftover = pre_uncompiled - marked
-    if leftover > 0:
+    if leftover > 0 and not is_profile:
         # 轮2 P2-1：漏列 source id 的证据会永久以增补在场且夜夜重编——当场点破
         rec.setdefault("warnings", []).append(
             f"该工作性质仍有 {leftover} 条未编译证据未被本版吸收"
@@ -524,13 +544,25 @@ def _action_get(data: dict) -> dict:
                 "reason": f"invalid version: {data.get('version')!r}"}
     conn = db.connect()
     try:
-        code = store.resolve_work_type_code(conn, wt)
-        if not code:
-            return {"ok": False, "error": "invalid_input", "field": "work_type", "reason": "unknown code"}
-        if version is not None:
-            rec = store.get_version(conn, code, version)
+        aud = store.split_audience_profile(wt)
+        if aud is not None:
+            # 受众画像只读通道（AR-6）：aud-{受众码} 可查全文；后缀必须是已知受众
+            if not store._is_known_audience(conn, aud):
+                return {"ok": False, "error": "invalid_input", "field": "work_type",
+                        "reason": f"unknown audience code: {aud!r}"}
+            code = wt
+            if version is not None:
+                rec = store.get_version(conn, code, version)
+            else:
+                rec = store.get_active(conn, code)
         else:
-            rec = store.get_active(conn, code)
+            code = store.resolve_work_type_code(conn, wt)
+            if not code:
+                return {"ok": False, "error": "invalid_input", "field": "work_type", "reason": "unknown code"}
+            if version is not None:
+                rec = store.get_version(conn, code, version)
+            else:
+                rec = store.get_active(conn, code)
     finally:
         conn.close()
     if version is not None and not rec:
