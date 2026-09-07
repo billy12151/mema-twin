@@ -414,3 +414,25 @@ def claim_meta(key: str, value: str) -> bool:
         return cur.rowcount == 1
     finally:
         conn.close()
+
+
+def list_meta(prefix: str) -> dict[str, str]:
+    """前缀枚举 meta（v0.3.7 验证门拦截记录 gate_block: 用）。"""
+    conn = db.connect()
+    try:
+        rows = conn.execute(
+            "SELECT key, value FROM twin_meta WHERE key LIKE ?", (prefix + "%",)
+        ).fetchall()
+        return {r["key"]: r["value"] for r in rows}
+    finally:
+        conn.close()
+
+
+def delete_meta(key: str) -> None:
+    """删除 meta 键（v0.3.7 清 gate_block 用）：删行而非写空值，读侧无需过滤脏空键。"""
+    conn = db.connect()
+    try:
+        conn.execute("DELETE FROM twin_meta WHERE key=?", (key,))
+        conn.commit()
+    finally:
+        conn.close()

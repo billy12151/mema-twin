@@ -601,10 +601,12 @@ def test_compile_material_conditional_and_prohibitions(monkeypatch):
 # ---- v0.3.5 双跑对比（#905-④）----
 
 def test_compare_offer_scheduled_once():
-    """夜间 origin 落版 → 首个 task_start 附提议（不含旧版全文），且只附一次。"""
+    """夜间 origin 落版 → 首个 task_start 附提议（不含旧版全文），且只附一次。
+    带 1 条新证据过空转阻尼（v0.3.7：scheduled 无新证据会被 no_new_evidence 拒）。"""
+    _mk_uncompiled([601])
     server.twin("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m"})
     r2 = server.twin("submit", {"work_type": "周报", "prompt_md": "# v2", "model": "m",
-                                "origin": "scheduled"})
+                                "origin": "scheduled", "source_memory_ids": [601]})
     assert r2["ok"] and r2["supersedes"] == 1
     assert "compare_hint" not in r2  # scheduled 落版走 task_start 提议，不走 hint
     t1 = server.twin("task_start", {"brief": "B", "work_type": "周报"})
@@ -662,10 +664,11 @@ def test_get_version_param():
 
 def test_task_resume_no_offer_and_does_not_burn():
     """task_resume 不附提议（拍板），且不消耗一次性标记——留给下一个 task_start。"""
+    _mk_uncompiled([661])
     server.twin("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m"})
     t1 = server.twin("task_start", {"brief": "B", "work_type": "周报"})
     server.twin("submit", {"work_type": "周报", "prompt_md": "# v2", "model": "m",
-                           "origin": "scheduled"})
+                           "origin": "scheduled", "source_memory_ids": [661]})
     r = server.twin("task_resume", {"task_id": t1["task_id"]})
     assert r["ok"] and "persona_compare_offer" not in r
     t2 = server.twin("task_start", {"brief": "B2", "work_type": "周报"})
@@ -763,9 +766,10 @@ def test_supplement_note_pinned_to_version(monkeypatch):
 
 
 def test_offer_hint_pins_version():
+    _mk_uncompiled([671])
     server.twin("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m"})
     server.twin("submit", {"work_type": "周报", "prompt_md": "# v2", "model": "m",
-                           "origin": "scheduled"})
+                           "origin": "scheduled", "source_memory_ids": [671]})
     r = server.twin("task_start", {"brief": "B", "work_type": "周报"})
     hint = r["persona_compare_offer"]["hint"]
     assert "以 v2 为执行依据" in hint and "更高版本" in hint
@@ -795,7 +799,7 @@ def test_submit_leftover_unabsorbed_warning(monkeypatch):
     _mk_uncompiled([601, 602])
     r = server.twin("submit", {"work_type": "周报", "prompt_md": "# v1",
                                "model": "m", "source_memory_ids": [601]})
-    assert r["ok"] and any("1 条未编译证据未被本版吸收" in w for w in r["warnings"])
+    assert r["ok"] and any("1 条在世证据未被本版吸收" in w for w in r["warnings"])
     t = server.twin("task_start", {"brief": "B", "work_type": "周报"})
     assert [e["id"] for e in t["persona_supplement"]] == [602]
 

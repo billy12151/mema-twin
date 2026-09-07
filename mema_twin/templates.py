@@ -2,6 +2,23 @@
 
 STRONG_MODEL_NOTE = "编译质量取决于当前会话模型；建议在强模型会话中执行 compile/submit"
 
+# 素材包标记串（v0.3.7 验证门 G1 单点真源）：标题类整串子串匹配；节标题类按
+# 核心名行首标题匹配（复述者改标题层级也命中，对抗轮2 P3-1）。测试断言每个
+# 标记都会出现在生成的素材包里——模板改字而此处不同步会直接红，防止门静默失效。
+MATERIAL_TITLE_MARKERS = (
+    "mema-twin 编译素材包",
+    "mema-twin 受众画像素材包",
+)
+MATERIAL_SECTION_MARKERS = (
+    "编译规则",
+    "旧版本 prompt",
+    "未编译偏好证据",
+    "该受众全部证据",
+    "同受众跨类型偏好参考",
+)
+MATERIAL_MARKERS = MATERIAL_TITLE_MARKERS + tuple(
+    f"## {m}" for m in MATERIAL_SECTION_MARKERS)
+
 WRITE_GUIDANCE = (
     "twin.write 只收「可复用的抽象」，不收一次性事实：\n"
     "- 用户在本次工作产物修改中体现的偏好与规则（用语、详略、格式、口吻）；\n"
