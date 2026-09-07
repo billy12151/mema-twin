@@ -35,9 +35,19 @@
   last_scheduled_compile_at 的 7 天停转保险丝。spec 扩展：persona_stale 触发重编、
   validation_failed/no_new_evidence 处置（不为过门改产物）、保守封套（无证据动机不整体
   重组）、汇总输出带治理计数。
+- 实施两轮 review（常规 + 对抗性）修复：空转阻尼加证据基座收缩旁路（void 后期望集缩小，
+  画像/类型重抽象提交必是旧集真子集，不加旁路会被阻尼永久拦死、stale 永不清零）；画像模式
+  作废条款节改按 audience 查；**submit source ids 对账**（去重 + 多余 id：scheduled 拒绝
+  foreign_ids、交互式剔除+警告——幽灵 id 会让基座旁路永久放行空转、重复 id 虚增吸收数让
+  画像 stale 永差）；回滚复活作废条款守卫（目标版 source 与作废证据有交集 → 重标
+  persona_stale）；G2 与 G1 行首口径对齐（「##标题」无空格也认）；twin 工具改 async +
+  to_thread（compile 全量 read 最坏独占事件循环 11 分钟、拖挂其他宿主）；作废条款节补
+  剔除指引；notice 附带扩到非 ok 响应、guidance 补工具缺失 fallback 与 mema retire 职责
+  说明；void 幂等；spec 补保守封套/notice 记录/治理计数；review_conflicts 提 limit；
+  task_recent limit 脏类型打回；测试防真实联网。
 - 已知边界：mema 侧直改记忆（不经 void）twin 感知不到；无标记有标题但内容垃圾的产物过门
   （内容质量留给双跑对比与真实任务）；notice 先到先得（其他宿主可能先 claim）。
-  测试 140→166。
+  测试 140→173。
 
 ## [0.3.6] — 2026-09-06
 

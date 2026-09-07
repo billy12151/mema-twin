@@ -14,6 +14,7 @@ import os
 import re
 import sqlite3
 
+import anyio.to_thread
 from mcp.server.fastmcp import FastMCP
 
 from . import db, flow, normalize, scan, sink, store, taxonomy, templates
@@ -28,7 +29,7 @@ _CLIENT_RE = re.compile(r"^[A-Za-z0-9._:@-]{1,64}$")  # 与 mema X-Mema-Client �
 
 
 @mcp.tool()
-def twin(action: str, data: dict | None = None) -> dict:
+async def twin(action: str, data: dict | None = None) -> dict:
     """个人分身 twin：按工作性质沉淀用户工作偏好，编译版本化 persona prompt，
     经交付任务流注入执行，并提供定时任务建议。
 
@@ -38,6 +39,13 @@ def twin(action: str, data: dict | None = None) -> dict:
     先 twin(action="help") 查看各动作参数与引导。compile 返回素材包，由当前会话模型
     编译（建议在强模型会话中执行），submit 提交回库落版本并写文件镜像。
     """
+    # sync 实现体放线程池（评审轮2 P2-4）：FastMCP 对 sync 工具直接在事件循环上
+    # 调用，而 compile 全量投影后逐条 read（最坏 30s/条）会独占循环、拖挂其他宿主
+    # 的并发调用；anyio.to_thread 传播 contextvars（_request_client 的头读取不受影响）
+    return await anyio.to_thread.run_sync(lambda: _twin_impl(action, data))
+
+
+def _twin_impl(action: str, data: dict | None = None) -> dict:
     data = data or {}
     handler = _ACTIONS.get(action)
     if handler is None:
@@ -82,9 +90,12 @@ def _notices_guidance(notices: list[dict]) -> str:
                          "原条目，不必打扰用户")
         elif n.get("action_required") == "read_semantic_notice" or "semantic" in t:
             parts.append(f"语义冲突 notice（notice_id={n.get('notice_id')}）：先按其 "
-                         "read_call 调 memory_repair(task=notice) 读完整通知与两侧原文"
-                         "分诊——误报 dismiss；真冲突才问用户三选项：两条都留（编译条件化）/ "
-                         "新的替旧的（twin(action=\"void\") 旧条）/ 撤销新写的（void 本条）")
+                         "read_call（形如 memory_repair 的 notice 任务）读完整通知与两侧"
+                         "原文分诊，宿主缺该工具时直接 memory(action=\"read\") 按 notice "
+                         "相关 memory_id 读两侧原文——误报 dismiss；真冲突才问用户三选项："
+                         "两条都留（编译条件化）/ 新的替旧的（twin(action=\"void\") 旧条，"
+                         "mema 本体的 retire 是另行一步按其治理流程走）/ 撤销新写的"
+                         "（void 本条）")
         else:
             parts.append(f"mema notice（type={t}）：按其自带指引处理")
     return "；".join(parts)
@@ -525,21 +536,19 @@ def _action_compile(data: dict) -> dict:
         t = taxonomy.by_code("work_type", code)
         active = store.get_active(conn, code)
         client = _effective_client(data)
-        # 已作废条款（v0.3.7）：全量投影下作废行不在证据集合，此清单防旧版参考
-        # 把作废条款带回新版（按 <!-- src --> 溯源对位剔除）；画像模式按 audience
-        # 查（评审轮1 P1-2——受众相关行的 work_type 各不相同，按 work_type 查落空）
-        if aud is not None:
-            voided = db.voided_audience_evidence(conn, aud)
-        else:
-            voided = db.voided_evidence(conn, code)
         if aud is not None:
             # 受众画像素材（AR-2）：该受众全部证据（不分 compiled），逐条 read
             rows = db.audience_evidence(conn, aud)
             evidence, skipped = _read_evidence_rows(rows, client=client)
             audience_profiles = None
+            # 已作废条款按 audience 查（评审轮1 P1-2——受众相关行的 work_type 各不
+            # 相同）；取数放证据之后（评审轮2 P3-5：并发 void 落在两查询之间时，
+            # 「素材含该条+stale 次夜自愈」比「整条消失」安全）
+            voided = db.voided_audience_evidence(conn, aud)
         else:
             evidence, skipped = _fetch_evidence(conn, code, client=client)
             audience_profiles = _compile_audience_profiles(conn, code)
+            voided = db.voided_evidence(conn, code)
     finally:
         conn.close()
     if aud is not None:
@@ -631,8 +640,9 @@ def _gate_check(conn, code: str, prompt_md: str,
         else:
             violations.append({"check": "material_echo",
                                "detail": f"产物复述了素材包内容（含标记「{echo}」）——疑似编译失败"})
-    # G2 分区标题：ATX 口径（setext 不识别——夜间素材包约定即 ATX，且人工通道不拦）
-    if not re.search(r"(?m)^#{1,6} ", prompt_md):
+    # G2 分区标题：ATX 口径（setext 不识别——夜间素材包约定即 ATX，且人工通道不拦）；
+    # 与 G1 行首匹配同款宽容（中文输出「##标题」无空格也认，评审轮2 P2-3）
+    if not re.search(r"(?m)^#{1,6}[ \t]*\S", prompt_md):
         violations.append({"check": "no_headings",
                            "detail": "产物没有任何 Markdown 标题——编译规则要求按固定分区组织"})
     aud = store.split_audience_profile(code)
@@ -727,6 +737,34 @@ def _action_submit(data: dict) -> dict:
             code = store.resolve_work_type_code(conn, str(data["work_type"]))
             if not code:
                 return {"ok": False, "error": "invalid_input", "field": "work_type", "reason": "unknown code"}
+        # v0.3.7 对账（评审轮2 P1-1）：source_ids 与该 code 在世证据集合对账——
+        # 去重（重复 id 虚增 evidence_count、画像 stale 永差）；多余 id（幽灵/已
+        # 作废/他类型）scheduled 直接拒（确定性错误零误报，次晚自愈），交互式剔除
+        # + 警告。不做对账则幽灵 id 会让「基座收缩旁路」永久放行空转、画像侧
+        # 夜夜落版 stale 永不清零。
+        aud_for_alive = store.split_audience_profile(code)
+        if aud_for_alive is not None:
+            alive_ids = {r["memory_id"] for r in db.audience_evidence(conn, aud_for_alive)}
+        else:
+            alive_ids = {r["memory_id"] for r in db.alive_evidence(conn, code)}
+        seen: set[int] = set()
+        deduped = [i for i in source_ids if not (i in seen or seen.add(i))]
+        dup_removed = len(source_ids) - len(deduped)
+        extra = sorted(set(deduped) - alive_ids)
+        source_ids = deduped
+        if extra and origin == "scheduled":
+            _bump_nightly_reject(code, "foreign_ids")
+            return {"ok": False, "error": "validation_failed", "origin": "scheduled",
+                    "work_type": code,
+                    "violations": [{"check": "foreign_ids",
+                                    "detail": (f"source_memory_ids 含 {len(extra)} 个不在"
+                                               f"该类型在世证据集合内的 id（{extra}——"
+                                               "幽灵 id/已作废/他类型），拒绝落版")}],
+                    "reason": "夜间落版未过验证门：source ids 与在世证据集合不符",
+                    "hint": _REJECT_HINT}
+        if extra:
+            # 交互式：多余 id 剔除后落版（保留会让基座旁路永久放行空转）
+            source_ids = [i for i in deduped if i not in set(extra)]
         # v0.3.7 验证门（瘦身版）：G1/G2 拦 scheduled；G3/G4 只警告；空转阻尼
         violations, gate_warnings = _gate_check(conn, code, prompt_md, source_ids)
         if origin == "scheduled":
@@ -803,6 +841,14 @@ def _action_submit(data: dict) -> dict:
     if violations:
         # 交互式落版（scheduled 有违规已在上方 return）：违规只警告不拦
         rec.setdefault("warnings", []).extend(_render_violation(v) for v in violations)
+    if extra:
+        # 交互式：多余 id 已剔除落版（评审轮2 P1-1——保留会让基座旁路永久放行空转）
+        rec.setdefault("warnings", []).append(
+            f"[对账] source_memory_ids 含 {len(extra)} 个不在在世证据集合内的 id，"
+            f"已剔除：{extra}")
+    if dup_removed:
+        rec.setdefault("warnings", []).append(
+            f"[对账] source_memory_ids 去重剔除 {dup_removed} 个重复 id")
     if gate_warnings:
         # G3/G4 证据覆盖警告（两 origin 同出；信息含原 leftover/aud 吸收数口径）
         rec.setdefault("warnings", []).extend(gate_warnings)
@@ -868,6 +914,25 @@ def _action_rollback(data: dict) -> dict:
         out["rolled_back_from"] = out.pop("superseded_version")
         out["guidance"] = ("已切换 active 版本。旧版本仍在库、可再 rollback 回来"
                            "（不删历史）；版本号不回收，下次 submit 继续 MAX+1。")
+        # 回滚复活作废条款守卫（评审轮2 P2-2）：激活的目标版 source 集与该 code
+        # 的作废证据有交集 → 重标 persona_stale（夜间重编剔除），否则作废条款
+        # 静默常驻旧 active 且无任何信号
+        try:
+            rolled_ids = {int(i) for i in (out.get("source_memory_ids") or [])}
+        except (TypeError, ValueError):
+            rolled_ids = set()
+        if rolled_ids:
+            conn = db.connect()
+            try:
+                voided = {r["memory_id"] for r in db.voided_evidence(conn, code)}
+            finally:
+                conn.close()
+            revived = sorted(rolled_ids & voided)
+            if revived:
+                for mid in revived:
+                    _mark_persona_stale(code, mid)
+                out["warnings"] = [f"回滚目标版的来源含已作废证据 {revived}：已重标 "
+                                   "persona_stale，夜间任务将重编剔除该条款"]
     return out
 
 
@@ -1566,7 +1631,11 @@ def _action_task_close(data: dict) -> dict:
 
 def _action_task_recent(data: dict) -> dict:
     flow.ensure_schema()
-    limit = int(data.get("limit") or 10)
+    try:
+        limit = int(data.get("limit") or 10)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "invalid_input", "field": "limit",
+                "reason": "limit 需是整数"}  # 评审轮2 P3-1：脏类型不再落 internal_error
     rows = flow.recent_tasks(limit)
     return {"ok": True, "count": len(rows), "tasks": rows}
 
