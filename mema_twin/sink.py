@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import contextvars
 import json
 import os
 import re
@@ -15,6 +16,35 @@ import urllib.request
 
 class SinkError(RuntimeError):
     pass
+
+
+# ---- mema notice 透传（v0.3.7）----
+#
+# mema 的 notice 投递是"每个成功 memory 响应 claim 一条、claim 即 delivered、
+# 不重发、非 strict 隔离下不区分 workspace、先到先得"——twin 的内部 mema 调用
+# （逐条 read / find）同样会 claim，若只挂在 write 响应上会被内部调用吞掉
+# （全量投影后每晚大量 read，必吞）。因此所有 _call 响应携带的 notices 统一
+# 收集进 contextvar（并发隔离），由 twin() 入口清零、外层响应统一附带。
+_notice_acc: contextvars.ContextVar[list] = contextvars.ContextVar("mema_notices",
+                                                                   default=None)
+
+
+def reset_notices() -> None:
+    _notice_acc.set([])
+
+
+def collect_notices() -> list[dict]:
+    lst = _notice_acc.get()
+    return list(lst) if lst else []
+
+
+def _drain_notices(resp) -> None:
+    if isinstance(resp, dict):
+        ns = resp.get("notices")
+        if isinstance(ns, list) and ns:
+            lst = _notice_acc.get() or []
+            lst.extend(n for n in ns if isinstance(n, dict))
+            _notice_acc.set(lst)
 
 
 def _base_url() -> str:
@@ -58,7 +88,8 @@ def _parse_sse(body: str) -> dict:
         raise SinkError(f"SSE data 帧不是合法 JSON: {e}") from e
 
 
-def _call(name: str, arguments: dict, client: str | None = None) -> dict:
+def _call(name: str, arguments: dict, client: str | None = None,
+          timeout: int = 30) -> dict:
     payload = json.dumps({
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": {"name": name, "arguments": arguments},
@@ -66,7 +97,7 @@ def _call(name: str, arguments: dict, client: str | None = None) -> dict:
     req = urllib.request.Request(_base_url(), data=payload.encode("utf-8"),
                                  headers=_headers(client), method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             body = resp.read().decode("utf-8")
     except (urllib.error.URLError, TimeoutError, OSError) as e:
         # URLError 不覆盖读 body 途中超时/连接重置（review#4）
@@ -82,10 +113,20 @@ def _call(name: str, arguments: dict, client: str | None = None) -> dict:
     if text is None:
         return result
     try:
-        return json.loads(text)
+        parsed = json.loads(text)
     except json.JSONDecodeError:
         # 对抗 review#9④：不可解析响应带错误码，别让调用方拿到裸 raw 无从归因
         return {"ok": False, "error": "mema_unparsed_response", "raw_head": text[:200]}
+    return parsed
+
+
+def _call_and_drain(name: str, arguments: dict, client: str | None = None,
+                    timeout: int = 30) -> dict:
+    """公开通道统一出口：调 _call 后收集响应携带的 notices（drain 在这一层而非
+    _call 内——测试 stub _call 时真实 drain 路径仍可被测到）。"""
+    resp = _call(name, arguments, client=client, timeout=timeout)
+    _drain_notices(resp)
+    return resp
 
 
 def remember(content: str, subject: str, tags: list[str], workspace: str,
@@ -97,7 +138,7 @@ def remember(content: str, subject: str, tags: list[str], workspace: str,
         data["source_ref"] = source_ref
     if event_time:
         data["event_time"] = event_time
-    return _call("memory", {"action": "remember", "data": data}, client=client)
+    return _call_and_drain("memory", {"action": "remember", "data": data}, client=client)
 
 
 def find(query: str, workspace: str | None = None, include_content: bool = True,
@@ -107,7 +148,7 @@ def find(query: str, workspace: str | None = None, include_content: bool = True,
     data: dict = {"query": query, "include_content": include_content}
     if workspace:
         data["workspace"] = workspace
-    return _call("memory", {"action": "find", "data": data}, client=client)
+    return _call_and_drain("memory", {"action": "find", "data": data}, client=client)
 
 
 def read_memory(memory_id: int, workspace: str | None = None,
@@ -116,4 +157,10 @@ def read_memory(memory_id: int, workspace: str | None = None,
     data: dict = {"memory_id": int(memory_id)}
     if workspace:
         data["workspace"] = workspace
-    return _call("memory", {"action": "read", "data": data}, client=client)
+    return _call_and_drain("memory", {"action": "read", "data": data}, client=client)
+
+
+def review_conflicts(client: str | None = None) -> dict:
+    """查 mema 冲突表（v0.3.7 status 计数用）：短超时——status 是夜间任务第一步，
+    mema 抖动时宁可少一个计数也不能拖垮整晚；调用方须自捕 SinkError 软失败。"""
+    return _call_and_drain("memory_review", {"view": "conflicts"}, client=client, timeout=10)

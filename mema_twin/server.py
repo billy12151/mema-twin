@@ -47,7 +47,15 @@ def twin(action: str, data: dict | None = None) -> dict:
         # 入口统一校验宿主身份：脏/重复头、脏或不一致 data.client 无论动作
         # 立即打回（fail-fast，也避免 handler 先写 pending 再炸留幽灵行）
         _effective_client(data)
-        return handler(data)
+        # mema notice 透传（v0.3.7）：入口清零、出口统一附带——任何触达 mema 的
+        # 动作（内部 read/find 也会 claim notice，先到先得）都可能在响应带出
+        sink.reset_notices()
+        result = handler(data)
+        notices = sink.collect_notices()
+        if notices and isinstance(result, dict) and result.get("ok"):
+            result["mema_notices"] = notices
+            result["mema_notices_guidance"] = _notices_guidance(notices)
+        return result
     except sink.SinkError as e:
         return {"ok": False, "error": "mema_unreachable", "reason": str(e)}
     except ValueError as e:
@@ -57,6 +65,27 @@ def twin(action: str, data: dict | None = None) -> dict:
         # 兜底边界（review#2）：畸形参数/存储异常绝不击穿 MCP 工具面
         return {"ok": False, "error": "internal_error",
                 "reason": f"{type(e).__name__}: {e}"}
+
+
+def _notices_guidance(notices: list[dict]) -> str:
+    """notice 分诊分层（v0.3.7 拍板）：similar_active_memory 在 twin 写流量上近乎
+    必然触发（默认 subject 同类型全同），只做静默分诊；semantic notice 才升级问
+    用户三选项。mema notice 是 advisory，不是正式冲突，不能直接 judge。"""
+    parts = []
+    for n in notices:
+        t = str(n.get("type") or "")
+        if t == "similar_active_memory":
+            parts.append("similar_active_memory（疑似重复偏好）：静默分诊——偏好是增量"
+                         "语义、重复由编译期合并吸收；仅当内容真属重复时改走 mema update "
+                         "原条目，不必打扰用户")
+        elif n.get("action_required") == "read_semantic_notice" or "semantic" in t:
+            parts.append(f"语义冲突 notice（notice_id={n.get('notice_id')}）：先按其 "
+                         "read_call 调 memory_repair(task=notice) 读完整通知与两侧原文"
+                         "分诊——误报 dismiss；真冲突才问用户三选项：两条都留（编译条件化）/ "
+                         "新的替旧的（twin(action=\"void\") 旧条）/ 撤销新写的（void 本条）")
+        else:
+            parts.append(f"mema notice（type={t}）：按其自带指引处理")
+    return "；".join(parts)
 
 
 def _today() -> str:
@@ -351,6 +380,19 @@ def _action_status(data: dict) -> dict:
                            "voided": voided if isinstance(voided, list) else []})
     if stale_list:
         out["persona_stale"] = stale_list
+    # v0.3.7 治理计数（twin_scan 退役后的常显可见面，不打扰不推送）
+    flow.ensure_schema()
+    out["open_tasks"] = len(flow.open_tasks())
+    try:
+        resp = sink.review_conflicts()
+        payload = resp.get("data") or resp or {}
+        conf = payload.get("conflicts") or []
+        out["open_conflicts"] = sum(
+            1 for c in conf
+            if isinstance(c, dict) and c.get("status") == "open"
+            and c.get("workspace_canonical") == _bucket())
+    except (sink.SinkError, AttributeError, TypeError, ValueError):
+        pass  # 软失败：mema 抖动少一个计数即可，status 是夜间第一步不能被拖垮
     notice = scan.scan_notice()
     if notice:
         out["scan_notice"] = notice
