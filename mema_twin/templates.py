@@ -117,8 +117,9 @@ def compile_prompt_material(work_type: str, work_type_zh: str,
     parts.append("\n## 已作废条款（不进新版）\n\n")
     if voided:
         for e in voided:
-            parts.append(f"- [{e.get('memory_id')}] {e.get('subject') or ''}"
-                         f"（曾入 v{e.get('compiled_version')} 编译）\n")
+            cv = e.get("compiled_version")
+            origin = f"曾入 v{cv} 编译" if cv is not None else "未入编译"
+            parts.append(f"- [{e.get('memory_id')}] {e.get('subject') or ''}（{origin}）\n")
     else:
         parts.append("（无作废条款）\n")
     parts.append("\n## 同受众跨类型偏好参考（受众画像）\n\n")

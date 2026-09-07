@@ -52,7 +52,9 @@ def twin(action: str, data: dict | None = None) -> dict:
         sink.reset_notices()
         result = handler(data)
         notices = sink.collect_notices()
-        if notices and isinstance(result, dict) and result.get("ok"):
+        # 非 ok 的 dict 响应同样附带（评审轮1 P3-4）：notice 被 claim 即 delivered
+        # 不重发，handler 后段出错丢掉等于永久丢失
+        if notices and isinstance(result, dict):
             result["mema_notices"] = notices
             result["mema_notices_guidance"] = _notices_guidance(notices)
         return result
@@ -380,8 +382,7 @@ def _action_status(data: dict) -> dict:
                            "voided": voided if isinstance(voided, list) else []})
     if stale_list:
         out["persona_stale"] = stale_list
-    # v0.3.7 治理计数（twin_scan 退役后的常显可见面，不打扰不推送）
-    flow.ensure_schema()
+    # v0.3.7 治理计数（twin_scan 退役后的常显可见面，不打扰不推送）；schema 已 ensure
     out["open_tasks"] = len(flow.open_tasks())
     try:
         resp = sink.review_conflicts()
@@ -525,8 +526,12 @@ def _action_compile(data: dict) -> dict:
         active = store.get_active(conn, code)
         client = _effective_client(data)
         # 已作废条款（v0.3.7）：全量投影下作废行不在证据集合，此清单防旧版参考
-        # 把作废条款带回新版（按 <!-- src --> 溯源对位剔除）；画像模式同样需要
-        voided = db.voided_evidence(conn, aud if aud is not None else code)
+        # 把作废条款带回新版（按 <!-- src --> 溯源对位剔除）；画像模式按 audience
+        # 查（评审轮1 P1-2——受众相关行的 work_type 各不相同，按 work_type 查落空）
+        if aud is not None:
+            voided = db.voided_audience_evidence(conn, aud)
+        else:
+            voided = db.voided_evidence(conn, code)
         if aud is not None:
             # 受众画像素材（AR-2）：该受众全部证据（不分 compiled），逐条 read
             rows = db.audience_evidence(conn, aud)
@@ -737,14 +742,24 @@ def _action_submit(data: dict) -> dict:
                     and {str(i) for i in source_ids}
                     <= {str(i) for i in (active.get("source_memory_ids") or [])}
                     and flow.get_meta(f"persona_stale:{code}") is None):
-                # 空转阻尼（评审 P1-1）：无新证据可吸收且非 stale 触发——拒绝 mint
-                # 新版本，防「夜夜空转落版 → 每早双跑提议轰炸」
-                _bump_nightly_reject(code, "no_new_evidence")
-                return {"ok": False, "error": "no_new_evidence", "origin": "scheduled",
-                        "work_type": code,
-                        "reason": ("提交的 source_memory_ids 未包含任何 active 版"
-                                   "未吸收的新证据（疑似编译会话漏列），拒绝空转落版"),
-                        "hint": _REJECT_HINT}
+                # 证据基座收缩旁路（评审轮1 P1-1）：void 之后期望集收缩（E ⊊ old），
+                # 受众画像/类型的重抽象提交必是旧 source 集的真子集——必须放行，
+                # 否则 void 驱动的重编被阻尼永久拦死、stale 永不清零。只有
+                # old ⊆ E（基座未缩）且 source ⊆ old 才是真·无新证据空转。
+                if aud is not None:
+                    expected = {str(r["memory_id"])
+                                for r in db.audience_evidence(conn, aud)}
+                else:
+                    expected = {str(r["memory_id"])
+                                for r in db.alive_evidence(conn, code)}
+                old = {str(i) for i in (active.get("source_memory_ids") or [])}
+                if old <= expected:
+                    _bump_nightly_reject(code, "no_new_evidence")
+                    return {"ok": False, "error": "no_new_evidence", "origin": "scheduled",
+                            "work_type": code,
+                            "reason": ("提交的 source_memory_ids 未包含任何 active 版"
+                                       "未吸收的新证据（疑似编译会话漏列），拒绝空转落版"),
+                            "hint": _REJECT_HINT}
         rec = store.create_version(conn, code,
                                    prompt_md,
                                    source_ids,
@@ -993,7 +1008,11 @@ def _action_void(data: dict) -> dict:
         return {"ok": False, "error": "not_found",
                 "reason": f"memory_id {n} 不在 twin 证据索引中"}
     out: dict = {"ok": True, "memory_id": n, "work_type": row["work_type"],
-                 "was_compiled": row["compiled_version"] is not None}
+                 "was_compiled": row["compiled_version"] is not None,
+                 "already_void": bool(row.get("already_void"))}
+    if out["already_void"]:
+        out["note"] = "该证据已是作废状态，幂等无变更"
+        return out
     notes = ["作废不可逆（内容仍在 mema，需要可重写一条）；mema 本体的 retire/update "
              "按其治理流程另行处理，twin 只管证据索引。"]
     wt = row["work_type"]
@@ -1592,7 +1611,7 @@ def _action_help(data: dict) -> dict:
             "status": "查看各 work_type 的 prompt 版本概况（含体积/超预算标记）、受众画像"
                       "（audience_profiles）、需重抽象的受众（audience_stale）、条款作废待重编"
                       "（persona_stale）、pending 数量、未编译统计、夜间被拒计数"
-                      "（nightly_rejected）与定时任务安装提醒。",
+                      "（nightly_rejected）、open 冲突/未收口任务计数与定时任务安装提醒。",
             "compile": "取编译素材包（旧版本 prompt 编译参考 + **全部在世证据**（全量投影，"
                        "每版从头重编）+ 已作废条款清单 + 同受众画像参考 + 编译规则"
                        "（含义稳定表达自由/变更分级/硬预算）），"

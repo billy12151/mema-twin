@@ -48,7 +48,8 @@ description: 个人分身：工作类偏好沉淀与 persona prompt 编译，经
 - write 响应提示"有偏好未编译" → **不要**立即 compile，也不要每写一条就播报：
   任务收尾（或用户问起）时非阻塞汇总一句，如"分身积累了 N 条新偏好，要不要现在整理？"；
   是否整理由用户拍板，或交给夜间编译定时任务统一处理
-- **write 响应可能带 mema_notices**（mema 检出的提示，advisory）：`similar_active_memory`
+- **触达 mema 的动作响应可能带 mema_notices**（mema 检出的提示，advisory）：
+  `similar_active_memory`
   疑似重复 → 静默分诊（偏好是增量语义，重复由编译期合并吸收；真重复才改走 mema update
   原条目，不必打扰用户）；**语义冲突 notice → 先按 read_call 读完整通知与两侧原文**，
   误报 dismiss；真冲突才问用户三选项：两条都留（编译条件化）/ 新的替旧的（twin void

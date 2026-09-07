@@ -417,7 +417,7 @@ def claim_meta(key: str, value: str) -> bool:
 
 
 def list_meta(prefix: str) -> dict[str, str]:
-    """前缀枚举 meta（v0.3.7 验证门拦截记录 gate_block: 用）。"""
+    """前缀枚举 meta（v0.3.7：nightly_reject:/persona_stale: 等 status 可见面用）。"""
     conn = db.connect()
     try:
         rows = conn.execute(
@@ -429,7 +429,8 @@ def list_meta(prefix: str) -> dict[str, str]:
 
 
 def delete_meta(key: str) -> None:
-    """删除 meta 键（v0.3.7 清 gate_block 用）：删行而非写空值，读侧无需过滤脏空键。"""
+    """删除 meta 键（v0.3.7 清 nightly_reject:/persona_stale: 用）：删行而非写空值，
+    读侧无需过滤脏空键。"""
     conn = db.connect()
     try:
         conn.execute("DELETE FROM twin_meta WHERE key=?", (key,))

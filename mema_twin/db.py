@@ -295,6 +295,19 @@ def voided_evidence(conn: sqlite3.Connection, work_type: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def voided_audience_evidence(conn: sqlite3.Connection, audience: str) -> list[dict]:
+    """某受众已作废的证据行（画像素材包「已作废条款」节用，评审轮1 P1-2）：按
+    audience 查——受众相关行（跨类型行 + aud- 受众级行）的 work_type 各不相同，
+    按 work_type 查画像侧永远落空。"""
+    rows = conn.execute(
+        "SELECT memory_id, subject, compiled_version, work_type FROM twin_evidence"
+        " WHERE audience=? AND status='void'"
+        " ORDER BY id",
+        (audience,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def evidence_stats(conn: sqlite3.Connection) -> dict[str, int]:
     rows = conn.execute(
         "SELECT work_type, COUNT(*) AS n FROM twin_evidence"
@@ -327,17 +340,23 @@ def void_evidence(conn: sqlite3.Connection, memory_id: int) -> dict | None:
     """作废一条证据（v0.3.7 冲突裁定「新替旧/撤销新写的」执行机制）：行级
     status='void'（保留 compiled_version 痕迹供 stale 判定与作废条款节溯源），
     全链路（compile 全量集合/增补/画像投影/统计）按 status 过滤天然排除。
-    单向不可逆；返回作废前行（无此行返回 None）。"""
+    单向不可逆、幂等（重复 void 返回带 already_void 标记，不再重复触发 stale）；
+    返回作废前行（无此行返回 None）。"""
     row = conn.execute(
         "SELECT * FROM twin_evidence WHERE memory_id=?", (int(memory_id),)
     ).fetchone()
     if row is None:
         return None
-    conn.execute(
-        "UPDATE twin_evidence SET status='void' WHERE memory_id=?", (int(memory_id),)
-    )
-    conn.commit()
-    return dict(row)
+    d = dict(row)
+    if d["status"] != "void":
+        conn.execute(
+            "UPDATE twin_evidence SET status='void' WHERE memory_id=?", (int(memory_id),)
+        )
+        conn.commit()
+        d["already_void"] = False
+    else:
+        d["already_void"] = True
+    return d
 
 
 def mark_compiled(conn: sqlite3.Connection,
