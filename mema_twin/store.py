@@ -183,7 +183,8 @@ def activate_version(conn: sqlite3.Connection, work_type: str,
         warnings.append(f"镜像写入失败（{_mirror_dir(work_type) / 'active.md'}）: {e}")
     out = {"work_type": work_type, "version": target,
            "superseded_version": int(active_row["version"]) if active_row else None,
-           "activated_at": ts, "mirror": str(_mirror_dir(work_type) / "active.md")}
+           "activated_at": ts, "mirror": str(_mirror_dir(work_type) / "active.md"),
+           "source_memory_ids": json.loads(row["source_memory_ids"] or "[]")}
     if warnings:
         out["warnings"] = warnings
     return out

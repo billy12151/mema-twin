@@ -162,5 +162,8 @@ def read_memory(memory_id: int, workspace: str | None = None,
 
 def review_conflicts(client: str | None = None) -> dict:
     """查 mema 冲突表（v0.3.7 status 计数用）：短超时——status 是夜间任务第一步，
-    mema 抖动时宁可少一个计数也不能拖垮整晚；调用方须自捕 SinkError 软失败。"""
-    return _call_and_drain("memory_review", {"view": "conflicts"}, client=client, timeout=10)
+    mema 抖动时宁可少一个计数也不能拖垮整晚；调用方须自捕 SinkError 软失败。
+    limit=500：mema 默认 50 会静默截断计数（评审轮2 P3-2）。"""
+    return _call_and_drain("memory_review",
+                           {"view": "conflicts", "data": {"limit": 500}},
+                           client=client, timeout=10)

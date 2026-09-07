@@ -119,16 +119,16 @@ def test_resubmit_after_changes_requested(env):
     """打回后同任务再提交（干跑发现的死路修复）：rejected 可再 submit。"""
     from mema_twin import server
     t = flow.insert_task(brief="T", status="planning", dims=_dims())
-    r1 = server.twin("task_submit", {"task_id": t["id"],
+    r1 = server._twin_impl("task_submit", {"task_id": t["id"],
                                      "deliverable_md": "v1"})
     assert r1["ok"] and r1["round"] == 1
-    server.twin("task_review", {"task_id": t["id"], "verdict": "changes_requested",
+    server._twin_impl("task_review", {"task_id": t["id"], "verdict": "changes_requested",
                                 "notes": "缺数字"})
     assert flow.get_task(t["id"])["status"] == "rejected"
-    r2 = server.twin("task_submit", {"task_id": t["id"],
+    r2 = server._twin_impl("task_submit", {"task_id": t["id"],
                                      "deliverable_md": "v2 带数字"})
     assert r2["ok"] and r2["round"] == 2
-    r3 = server.twin("task_review", {"task_id": t["id"], "verdict": "approved"})
+    r3 = server._twin_impl("task_review", {"task_id": t["id"], "verdict": "approved"})
     assert r3["ok"] and "deliverable_path" in r3
     assert flow.get_task(t["id"])["status"] == "approved"
 
@@ -137,7 +137,7 @@ def test_submit_snapshots_session_todos_for_resume(env):
     from mema_twin import server
     flow.set_session_todos("sx", [{"content": "a", "status": "pending"}])
     t = flow.insert_task(brief="T", status="planning", dims=_dims())
-    r = server.twin("task_submit", {"task_id": t["id"], "deliverable_md": "d",
+    r = server._twin_impl("task_submit", {"task_id": t["id"], "deliverable_md": "d",
                                     "session": "sx"})
     assert r["ok"]
     # 行内 todos 已随 submit 快照
@@ -160,9 +160,9 @@ def test_resubmit_from_empty_session_keeps_todos(env):
     from mema_twin import server
     flow.set_session_todos("s-full", [{"content": "a", "status": "pending"}])
     t = flow.insert_task(brief="T", status="planning", dims=_dims())
-    server.twin("task_submit", {"task_id": t["id"], "deliverable_md": "v1", "session": "s-full"})
-    server.twin("task_review", {"task_id": t["id"], "verdict": "changes_requested"})
-    r = server.twin("task_submit", {"task_id": t["id"], "deliverable_md": "v2", "session": "s-empty"})
+    server._twin_impl("task_submit", {"task_id": t["id"], "deliverable_md": "v1", "session": "s-full"})
+    server._twin_impl("task_review", {"task_id": t["id"], "verdict": "changes_requested"})
+    r = server._twin_impl("task_submit", {"task_id": t["id"], "deliverable_md": "v2", "session": "s-empty"})
     assert r["ok"]
     assert [x["content"] for x in flow.get_task(t["id"])["todos"]] == ["a"]
 
@@ -181,11 +181,11 @@ def test_task_start_short_circuit_same_version(env):
     from mema_twin import server
     _make_versions(2)
     # 首次（未申报）→ 全文注入
-    r1 = server.twin("task_start", {"brief": "B", "work_type": "周报"})
+    r1 = server._twin_impl("task_start", {"brief": "B", "work_type": "周报"})
     assert r1["ok"] and r1["persona_version"] == 2 and r1["persona_prompt_md"] == "# v2"
     assert "persona_unchanged" not in r1
     # 申报相同版本 → 短路：无全文、有逃生口提示
-    r2 = server.twin("task_start", {"brief": "B2", "work_type": "周报",
+    r2 = server._twin_impl("task_start", {"brief": "B2", "work_type": "周报",
                                     "have_persona_version": 2})
     assert r2["ok"] and r2["persona_unchanged"] is True
     assert "persona_prompt_md" not in r2 and r2["persona_version"] == 2
@@ -197,7 +197,7 @@ def test_task_start_short_circuit_same_version(env):
 def test_task_start_mismatch_reinjects(env):
     from mema_twin import server
     _make_versions(2)
-    r = server.twin("task_start", {"brief": "B", "work_type": "周报",
+    r = server._twin_impl("task_start", {"brief": "B", "work_type": "周报",
                                    "have_persona_version": 1})
     assert r["ok"] and r["persona_prompt_md"] == "# v2"
     assert "已从 v1 变更为 v2" in r["note"]
@@ -207,8 +207,8 @@ def test_task_start_rollback_wording_neutral(env):
     """回滚也是版本变更：失配注记用中性「变更」而非「更新」。"""
     from mema_twin import server
     _make_versions(3)
-    server.twin("rollback", {"work_type": "周报"})  # v3 → v2
-    r = server.twin("task_start", {"brief": "B", "work_type": "周报",
+    server._twin_impl("rollback", {"work_type": "周报"})  # v3 → v2
+    r = server._twin_impl("task_start", {"brief": "B", "work_type": "周报",
                                    "have_persona_version": 3})
     assert r["ok"] and r["persona_prompt_md"] == "# v2"
     assert "已从 v3 变更为 v2" in r["note"] and "更新" not in r["note"]
@@ -225,7 +225,7 @@ def test_task_start_mirror_never_short_circuits(env):
     conn.execute("DELETE FROM twin_prompt_versions")
     conn.commit()
     conn.close()
-    r = server.twin("task_start", {"brief": "B", "work_type": "周报",
+    r = server._twin_impl("task_start", {"brief": "B", "work_type": "周报",
                                    "have_persona_version": 1})
     assert r["ok"] and r["persona_prompt_md"] == "# v1 mirror"
     assert "persona_unchanged" not in r and r["persona_version"] is None
@@ -235,24 +235,24 @@ def test_task_resume_short_circuit(env):
     from mema_twin import server
     _make_versions(1)
     t = flow.insert_task(brief="T", status="approved", dims=_dims())
-    r = server.twin("task_resume", {"task_id": t["id"], "have_persona_version": 1})
+    r = server._twin_impl("task_resume", {"task_id": t["id"], "have_persona_version": 1})
     assert r["ok"] and r["persona_unchanged"] is True and "persona_prompt_md" not in r
 
 
 def test_have_version_garbage_rejected(env):
     from mema_twin import server
     for bad in ("abc", 2.9, True, "1.5", 0, -1, {"x": 1}):
-        r = server.twin("task_start", {"brief": "B", "work_type": "周报",
+        r = server._twin_impl("task_start", {"brief": "B", "work_type": "周报",
                                        "have_persona_version": bad})
         assert r.get("ok") is False and r.get("field") == "have_persona_version", bad
     t = flow.insert_task(brief="T", status="planning", dims=_dims())
-    r2 = server.twin("task_resume", {"task_id": t["id"], "have_persona_version": "x"})
+    r2 = server._twin_impl("task_resume", {"task_id": t["id"], "have_persona_version": "x"})
     assert r2.get("ok") is False and r2.get("field") == "have_persona_version"
 
 
 def test_have_ignored_without_persona(env):
     """无 persona 时申报被忽略，走通用标准提示。"""
     from mema_twin import server
-    r = server.twin("task_start", {"brief": "B", "work_type": "周报",
+    r = server._twin_impl("task_start", {"brief": "B", "work_type": "周报",
                                    "have_persona_version": 5})
     assert r["ok"] and "尚无 persona prompt" in r["hint"]

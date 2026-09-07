@@ -50,7 +50,7 @@ def test_notices_from_internal_reads_surface(monkeypatch):
                 "notices": [SEMANTIC_NOTICE]}
     _stub_call(monkeypatch, dispatch)
     _mk_evidence(501)
-    r = server.twin("task_start", {"brief": "B", "work_type": "周报"})
+    r = server._twin_impl("task_start", {"brief": "B", "work_type": "周报"})
     assert r["ok"]
     assert SEMANTIC_NOTICE in r["mema_notices"]
     assert "memory_repair" in r["mema_notices_guidance"]
@@ -62,7 +62,7 @@ def test_similar_notice_silent_triage_layering(monkeypatch):
         assert arguments["action"] == "remember"
         return {"ok": True, "data": {"id": 502}, "notices": [SIMILAR_NOTICE]}
     _stub_call(monkeypatch, dispatch)
-    r = server.twin("write", {"content": "偏好X", "work_type": "周报",
+    r = server._twin_impl("write", {"content": "偏好X", "work_type": "周报",
                               "audience": "高层", "purpose": "同步"})
     assert r["ok"] and r["evidence_id"] == 502
     g = r["mema_notices_guidance"]
@@ -76,7 +76,7 @@ def test_no_notices_no_extra_fields(monkeypatch):
                                                 "subject": "s", "content": "c"}}}
     _stub_call(monkeypatch, dispatch)
     _mk_evidence(503)
-    r = server.twin("task_start", {"brief": "B", "work_type": "周报"})
+    r = server._twin_impl("task_start", {"brief": "B", "work_type": "周报"})
     assert r["ok"] and "mema_notices" not in r and "mema_notices_guidance" not in r
 
 
@@ -85,7 +85,7 @@ def test_status_conflict_count_soft_fail(monkeypatch):
     def boom(*a, **k):
         raise sink.SinkError("mema 不可达")
     monkeypatch.setattr(sink, "review_conflicts", boom)
-    s = server.twin("status", {})
+    s = server._twin_impl("status", {})
     assert s["ok"] and "open_conflicts" not in s and s["open_tasks"] == 0
     # mema 在：twin 桶 open 冲突计数（他 workspace 的不算）
     monkeypatch.setattr(sink, "review_conflicts", lambda *a, **k: {
@@ -94,9 +94,9 @@ def test_status_conflict_count_soft_fail(monkeypatch):
             {"id": 2, "status": "open", "workspace_canonical": "other-ws"},
             {"id": 3, "status": "resolved", "workspace_canonical": "mema-twin"},
         ]}})
-    s2 = server.twin("status", {})
+    s2 = server._twin_impl("status", {})
     assert s2["ok"] and s2["open_conflicts"] == 1
     # 有开放任务时计数在
     flow.insert_task(brief="T", status="planning", dims={})
-    s3 = server.twin("status", {})
+    s3 = server._twin_impl("status", {})
     assert s3["open_tasks"] == 1

@@ -61,6 +61,8 @@ SCHEDULED_TASKS_SPEC: dict = {
                                   " status 的 nightly_rejected 累计）；"
                                   "结束输出各类型前后版本号与吸收证据数汇总，"
                                   "并附 status 里的 pending_count 与未收口任务数各一句；"
+                                  "响应带 mema_notices 时原样记录进汇总输出，"
+                                  "留待用户在场时分诊（notice 是 advisory），夜间不处理；"
                                   "工具出错跳过并如实记录，同一项最多重试一次"}},
                 {"tool": "twin", "action": "compile",
                  "data": {"audience": True,

@@ -115,6 +115,8 @@ def compile_prompt_material(work_type: str, work_type_zh: str,
     # 已作废条款（防御性，常驻）：全量投影下作废行已不在证据集合，此节防旧版
     # 参考把作废条款带回新版；剔除按 <!-- src --> 溯源对位。
     parts.append("\n## 已作废条款（不进新版）\n\n")
+    parts.append("> 以下条款已作废：按其 id 从上方旧版参考的 `<!-- src: N -->` 溯源，"
+                 "对应条款不得进入新版，其 id 也不得列入 source_memory_ids。\n\n")
     if voided:
         for e in voided:
             cv = e.get("compiled_version")
