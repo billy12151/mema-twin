@@ -1,5 +1,44 @@
 # Changelog
 
+## [Unreleased] — v0.3.7
+
+- **夜间编译验证门（瘦身版，#907/#908）**：夜间（`origin=scheduled`）submit 落版前过确定性
+  检查，只拦灾难形态——素材回声（复述素材包标记，标题类子串 + 节标题行首匹配（改层级也
+  命中）；active 旧版含同标记时沿袭降级为警告，防自锁链）与分区标题（ATX 零标题即畸形稿），
+  未过拒绝落版（`validation_failed`：active 不变、证据未消耗、次晚自动重试）。**空转阻尼**：
+  提交不含任何 active 版未吸收的新证据且非 stale 触发 → 拒绝（`no_new_evidence`），防
+  「夜夜 mint 新版 → 每早双跑提议轰炸」。证据未全覆盖（类型=在世证据超集、画像=集合相等）
+  与交互式违规只警告不拦（用户治理压过自动化，#904 原则回归）。连续被拒不落版累计于
+  `nightly_reject:{code}`（twin_meta，status 的 nightly_rejected 常显、成功落版即清）——
+  持续被拒与持续空转两个闭环的唯一出口信号。G5 体积漂移运行时通道删除（防线移交编译规则
+  硬预算 + status 体积可见）。
+- **全量投影编译**：compile 素材改为该类型**全部在世证据**（`db.alive_evidence`，
+  uncompiled+compiled、排除 void；与验证门 G3 期望集同源；find 兜底仅 alive 为空时触发）——
+  每版从头重编、弱底稿不遗传、证据库成为唯一事实源、persona 降为可抛弃投影。配套编译规则
+  三件套：**含义稳定表达自由**（证据未变动的规则含义必须不变，合并/条件化/重组自由——
+  禁止的是无因语义变化）、**硬预算**（类型 8000 字符/60 条、画像 4000/40，"条"=顶层列表行，
+  拍板可调；超限强制合并淘汰并写明依据）、**变更分级**（版本间变更区分语义变更——须归因
+  证据 id 或预算——与纯表达优化）。status 附各类型 active 的 size_chars/over_budget。
+- **冲突链路（notice 透传 + void）**：twin.write 及一切触达 mema 的动作透传 notice
+  （sink 全通道出口收集进 contextvar 并发隔离——mema 投递先到先得，twin 内部 read 也会
+  claim，只挂 write 响应会被吞；外层响应统一带 `mema_notices` + 分诊分层指引：
+  similar_active_memory 疑似重复静默分诊、语义冲突 notice 才问用户三选项）。新增 `void`
+  动作：行级作废（status='void'）全链路排除（compile 全量集合/增补/画像投影/统计）、单向
+  不可逆，是「新替旧/撤销新写的」的执行机制。**persona_stale**：曾入编译的证据被作废 →
+  标记该类型 → 夜间任务自动重编剔除该条款（成功落版即清）；受众侧由 audience_stale 计数差
+  触发重抽象（audience_evidence 与 status aud_counts 均排除 void）。素材包常驻「已作废
+  条款」节（按 `<!-- src -->` 溯源防旧版参考带回作废条款，纳入 G1 标记与漂移守卫）。
+- **twin_scan 退役（单定时任务收敛）**：职能已被夜间编译任务（吸收证据/画像重抽象/stale
+  自愈/汇总输出治理计数）与 status 常显（pending_count、open_tasks、open_conflicts——
+  后者经 memory_review 查 twin 桶 open 冲突，短超时软失败）覆盖；`scan` 动作与 run_scan
+  删除，spec 收敛为单一 twin_nightly_compile；scan_notice 瘦身为只看
+  last_scheduled_compile_at 的 7 天停转保险丝。spec 扩展：persona_stale 触发重编、
+  validation_failed/no_new_evidence 处置（不为过门改产物）、保守封套（无证据动机不整体
+  重组）、汇总输出带治理计数。
+- 已知边界：mema 侧直改记忆（不经 void）twin 感知不到；无标记有标题但内容垃圾的产物过门
+  （内容质量留给双跑对比与真实任务）；notice 先到先得（其他宿主可能先 claim）。
+  测试 140→166。
+
 ## [0.3.6] — 2026-09-06
 
 - 两轮 review（常规 + 对抗性）修复：audience_stale 排除 work_type 滞留行（夜夜重编死循环）、
