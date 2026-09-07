@@ -310,14 +310,34 @@ def audience_evidence(conn: sqlite3.Connection, audience: str,
     """某受众的全部证据（v0.3.6）：含跨类型行（work_type=真类型）与受众级行
     （work_type=aud-{audience}），不分 compiled——画像是全量投影，compiled 状态
     属于类型编译生命周期（AR-2）。exclude_work_type 用于注入雏形去重（该类型的
-    行已在 persona_supplement 里）；aud-{audience} 行永远包含（AR-3）。"""
+    行已在 persona_supplement 里）；aud-{audience} 行永远包含（AR-3）。
+    v0.3.7：void 行排除——作废条款不进画像投影，受众证据计数随之变化触发
+    audience_stale 重抽象。"""
     rows = conn.execute(
         "SELECT * FROM twin_evidence WHERE audience=?"
+        " AND status != 'void'"
         " AND (work_type LIKE 'aud-%' OR work_type IS NOT ?)"
         " ORDER BY id",
         (audience, exclude_work_type),
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+def void_evidence(conn: sqlite3.Connection, memory_id: int) -> dict | None:
+    """作废一条证据（v0.3.7 冲突裁定「新替旧/撤销新写的」执行机制）：行级
+    status='void'（保留 compiled_version 痕迹供 stale 判定与作废条款节溯源），
+    全链路（compile 全量集合/增补/画像投影/统计）按 status 过滤天然排除。
+    单向不可逆；返回作废前行（无此行返回 None）。"""
+    row = conn.execute(
+        "SELECT * FROM twin_evidence WHERE memory_id=?", (int(memory_id),)
+    ).fetchone()
+    if row is None:
+        return None
+    conn.execute(
+        "UPDATE twin_evidence SET status='void' WHERE memory_id=?", (int(memory_id),)
+    )
+    conn.commit()
+    return dict(row)
 
 
 def mark_compiled(conn: sqlite3.Connection,

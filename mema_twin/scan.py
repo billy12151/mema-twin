@@ -35,12 +35,14 @@ SCHEDULED_TASKS_SPEC: dict = {
             "purpose": ("夜间无人值守的专用一次性编译会话（凌晨用户不在场，不向用户提问）："
                         "把各 work_type 当天未编译的偏好证据编译进 persona prompt 并 "
                         "submit 落版（未编译数为 0 的类型不编译不落版，避免版本号空转）；"
+                        "把 persona_stale 里条款被作废的类型重编剔除对应条款落版；"
                         "再把 audience_stale 里证据数变动的受众重抽象成受众画像落版。"),
             "cadence": "daily",
             "calls": [
                 {"tool": "twin", "action": "status",
                  "data": {"note": "uncompiled 是各 work_type 未编译数（只处理 >0 的类型）；"
-                                  "audience_stale 是需重抽象的受众（证据数≠画像吸收数或尚无画像）"}},
+                                  "audience_stale 是需重抽象的受众（证据数≠画像吸收数或尚无画像）；"
+                                  "persona_stale 是条款被作废待重编的类型（同样夜间重编落版）"}},
                 {"tool": "twin", "action": "compile",
                  "data": {"rule": "严格按素材包编译规则产出新版：素材为该类型全部在世证据"
                                   "（全量投影），与旧版本冲突以新证据为准，含义稳定表达自由，"
