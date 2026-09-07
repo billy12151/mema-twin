@@ -220,7 +220,7 @@ def test_write_client_identity_passthrough(monkeypatch):
     from mema_twin import sink
     captured = {}
 
-    def fake_call(name, arguments, client=None):
+    def fake_call(name, arguments, client=None, timeout=30):
         captured["client"] = client
         return {"ok": True, "data": {"id": 7}}
     monkeypatch.setattr(sink, "_call", fake_call)
@@ -284,7 +284,7 @@ def test_write_client_header_authoritative(monkeypatch):
     from mema_twin import sink
     captured = {}
 
-    def fake_call(name, arguments, client=None):
+    def fake_call(name, arguments, client=None, timeout=30):
         captured["client"] = client
         return {"ok": True, "data": {"id": 7}}
     monkeypatch.setattr(sink, "_call", fake_call)
@@ -346,7 +346,7 @@ def test_stdio_explicit_client_still_works(monkeypatch):
     from mema_twin import sink
     captured = {}
 
-    def fake_call(name, arguments, client=None):
+    def fake_call(name, arguments, client=None, timeout=30):
         captured["client"] = client
         return {"ok": True, "data": {"id": 7}}
     monkeypatch.setattr(sink, "_call", fake_call)
