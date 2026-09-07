@@ -1,9 +1,9 @@
 """mema-twin MCP server：单工具 twin(action, data)，动作式紧凑接口（仿 mema/plan-mode 风格）。
 
-动作分三组：偏好与编译（write/get/compile/submit/status/taxonomy/pending/resolve）、
-交付任务流（task_start/task_submit/task_review/task_pending/task_resume/task_revise/
-task_close/task_recent/task_get/todo，机制改造自 plan-mode：可审计、可中断、可继续）、
-定时体系（单一夜间编译任务，spec 挂 Agent 端宿主自建）。
+动作分三组：偏好与编译（write/get/compile/submit/status/taxonomy/pending/resolve/
+void）、交付任务流（task_start/task_submit/task_review/task_pending/task_resume/
+task_revise/task_close/task_recent/task_get/todo，机制改造自 plan-mode：可审计、
+可中断、可继续）、定时体系（单一夜间编译任务，spec 挂 Agent 端宿主自建）。
 """
 from __future__ import annotations
 
@@ -33,8 +33,8 @@ def twin(action: str, data: dict | None = None) -> dict:
     经交付任务流注入执行，并提供定时任务建议。
 
     动作：write / get / compile / submit / rollback / status / taxonomy / pending /
-    resolve / task_start / task_submit / task_review / task_pending / task_resume /
-    task_revise / task_close / task_recent / task_get / todo / help。
+    resolve / void / task_start / task_submit / task_review / task_pending /
+    task_resume / task_revise / task_close / task_recent / task_get / todo / help。
     先 twin(action="help") 查看各动作参数与引导。compile 返回素材包，由当前会话模型
     编译（建议在强模型会话中执行），submit 提交回库落版本并写文件镜像。
     """
@@ -264,7 +264,7 @@ def _action_status(data: dict) -> dict:
     conn = db.connect()
     try:
         rows = conn.execute(
-            "SELECT work_type, version, model, status, evidence_count, created_at"
+            "SELECT work_type, version, model, status, evidence_count, created_at, prompt_md"
             " FROM twin_prompt_versions ORDER BY work_type, version",
         ).fetchall()
         versions: dict = {}
@@ -274,14 +274,23 @@ def _action_status(data: dict) -> dict:
             bucket = audience_profiles if aud is not None else versions
             v = bucket.setdefault(r["work_type"],
                                   {"work_type": r["work_type"], "active": None, "versions": []})
-            v["versions"].append(dict(r))
+            item = dict(r)
+            size = len(item.pop("prompt_md") or "")
+            v["versions"].append(item)
             if r["status"] == "active":
                 v["active"] = r["version"]
+                # 硬预算可见面（v0.3.7）：active 正文体积与超预算标记（常显不打扰；
+                # 预算的强制力在编译规则，机器不拦）
+                limit = (templates.BUDGET_AUD_CHARS if aud is not None
+                         else templates.BUDGET_TYPE_CHARS)
+                v["size_chars"] = size
+                v["over_budget"] = size > limit
         pending = db.list_pending(conn)
         # 受众画像触发器（AR-2）：证据数 ≠ 画像 evidence_count（或尚无画像）→ 需重抽象
         aud_counts = conn.execute(
             "SELECT audience, COUNT(*) AS n FROM twin_evidence"
             " WHERE audience IS NOT NULL AND work_type IS NOT NULL"
+            " AND status != 'void'"  # v0.3.7：作废行不进画像触发计数
             " GROUP BY audience",
         ).fetchall()
         audience_stale: dict = {}
@@ -327,6 +336,21 @@ def _action_status(data: dict) -> dict:
                         "last_at": rec.get("last_at")})
     if rejects:
         out["nightly_rejected"] = rejects
+    # v0.3.7 条款作废待重编清单（夜间自动重编，成功落版即清）
+    stale_list = []
+    for key, raw in sorted(flow.list_meta("persona_stale:").items()):
+        try:
+            rec = json.loads(raw)
+        except (ValueError, TypeError):
+            rec = {}
+        if not isinstance(rec, dict):
+            rec = {}
+        voided = rec.get("voided")
+        stale_list.append({"work_type": key[len("persona_stale:"):],
+                           "at": rec.get("at"),
+                           "voided": voided if isinstance(voided, list) else []})
+    if stale_list:
+        out["persona_stale"] = stale_list
     notice = scan.scan_notice()
     if notice:
         out["scan_notice"] = notice
@@ -392,9 +416,11 @@ def _read_evidence_rows(rows: list[dict], client: str | None = None,
 
 
 def _fetch_evidence(conn, code: str, client: str | None = None) -> tuple[list[dict], list[dict]]:
-    """compile 证据：优先 twin_evidence 索引 + 按 id 精确 read 取全文（召回
-    精确无丢失，M1.3）；索引为空退回 find 兜底。返回 (evidence, skipped)。"""
-    rows = db.uncompiled_evidence(conn, code)
+    """compile 证据（v0.3.7 全量投影）：该类型**全部在世证据**（uncompiled+compiled，
+    排除 void）逐条 read——每版从头重编，弱底稿不遗传、作废行天然不在场；与验证门
+    G3 期望集同源（alive_evidence）。索引无在世行时退 find 兜底（存量数据引导期）；
+    兜底场景 alive 为空 → G3 vacuous，集合不同源可接受。"""
+    rows = db.alive_evidence(conn, code)
     if not rows:
         return _fetch_evidence_find(conn, code, client), []
     return _read_evidence_rows(rows, client)
@@ -456,6 +482,9 @@ def _action_compile(data: dict) -> dict:
         t = taxonomy.by_code("work_type", code)
         active = store.get_active(conn, code)
         client = _effective_client(data)
+        # 已作废条款（v0.3.7）：全量投影下作废行不在证据集合，此清单防旧版参考
+        # 把作废条款带回新版（按 <!-- src --> 溯源对位剔除）；画像模式同样需要
+        voided = db.voided_evidence(conn, aud if aud is not None else code)
         if aud is not None:
             # 受众画像素材（AR-2）：该受众全部证据（不分 compiled），逐条 read
             rows = db.audience_evidence(conn, aud)
@@ -473,7 +502,8 @@ def _action_compile(data: dict) -> dict:
         title_zh = t.zh if t else code
     material = templates.compile_prompt_material(
         aud or code, title_zh, active, evidence,
-        audience_profiles=audience_profiles, audience_mode=aud is not None)
+        audience_profiles=audience_profiles, audience_mode=aud is not None,
+        voided=voided)
     out: dict = {"ok": True, "work_type": code,
                  "current_version": (active or {}).get("version"),
                  "evidence_count": len(evidence), "material": material,
@@ -720,6 +750,9 @@ def _action_submit(data: dict) -> dict:
         # G3/G4 证据覆盖警告（两 origin 同出；信息含原 leftover/aud 吸收数口径）
         rec.setdefault("warnings", []).extend(gate_warnings)
     _clear_nightly_reject(code)  # 成功落版（任意 origin）即清被拒计数（人工重出出口）
+    flow.ensure_schema()
+    if flow.get_meta(f"persona_stale:{code}") is not None:
+        flow.delete_meta(f"persona_stale:{code}")  # 作废条款已被本版吸收剔除
     rec["evidence_marked_compiled"] = marked
     replaced = f"取代 v{rec['supersedes']}" if rec["supersedes"] is not None else "首个版本"
     rec["session_note"] = (f"请提醒用户：v{rec['version']} 已生效（{replaced}），"
@@ -864,6 +897,74 @@ def _action_taxonomy(data: dict) -> dict:
     items = [{"code": t.code, "zh": t.zh, "en": t.en, "domain": t.domain,
               "aliases": list(t.aliases)} for t in taxonomy.all_types(kind)]
     return {"ok": True, "kind": kind, "count": len(items), "types": items}
+
+
+def _mark_persona_stale(code: str, memory_id: int) -> None:
+    """条款作废命中「曾入编译」的证据 → 标记该类型待重编（保守触发：宁可多编
+    一次，无 rollback 边界洞）。清除=该 code 成功落版（夜间自动重编为主路径）。"""
+    flow.ensure_schema()
+    raw = flow.get_meta(f"persona_stale:{code}")
+    try:
+        rec = json.loads(raw)
+    except (ValueError, TypeError):
+        rec = {}
+    if not isinstance(rec, dict):
+        rec = {}
+    voided = rec.get("voided")
+    if not isinstance(voided, list):
+        voided = []
+    if memory_id not in voided:
+        voided.append(memory_id)
+    rec.update({"at": db.now_iso(), "voided": voided})
+    flow.set_meta(f"persona_stale:{code}", json.dumps(rec, ensure_ascii=False))
+
+
+def _action_void(data: dict) -> dict:
+    """作废一条偏好证据（v0.3.7 冲突裁定「新替旧 / 撤销新写的」的执行机制）。
+
+    行级 status='void'，全链路排除（compile 全量集合/增补注入/画像投影/统计）；
+    单向不可逆（作废错了：内容仍在 mema，重写一条即可）。曾入编译的证据作废后
+    标记 persona_stale → 夜间自动重编剔除该条款；受众侧由 audience_stale 计数差
+    触发重抽象。mema 本体的 retire/update 属其治理流程（需用户授权），twin 只管
+    自己的证据索引。"""
+    mid = data.get("memory_id")
+    if isinstance(mid, bool) or not isinstance(mid, (int, str)):
+        return {"ok": False, "error": "invalid_input", "field": "memory_id",
+                "reason": "memory_id 需是记忆 id 整数"}
+    try:
+        n = int(mid)
+    except ValueError:
+        return {"ok": False, "error": "invalid_input", "field": "memory_id",
+                "reason": f"invalid memory_id: {mid!r}"}
+    if str(n) != str(mid).strip() and not isinstance(mid, int):
+        return {"ok": False, "error": "invalid_input", "field": "memory_id",
+                "reason": f"invalid memory_id: {mid!r}"}
+    if n < 0 or n > 2**63 - 1:
+        return {"ok": False, "error": "invalid_input", "field": "memory_id",
+                "reason": f"invalid memory_id: {mid!r}"}
+    conn = db.connect()
+    try:
+        row = db.void_evidence(conn, n)
+    finally:
+        conn.close()
+    if row is None:
+        return {"ok": False, "error": "not_found",
+                "reason": f"memory_id {n} 不在 twin 证据索引中"}
+    out: dict = {"ok": True, "memory_id": n, "work_type": row["work_type"],
+                 "was_compiled": row["compiled_version"] is not None}
+    notes = ["作废不可逆（内容仍在 mema，需要可重写一条）；mema 本体的 retire/update "
+             "按其治理流程另行处理，twin 只管证据索引。"]
+    wt = row["work_type"]
+    if row["compiled_version"] is not None and wt and store.split_audience_profile(wt) is None:
+        _mark_persona_stale(wt, n)
+        out["persona_stale"] = True
+        notes.append(f"{wt} 已标记 persona_stale：夜间任务将重编剔除该条款"
+                     "（成功落版即清标记）")
+    if row["audience"]:
+        notes.append(f"受众 {row['audience']} 的画像计数已变化，audience_stale 将触发"
+                     "夜间重抽象（新画像不含该条款）")
+    out["note"] = "；".join(notes)
+    return out
 
 
 def _action_pending(data: dict) -> dict:
@@ -1446,10 +1547,13 @@ def _action_help(data: dict) -> dict:
                      "可选 subject/tags/source_ref/client（多 Agent 共接时 client 填宿主标识，如 kimi/jinleai）。"
                      "对该受众的通用偏好（不限工作类型）传 scope=audience（此时 work_type 省略，"
                      "audience 必须归一成功）。",
-            "status": "查看各 work_type 的 prompt 版本概况、受众画像（audience_profiles）、"
-                      "需重抽象的受众（audience_stale）、pending 数量、未编译统计、"
-                      "夜间被拒计数（nightly_rejected）与定时任务安装提醒。",
-            "compile": "取编译素材包（旧版本 prompt 编译参考 + 未编译证据 + 同受众画像参考 + 编译规则），"
+            "status": "查看各 work_type 的 prompt 版本概况（含体积/超预算标记）、受众画像"
+                      "（audience_profiles）、需重抽象的受众（audience_stale）、条款作废待重编"
+                      "（persona_stale）、pending 数量、未编译统计、夜间被拒计数"
+                      "（nightly_rejected）与定时任务安装提醒。",
+            "compile": "取编译素材包（旧版本 prompt 编译参考 + **全部在世证据**（全量投影，"
+                       "每版从头重编）+ 已作废条款清单 + 同受众画像参考 + 编译规则"
+                       "（含义稳定表达自由/变更分级/硬预算）），"
                        "由当前会话模型编译；独立会话执行、收尾即弃（session_note）。参数 work_type；"
                        "传 aud-{受众} 取受众画像素材包（该受众全部证据）。",
             "submit": "提交编译产物落版本并写文件镜像。必填 work_type/prompt_md；"
@@ -1469,6 +1573,9 @@ def _action_help(data: dict) -> dict:
             "taxonomy": "列枚举。参数 kind ∈ work_type|audience|purpose。",
             "pending": "列待裁长尾。参数 status（默认 pending）。",
             "resolve": "治理待裁值。pending_id + decision ∈ map(带 code)|canonicalize(带 new_type{code,zh,en,domain})|reject。",
+            "void": "作废一条偏好证据（冲突裁定「新替旧/撤销新写的」的执行机制）。参数 memory_id；"
+                    "行级作废、全链路排除、不可逆；曾入编译的证据会触发 persona_stale 夜间重编，"
+                    "受众证据计数变化触发画像重抽象。mema 本体的 retire 按其治理流程另行处理。",
             "task_start": "开工建档（流程注入点）。必填 brief/work_type（audience/purpose 可选，原始值即可）；"
                           "返回该工作性质的 persona prompt 与前置清单，开放任务自动让位。"
                           "可选 have_persona_version：同一会话此前注入过同 work_type 且版本号仍在场时申报，"
@@ -1507,6 +1614,7 @@ _ACTIONS = {
     "taxonomy": _action_taxonomy,
     "pending": _action_pending,
     "resolve": _action_resolve,
+    "void": _action_void,
     "task_start": _action_task_start,
     "task_submit": _action_task_submit,
     "task_review": _action_task_review,
