@@ -1,6 +1,6 @@
 ---
 name: mema-twin
-description: 个人分身：工作类偏好沉淀与 persona prompt 编译，经交付任务流注入执行。用户修改/审阅工作产物后，把其中可复用的偏好合并沉淀到 twin.write（禁止再同步本地记忆文档）；开工前 task_start 取分身 prompt 并建档；版本更新在用户要求、夜间编译定时任务或定时扫描确认后走 compile/submit。
+description: 个人分身：工作类偏好沉淀与 persona prompt 编译，经交付任务流注入执行。用户修改/审阅工作产物后，把其中可复用的偏好合并沉淀到 twin.write（禁止再同步本地记忆文档）；开工前 task_start 取分身 prompt 并建档；版本更新在用户要求或夜间编译定时任务自动执行时走 compile/submit。
 ---
 
 # mema-twin 使用引导
@@ -47,10 +47,18 @@ description: 个人分身：工作类偏好沉淀与 persona prompt 编译，经
   上文不可见就**不要传**（服务端会照常全文注入，宁可重复不可缺席）
 - write 响应提示"有偏好未编译" → **不要**立即 compile，也不要每写一条就播报：
   任务收尾（或用户问起）时非阻塞汇总一句，如"分身积累了 N 条新偏好，要不要现在整理？"；
-  是否整理由用户拍板，或交给夜间编译定时任务 / 定时扫描统一处理
-- 用户明确要求更新分身、夜间编译定时任务自动执行、或定时扫描汇总后用户确认
+  是否整理由用户拍板，或交给夜间编译定时任务统一处理
+- **write 响应可能带 mema_notices**（mema 检出的提示，advisory）：`similar_active_memory`
+  疑似重复 → 静默分诊（偏好是增量语义，重复由编译期合并吸收；真重复才改走 mema update
+  原条目，不必打扰用户）；**语义冲突 notice → 先按 read_call 读完整通知与两侧原文**，
+  误报 dismiss；真冲突才问用户三选项：两条都留（编译条件化）/ 新的替旧的（twin void
+  旧条）/ 撤销新写的（twin void 本条）
+- 用户明确要求更新分身、或夜间编译定时任务自动执行
   → `twin(action="compile")` 拿素材包 → 当前会话模型编译 → `twin(action="submit")` 落版本。
   用户要求在当前会话整理就直接执行，强模型建议提一次即可，不要反复劝说换会话
+- `twin(action="void", data={"memory_id": N})` 作废一条偏好（冲突裁定"新替旧/撤销新写的"
+  的执行动作）：行级作废、全链路排除、不可逆；曾入编译的证据会自动触发该类型夜间重编
+  剔除该条款（persona_stale）
 - `task_start` 返回 `persona_compare_offer` 时：按 hint 询问用户一次（单用新版 / 新旧双跑），
   同一版本只问这一次；用户同意双跑才调
   `twin(action="get", data={"work_type":..., "version": previous_version})` 取旧版全文，
@@ -59,9 +67,9 @@ description: 个人分身：工作类偏好沉淀与 persona prompt 编译，经
 - `submit` 返回 `compare_hint` 时：非阻塞转告用户一句"下一任务可要求新旧双跑对比"，
   是否对比由用户决定，不追问
 - `status` 返回 scan_notice 时：按其 agent_instruction 询问用户是否创建定时任务
-  ——夜间 persona 编译（每天，无人值守把未编译偏好整理落版）与每周治理扫描
-  （调用 `twin(action="scan")`），spec 都在 `setup.tasks`；用户同意哪个建哪个
-  （宿主平台侧建），之后不再重复问
+  ——夜间 persona 编译（每天，无人值守把未编译偏好整理落版、作废条款重编、受众画像
+  重抽象），spec 在 `setup.tasks`；用户同意后在宿主平台侧建，之后不再重复问。
+  该提醒也兼作**停转保险丝**：夜间任务 7 天没跑过会重新出现
 - **首次**交付产出物时提醒一次（不是每次）：后续修改尽量交给 Agent 而非手动改，
   每次修改都是一次偏好沉淀机会
 
@@ -83,10 +91,18 @@ description: 个人分身：工作类偏好沉淀与 persona prompt 编译，经
 
 ## compile / submit
 
-- compile 返回素材包：旧版本 prompt（编译参考，非执行依据）+ 未编译证据 + 编译规则；
-  **用独立会话执行、做完即弃**（建议强模型）：编译会话内新旧版本同屏，
-  勿在同一会话继续交付任务——会话隔离是避免新旧 persona 冲突的唯一硬手段
+- compile 返回素材包：旧版本 prompt（编译参考，非执行依据）+ **该类型全部在世偏好证据**
+  （全量投影——每版从头重编，已吸收的证据同样在场）+ 已作废条款清单 + 同受众画像参考 +
+  编译规则（含义稳定表达自由 / 硬预算 / 变更分级须归因）；**用独立会话执行、做完即弃**
+  （建议强模型）：编译会话内新旧版本同屏，勿在同一会话继续交付任务——会话隔离是避免
+  新旧 persona 冲突的唯一硬手段
 - submit 时 `data.model` 填当前模型名，`source_memory_ids` 用素材包里的证据 id 列表
+  （全量口径：素材包里的每条在世证据 id 都应列入）
+- **夜间落版过验证门**：`origin=scheduled` 的 submit 落版前过确定性检查——素材回声
+  （复述素材包）/ 缺分区标题未过会被拒（validation_failed）；无新证据可吸收会被空转阻尼
+  拒（no_new_evidence，防版本号空转）。被拒时如实记录跳过、不要为过门改产物：active 未变、
+  证据未消耗，次晚自动重试；连续被拒不落版会累计在 status 的 nightly_rejected。交互式
+  submit 不受门限制，违规与证据未全覆盖只出警告
 - 用户要求撤销/回退某版分身 → `twin(action="rollback", data={work_type, version?})`：
   省略 version 回上一版，传 n 回指定版；零阻力直接执行（不删历史、版本号不回收），
   不要建议重新编译代替回滚

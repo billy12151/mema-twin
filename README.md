@@ -20,7 +20,7 @@ live in twin's own SQLite with a file mirror for fallback and human review.
 ```
 工作产出/修改 ──twin.write(三字段强制归一)──▶ mema 偏好记忆（带维度标签）
                                                     │
-                              compile：取素材包 ────┘    ← 定时扫描/手动触发，Agent 提示
+                              compile：取素材包 ────┘    ← 夜间定时任务/手动触发，Agent 提示
                                 │
                                 ▼
                   当前会话模型编译（建议强模型）
@@ -50,13 +50,32 @@ live in twin's own SQLite with a file mirror for fallback and human review.
 - **交付任务流（机制改造自 plan-mode）**：可审计（任务行不可变追加 + append-only
   评审记录）、可中断（pending 搁置）、可继续（task_resume 恢复 todos 续作）；task_start /
   task_resume 即 persona prompt 注入点。
-- **定时任务挂 Agent 端**：twin 自身不起调度；status 里的 scan_notice 提醒 Agent
-  征询用户后在宿主平台建任务（夜间 persona 编译 + 每周治理扫描，可只选其一），
-  任一任务近期在转则提醒自消失（mema 首装提醒同款模式）。
+- **定时任务挂 Agent 端（单一夜间编译任务）**：twin 自身不起调度；status 里的
+  scan_notice 提醒 Agent 征询用户后在宿主平台建夜间 persona 编译任务（每天：吸收未编译
+  偏好、作废条款重编、受众画像重抽象），近期在转则提醒自消失；夜间任务 7 天没跑过会
+  重新出现（停转保险丝，mema 首装提醒同款模式）。
 - **新偏好即时生效**：task_start/task_resume 注入 persona 时同步携带该工作性质的
   未编译偏好增补（persona_supplement，冲突以增补为准，上限 10 条）；夜间定时任务把
   增补自动编译进新版本，次日首任务附双跑对比提议（persona_compare_offer，一次性，
   不带旧版全文——同意对比才按需取）。
+- **夜间编译验证门（瘦身版）**：夜间（`origin=scheduled`）落版前过确定性检查——只拦灾难
+  形态：素材回声（复述素材包标记，标题类子串 + 节标题行首匹配；active 旧版含同标记时
+  沿袭降级为警告防自锁）与分区标题（ATX 零标题即畸形稿），未过拒绝落版（validation_failed，
+  active 不变、证据未消耗、次晚自动重试）；**空转阻尼**：提交不含任何新证据且非 stale
+  触发时拒绝（no_new_evidence，防版本号空转与每早双跑提议轰炸）；证据未全覆盖（类型=
+  在世证据超集、画像=集合相等）与交互式违规只警告不拦。连续被拒不落版累计于 status 的
+  `nightly_rejected`（成功落版即清）——持续被拒与空转闭环的唯一出口信号。
+- **全量投影编译**：compile 素材为该类型**全部在世证据**（不分编译状态，排除作废）——
+  每版从头重编，弱底稿不遗传、证据库是唯一事实源；配套编译规则三件套：含义稳定表达自由
+  （证据未动的规则不得变含义，合并/条件化/重组自由）、硬预算（类型 8000 字符/60 条、
+  画像 4000/40，超限强制合并淘汰并写明依据）、版本间变更分级（语义变更须归因证据 id 或
+  预算）。status 附带各类型 active 体积与超预算标记。
+- **冲突链路**：twin.write 透传 mema 的 notice（`mema_notices` + 分诊指引随响应）——
+  similar_active_memory 疑似重复静默分诊；语义冲突 notice 分诊后真冲突才问用户三选项
+  （都留/新替旧/撤销新写的）。`void` 动作作废证据（行级、全链路排除、不可逆）；曾入编译
+  的证据被作废触发 `persona_stale` 夜间自动重编，受众侧经 audience_stale 计数差重抽象；
+  素材包常驻「已作废条款」节防旧版参考带回作废条款。status 附 open_conflicts/open_tasks
+  治理计数。
 
 ## 工具（单工具动作式）
 
@@ -67,9 +86,9 @@ live in twin's own SQLite with a file mirror for fallback and human review.
 | `write` | 沉淀一条工作偏好。必填 content/work_type/audience/purpose；对某受众的通用偏好传 `scope=audience`（work_type 省略），进该受众画像 |
 | `get` | 取某工作性质的 persona prompt（开工前调用）；可选 `version` 取历史版本全文（双跑对比取旧版用）；`aud-{受众}` 可读受众画像 |
 | `compile` | 取编译素材包（旧版本 prompt 编译参考 + 未编译证据 + 编译规则），独立会话执行、做完即弃 |
-| `submit` | 提交编译产物，落版本并写镜像（返回 `supersedes`），回写证据编译标记；夜间定时任务落版传 `origin=scheduled`，取代旧版的交互式落版返回 `compare_hint`（双跑提示） |
+| `submit` | 提交编译产物，落版本并写镜像（返回 `supersedes`），回写证据编译标记；夜间定时任务落版传 `origin=scheduled`（过**验证门**：素材回声/缺分区标题拒绝、无新证据空转阻尼拒绝，均在 status 的 nightly_rejected 累计；证据未全覆盖与交互式违规只警告）；取代旧版的交互式落版返回 `compare_hint`（双跑提示） |
 | `rollback` | 回滚 persona 版本（零阻力）：`version` 省略回上一版，传 n 回指定版；不删历史、版本号不回收 |
-| `status` | 版本概况、受众画像（audience_profiles）与重抽象队列（audience_stale）、未编译统计、pending 数量、scan 安装提醒 |
+| `status` | 版本概况（含体积/超预算标记）、受众画像（audience_profiles）与重抽象队列（audience_stale）、条款作废待重编（persona_stale）、未编译统计、pending 数量、夜间被拒计数（nightly_rejected）、open 冲突/未收口任务计数、定时任务安装提醒 |
 | `taxonomy` | 列枚举（kind ∈ work_type/audience/purpose） |
 | `pending` / `resolve` | 待裁长尾的查看与治理 |
 | `task_start` | 开工建档并注入 persona prompt + 未编译增补（`have_persona_version` 申报同会话已注入版本，未变则省略重复注入；夜间落版的新版首任务附一次性 `persona_compare_offer`；带 audience 时注入受众画像 `audience_profile_md`/雏形） |
@@ -79,7 +98,6 @@ live in twin's own SQLite with a file mirror for fallback and human review.
 | `task_resume` / `task_revise` / `task_close` | 续作历史任务（含进行中）/ 修订返工（子任务回 planning 记 lineage）/ 显式关闭开放任务 |
 | `task_recent` / `task_get` | 任务列表 / 单任务全量（含评审历史） |
 | `todo` | 会话 todo 读写（plan-mode 同款语义） |
-| `scan` | 定时扫描：未编译偏好/pending 积压/开放任务汇总与建议 |
 
 ## 维度枚举 v1
 
