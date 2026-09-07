@@ -85,7 +85,7 @@ live in twin's own SQLite with a file mirror for fallback and human review.
 |------|------|
 | `write` | 沉淀一条工作偏好。必填 content/work_type/audience/purpose；对某受众的通用偏好传 `scope=audience`（work_type 省略），进该受众画像 |
 | `get` | 取某工作性质的 persona prompt（开工前调用）；可选 `version` 取历史版本全文（双跑对比取旧版用）；`aud-{受众}` 可读受众画像 |
-| `compile` | 取编译素材包（旧版本 prompt 编译参考 + 未编译证据 + 编译规则），独立会话执行、做完即弃 |
+| `compile` | 取编译素材包（旧版本 prompt 编译参考 + **全部在世证据**（全量投影）+ 已作废条款清单 + 编译规则（稳定律/硬预算/变更分级）），独立会话执行、做完即弃 |
 | `submit` | 提交编译产物，落版本并写镜像（返回 `supersedes`），回写证据编译标记；夜间定时任务落版传 `origin=scheduled`（过**验证门**：素材回声/缺分区标题拒绝、无新证据空转阻尼拒绝，均在 status 的 nightly_rejected 累计；证据未全覆盖与交互式违规只警告）；取代旧版的交互式落版返回 `compare_hint`（双跑提示） |
 | `rollback` | 回滚 persona 版本（零阻力）：`version` 省略回上一版，传 n 回指定版；不删历史、版本号不回收 |
 | `status` | 版本概况（含体积/超预算标记）、受众画像（audience_profiles）与重抽象队列（audience_stale）、条款作废待重编（persona_stale）、未编译统计、pending 数量、夜间被拒计数（nightly_rejected）、open 冲突/未收口任务计数、定时任务安装提醒 |

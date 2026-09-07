@@ -57,8 +57,10 @@ def test_compile_material_includes_compiled_evidence(monkeypatch):
 
 
 def test_find_fallback_only_when_alive_empty(monkeypatch):
-    """有在世行时绝不走 find 兜底（防素材集/门期望集分叉）；alive 为空才兜底。"""
+    """有在世行时绝不走 find 兜底（防素材集/门期望集分叉）；alive 为空才兜底。
+    read 先 stub（防单测真实联网——评审轮1 P2-4）。"""
     from mema_twin import sink
+    _stub_read(monkeypatch)
     calls = []
 
     def fake_find(*a, **k):
@@ -69,8 +71,7 @@ def test_find_fallback_only_when_alive_empty(monkeypatch):
     monkeypatch.setattr(sink, "find", fake_find)
     _mk_uncompiled([810])
     r = server.twin("compile", {"work_type": "周报"})
-    assert r["ok"] and calls == []  # 有在世证据（读挂走 skipped，但不触发 find）
-    _stub_read(monkeypatch)
+    assert r["ok"] and calls == []
     r2 = server.twin("compile", {"work_type": "周报"})
     assert "[810]" in r2["material"] and calls == []
 
@@ -160,6 +161,60 @@ def test_audience_evidence_excludes_void(monkeypatch):
     rows = db.audience_evidence(conn, "leadership")
     conn.close()
     assert all(r["memory_id"] != 851 for r in rows)
+
+
+def test_damping_bypasses_when_evidence_base_shrunk(monkeypatch):
+    """评审轮1 P1-1：void 后期望集收缩（E⊊old），画像/类型重抽象提交必是旧
+    source 集真子集——阻尼必须放行，否则 void 驱动的重编被永久拦死。"""
+    _stub_read(monkeypatch)
+    _mk_uncompiled([861, 862])
+    # 画像 v1 吸收两条受众证据
+    server.twin("submit", {"work_type": "aud-leadership",
+                           "prompt_md": "# 画像\n\n口径\n",
+                           "model": "m", "source_memory_ids": [861, 862]})
+    # void 861 → 受众证据计数 1 ≠ 画像吸收数 2 → stale
+    server.twin("void", {"memory_id": 861})
+    s = server.twin("status", {})
+    assert "leadership" in s["audience_stale"]
+    # 夜间重抽象只带剩余 1 条（旧集真子集）→ 放行落版，stale 清零
+    r = server.twin("submit", {"work_type": "aud-leadership",
+                               "prompt_md": "# 画像\n\n口径\n",
+                               "origin": "scheduled", "source_memory_ids": [862]})
+    assert r["ok"] and r["version"] == 2, r
+    s2 = server.twin("status", {})
+    assert "leadership" not in s2["audience_stale"]
+    # 对照：基座未缩的真空转仍被拒
+    r2 = server.twin("submit", {"work_type": "aud-leadership",
+                                "prompt_md": "# 画像\n\n口径\n",
+                                "origin": "scheduled", "source_memory_ids": [862]})
+    assert r2["ok"] is False and r2["error"] == "no_new_evidence"
+
+
+def test_profile_material_voided_section_by_audience(monkeypatch):
+    """评审轮1 P1-2：画像模式的作废条款节按 audience 查（跨类型行也算）。"""
+    _stub_read(monkeypatch)
+    _mk_uncompiled([871, 872])
+    server.twin("void", {"memory_id": 871})
+    r = server.twin("compile", {"work_type": "aud-leadership"})
+    assert r["ok"]
+    _, voided_part = r["material"].split("## 已作废条款")
+    assert "[871]" in voided_part and "未入编译" in voided_part
+
+
+def test_void_idempotent_no_stale_remark(monkeypatch):
+    """评审轮1 P3-1：重复 void 幂等返回，不重置已清的 persona_stale。"""
+    _stub_read(monkeypatch)
+    _mk_uncompiled([881])
+    server.twin("submit", {"work_type": "周报", "prompt_md": GOOD_MD,
+                           "model": "m", "source_memory_ids": [881]})
+    server.twin("void", {"memory_id": 881})
+    # 成功落版清 stale 后，再次 void 不得重置
+    server.twin("submit", {"work_type": "周报", "prompt_md": GOOD_MD,
+                           "model": "m", "source_memory_ids": []})
+    assert flow.get_meta("persona_stale:work_report") is None
+    r = server.twin("void", {"memory_id": 881})
+    assert r["ok"] and r["already_void"] is True
+    assert flow.get_meta("persona_stale:work_report") is None
 
 
 # ---- persona_stale 消费（夜间 spec 触发 + status 展示） ----

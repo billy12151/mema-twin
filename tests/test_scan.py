@@ -58,3 +58,5 @@ def test_spec_single_task():
     submit_rule = nightly["calls"][2]["data"]["rule"]
     assert "validation_failed" in submit_rule and "no_new_evidence" in submit_rule
     assert "nightly_rejected" in submit_rule
+    assert "pending_count" in submit_rule  # 汇总输出带治理计数（twin_scan 退役归置）
+    assert "保守封套" in nightly["calls"][1]["data"]["rule"]  # 夜间不做无因重组

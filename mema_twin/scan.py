@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import datetime as _dt
 
-from . import db, flow
+from . import flow
 
 SCHEDULED_TASKS_TOPIC = "scheduled_tasks"
 
@@ -34,9 +34,10 @@ SCHEDULED_TASKS_SPEC: dict = {
             "name": "twin_nightly_compile",
             "purpose": ("夜间无人值守的专用一次性编译会话（凌晨用户不在场，不向用户提问）："
                         "把各 work_type 当天未编译的偏好证据编译进 persona prompt 并 "
-                        "submit 落版（未编译数为 0 的类型不编译不落版，避免版本号空转）；"
-                        "把 persona_stale 里条款被作废的类型重编剔除对应条款落版；"
-                        "再把 audience_stale 里证据数变动的受众重抽象成受众画像落版。"),
+                        "submit 落版（uncompiled 为 0 且无 persona_stale 的类型不编译不"
+                        "落版，避免版本号空转）；把 persona_stale 里条款被作废的类型重编"
+                        "剔除对应条款落版；再把 audience_stale 里证据数变动的受众重抽象成"
+                        "受众画像落版。"),
             "cadence": "daily",
             "calls": [
                 {"tool": "twin", "action": "status",
@@ -46,7 +47,9 @@ SCHEDULED_TASKS_SPEC: dict = {
                 {"tool": "twin", "action": "compile",
                  "data": {"rule": "严格按素材包编译规则产出新版：素材为该类型全部在世证据"
                                   "（全量投影），与旧版本冲突以新证据为准，含义稳定表达自由，"
-                                  "文末按变更分级列出版本间变更"}},
+                                  "文末按变更分级列出版本间变更；保守封套：无证据动机时"
+                                  "不做整体重组（吸收新证据、剔除作废条款、预算合并照做），"
+                                  "大重组留给用户在场的交互式编译"}},
                 {"tool": "twin", "action": "submit",
                  "data": {"origin": "scheduled",
                           "rule": "source ids 用素材包证据 id；origin=scheduled 必传"
