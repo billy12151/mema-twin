@@ -270,6 +270,31 @@ def uncompiled_evidence(conn: sqlite3.Connection, work_type: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def alive_evidence(conn: sqlite3.Connection, work_type: str) -> list[dict]:
+    """该 work_type 的全部在世证据（v0.3.7 全量投影）：uncompiled + compiled，
+    排除 void。compile 素材取数与 submit 验证门 G3 期望集的同一数据源——
+    两处若各查各的会出现「素材来自 A、门期望来自 B」的集合分叉（评审 P2-2）。"""
+    rows = conn.execute(
+        "SELECT * FROM twin_evidence"
+        " WHERE work_type=? AND status IN ('uncompiled','compiled')"
+        " ORDER BY id",
+        (work_type,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def voided_evidence(conn: sqlite3.Connection, work_type: str) -> list[dict]:
+    """该 work_type 已作废的证据行（素材包「已作废条款」节用）：只取指针信息，
+    不读 mema 正文——作废条款的剔除按 `<!-- src -->` 溯源对位旧版参考即可。"""
+    rows = conn.execute(
+        "SELECT memory_id, subject, compiled_version FROM twin_evidence"
+        " WHERE work_type=? AND status='void'"
+        " ORDER BY id",
+        (work_type,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def evidence_stats(conn: sqlite3.Connection) -> dict[str, int]:
     rows = conn.execute(
         "SELECT work_type, COUNT(*) AS n FROM twin_evidence"

@@ -2,13 +2,14 @@
 
 动作分三组：偏好与编译（write/get/compile/submit/status/taxonomy/pending/resolve）、
 交付任务流（task_start/task_submit/task_review/task_pending/task_resume/task_revise/
-task_recent/task_get/todo，机制改造自 plan-mode：可审计、可中断、可继续）、
-定时扫描（scan，提醒挂 Agent 端）。
+task_close/task_recent/task_get/todo，机制改造自 plan-mode：可审计、可中断、可继续）、
+定时体系（单一夜间编译任务，spec 挂 Agent 端宿主自建）。
 """
 from __future__ import annotations
 
 import datetime as _dt
 import ipaddress
+import json
 import os
 import re
 import sqlite3
@@ -29,11 +30,11 @@ _CLIENT_RE = re.compile(r"^[A-Za-z0-9._:@-]{1,64}$")  # 与 mema X-Mema-Client �
 @mcp.tool()
 def twin(action: str, data: dict | None = None) -> dict:
     """个人分身 twin：按工作性质沉淀用户工作偏好，编译版本化 persona prompt，
-    经交付任务流注入执行，并提供定时扫描建议。
+    经交付任务流注入执行，并提供定时任务建议。
 
     动作：write / get / compile / submit / rollback / status / taxonomy / pending /
     resolve / task_start / task_submit / task_review / task_pending / task_resume /
-    task_revise / task_close / task_recent / task_get / todo / scan / help。
+    task_revise / task_close / task_recent / task_get / todo / help。
     先 twin(action="help") 查看各动作参数与引导。compile 返回素材包，由当前会话模型
     编译（建议在强模型会话中执行），submit 提交回库落版本并写文件镜像。
     """
@@ -311,6 +312,21 @@ def _action_status(data: dict) -> dict:
                 "请用 twin(action=\"resolve\", decision=\"canonicalize\") 改名迁移"]
     finally:
         conn.close()
+    # v0.3.7 夜间被拒计数（持续被拒/空转闭环的唯一出口信号，成功落版即清）
+    flow.ensure_schema()
+    rejects = []
+    for key, raw in sorted(flow.list_meta("nightly_reject:").items()):
+        try:
+            rec = json.loads(raw)
+        except (ValueError, TypeError):
+            rec = {}
+        if not isinstance(rec, dict):
+            rec = {}
+        rejects.append({"work_type": key[len("nightly_reject:"):],
+                        "count": rec.get("count"), "last_check": rec.get("last_check"),
+                        "last_at": rec.get("last_at")})
+    if rejects:
+        out["nightly_rejected"] = rejects
     notice = scan.scan_notice()
     if notice:
         out["scan_notice"] = notice
@@ -473,7 +489,9 @@ def _action_compile(data: dict) -> dict:
 
 
 def _coerce_source_ids(value) -> list[int]:
-    """review#10：只收 int / 数字字符串列表；"123" 这类可迭代脏值会拆成 1/2/3。"""
+    """review#10：只收 int / 数字字符串列表；"123" 这类可迭代脏值会拆成 1/2/3。
+    上界 2^63-1（对抗轮2 P3-4）：超大 int 到 SQLite 绑定才抛 OverflowError，
+    会落成"版本已建、响应 internal_error"的半成品——矫正层直接打回。"""
     if value is None:
         return []
     if not isinstance(value, list):
@@ -488,8 +506,116 @@ def _coerce_source_ids(value) -> list[int]:
             raise ValueError(f"invalid memory id: {i!r}")
         if str(n) != str(i).strip() and not isinstance(i, int):
             raise ValueError(f"invalid memory id: {i!r}")
+        if n < 0 or n > 2**63 - 1:
+            raise ValueError(f"invalid memory id: {i!r}（需在 0..2^63-1 内）")
         out.append(n)
     return out
+
+
+# ---- 夜间编译验证门（v0.3.7 瘦身版：只拦灾难形态）----
+#
+# 只保留 G1 素材回声 / G2 分区标题 两条 blocking 检查（误报率近零、必为真故障、
+# 次晚自愈），仅对 origin=scheduled 拦截。G3/G4 证据覆盖降为纯警告（漏列由增补
+# 注入兜底 + 次晚重编自愈，空转由阻尼兜住）；G5 体积漂移删除（防线 = 编译规则
+# 硬预算 + status 体积可见）。配套两条闭环信号：
+#   ① 空转阻尼：scheduled 提交不吸收任何新证据且非 stale 触发 → 拒绝落版，
+#      防「夜夜 mint 新版 → 每早双跑提议轰炸」；
+#   ② nightly_reject 计数：被拒（含阻尼）累计于 twin_meta，status 常显——
+#      持续被拒与持续空转两个闭环的唯一出口信号，不复活 hint/三通道体系。
+# 交互式 submit 永不拦（用户治理压过自动化），违规只渲染进 warnings。
+
+
+def _material_echo_marker(text: str) -> str | None:
+    """素材回声标记检测（G1）：标题类整串子串；节标题类行首标题匹配——
+    复述素材包但把节标题降/升层级（# 编译规则）也命中（对抗轮2 P3-1）。"""
+    if not text:
+        return None
+    hit = next((m for m in templates.MATERIAL_TITLE_MARKERS if m in text), None)
+    if hit:
+        return hit
+    return next((m for m in templates.MATERIAL_SECTION_MARKERS
+                 if re.search("(?m)^#{1,6}[ \\t]*" + re.escape(m), text)), None)
+
+
+def _gate_check(conn, code: str, prompt_md: str,
+                source_ids: list[int]) -> tuple[list[dict], list[str]]:
+    """验证门主体。返回 (blocking_violations, warnings)：blocking 仅 G1（含自锁
+    守卫——active 旧版本身含同标记时新稿沿袭降级为警告，防「交互式落一次含标记
+    版本 → 夜夜被拦」的自锁链）/ G2；G3/G4 为警告字符串（G3 期望集 = 该类型全部
+    在世证据，超集语义——漏列由增补兜底、次晚自愈，不值得拦）。"""
+    violations: list[dict] = []
+    warnings: list[str] = []
+    old_md = (store.get_active(conn, code) or {}).get("prompt_md") or ""
+    echo = _material_echo_marker(prompt_md)
+    if echo:
+        if _material_echo_marker(old_md):
+            warnings.append(f"产物含素材包标记「{echo}」——当前 active 版也含该标记"
+                            "（沿袭旧版，非回声证据）；若非有意引用请人工清理")
+        else:
+            violations.append({"check": "material_echo",
+                               "detail": f"产物复述了素材包内容（含标记「{echo}」）——疑似编译失败"})
+    # G2 分区标题：ATX 口径（setext 不识别——夜间素材包约定即 ATX，且人工通道不拦）
+    if not re.search(r"(?m)^#{1,6} ", prompt_md):
+        violations.append({"check": "no_headings",
+                           "detail": "产物没有任何 Markdown 标题——编译规则要求按固定分区组织"})
+    aud = store.split_audience_profile(code)
+    if aud is not None:
+        # G4 画像（警告）：集合相等口径——数量对但 id 错会让 stale 假性清零
+        expected = {r["memory_id"] for r in db.audience_evidence(conn, aud)}
+        actual = set(source_ids)
+        if actual != expected:
+            missing = sorted(expected - actual)
+            extra = sorted(actual - expected)
+            warnings.append(
+                f"[验证门:画像证据集不符] source_memory_ids {len(actual)} 条，该受众共 "
+                f"{len(expected)} 条证据（漏列 {missing}，多报 {extra}——多报/漏报/混入"
+                "他受众 id 都会让画像吸收数失真、audience_stale 随之失真；也可能是素材包"
+                "生成后该受众新写入了证据，次晚自愈）")
+    else:
+        # G3 类型（警告）：超集语义，期望集 = 全部在世证据（与 compile 全量投影同源）
+        alive = {r["memory_id"] for r in db.alive_evidence(conn, code)}
+        missing = sorted(alive - set(source_ids))
+        if missing:
+            warnings.append(
+                f"[验证门:证据未全覆盖] 该工作性质仍有 {len(missing)} 条在世证据未被本版吸收"
+                f"（missing_ids={missing}；可能是编译会话漏列，也可能是素材包生成后新写入"
+                "了证据）：它们将继续以增补注入，且夜间任务会因未编译数>0 重复编译本类型")
+    return violations, warnings
+
+
+_GATE_CHECK_NAMES = {"material_echo": "素材回声", "no_headings": "缺分区标题"}
+
+
+def _render_violation(v: dict) -> str:
+    """交互式路径的违规文案（warnings 保持纯字符串列表，既有断言口径不破坏）。"""
+    return f"[验证门:{_GATE_CHECK_NAMES.get(v['check'], v['check'])}] {v['detail']}"
+
+
+def _bump_nightly_reject(code: str, check: str) -> None:
+    """scheduled 被拒（验证门/空转阻尼）累计计数：持续被拒闭环的唯一出口信号。"""
+    flow.ensure_schema()
+    raw = flow.get_meta(f"nightly_reject:{code}")
+    try:
+        rec = json.loads(raw)
+    except (ValueError, TypeError):
+        rec = {}
+    if not isinstance(rec, dict):
+        rec = {}
+    rec.update({"count": int(rec.get("count") or 0) + 1,
+                "last_check": check, "last_at": db.now_iso()})
+    flow.set_meta(f"nightly_reject:{code}", json.dumps(rec, ensure_ascii=False))
+
+
+def _clear_nightly_reject(code: str) -> None:
+    """本 code 成功落版（任意 origin）即清计数——含人工 compile 重出出口。"""
+    flow.ensure_schema()
+    if flow.get_meta(f"nightly_reject:{code}") is not None:
+        flow.delete_meta(f"nightly_reject:{code}")
+
+
+_REJECT_HINT = ("本次未落版：active 未变、证据未消耗，次晚自动重试；连续被拒不落版会在 "
+                "status 的 nightly_rejected 累计显示——如需立即处理请人工 compile 重出后"
+                "交互式 submit（不带 origin，不受门限制）")
 
 
 def _action_submit(data: dict) -> dict:
@@ -524,16 +650,38 @@ def _action_submit(data: dict) -> dict:
             code = store.resolve_work_type_code(conn, str(data["work_type"]))
             if not code:
                 return {"ok": False, "error": "invalid_input", "field": "work_type", "reason": "unknown code"}
+        # v0.3.7 验证门（瘦身版）：G1/G2 拦 scheduled；G3/G4 只警告；空转阻尼
+        violations, gate_warnings = _gate_check(conn, code, prompt_md, source_ids)
+        if origin == "scheduled":
+            flow.ensure_schema()
+            if violations:
+                _bump_nightly_reject(code, violations[0]["check"])
+                return {"ok": False, "error": "validation_failed", "origin": "scheduled",
+                        "work_type": code, "violations": violations,
+                        "reason": "夜间落版未过验证门：" + "；".join(v["detail"] for v in violations),
+                        "hint": _REJECT_HINT}
+            active = store.get_active(conn, code)
+            if (active is not None and active.get("version") is not None
+                    and {str(i) for i in source_ids}
+                    <= {str(i) for i in (active.get("source_memory_ids") or [])}
+                    and flow.get_meta(f"persona_stale:{code}") is None):
+                # 空转阻尼（评审 P1-1）：无新证据可吸收且非 stale 触发——拒绝 mint
+                # 新版本，防「夜夜空转落版 → 每早双跑提议轰炸」
+                _bump_nightly_reject(code, "no_new_evidence")
+                return {"ok": False, "error": "no_new_evidence", "origin": "scheduled",
+                        "work_type": code,
+                        "reason": ("提交的 source_memory_ids 未包含任何 active 版"
+                                   "未吸收的新证据（疑似编译会话漏列），拒绝空转落版"),
+                        "hint": _REJECT_HINT}
         rec = store.create_version(conn, code,
                                    prompt_md,
                                    source_ids,
                                    model=str(data.get("model") or ""))
         if store.split_audience_profile(code) is None:
-            pre_uncompiled = len(db.uncompiled_evidence(conn, code))
             marked = db.mark_compiled(conn, source_ids, rec["version"], code)
         else:
             # 画像派生不消耗证据（AR-2）：aud- 行永远保持 uncompiled 给类型编译
-            pre_uncompiled = marked = 0
+            marked = 0
     finally:
         conn.close()
     rec["ok"] = True
@@ -548,18 +696,6 @@ def _action_submit(data: dict) -> dict:
             # 只建受众证据的用户不该被 scan_notice 永久提醒
             flow.ensure_schema()
             flow.set_meta("last_scheduled_compile_at", db.now_iso())
-        # 轮2 P2-1：吸收数 ≠ 该受众证据总数（无论多报/漏报/混入他受众 id）
-        # → stale 永不清零（夜夜重编），当场点破
-        conn = db.connect()
-        try:
-            total_ev = len(db.audience_evidence(
-                conn, store.split_audience_profile(code) or code))
-        finally:
-            conn.close()
-        if len(source_ids) != total_ev:
-            rec.setdefault("warnings", []).append(
-                f"source_memory_ids {len(source_ids)} 条，该受众共 {total_ev} 条证据"
-                "（漏列/多报/混入他受众 id？）：audience_stale 将持续触发夜间重抽象")
     elif origin == "scheduled":
         # #905-④：夜间落版标记来源 + 记对比基线（AR-1：previous_version 只在落版时
         # 可靠，事后推导会被 rollback/多版历史失真）；v1 无旧版可比则不记 → 永不提议
@@ -577,13 +713,13 @@ def _action_submit(data: dict) -> dict:
             f"v{rec['supersedes']} 全文，新旧各出一稿对比（旧版仅参考），对比后以 "
             f"v{rec['version']} 为执行依据（若此后有更高版本，以更高版本为准）；"
             "是否对比由用户决定，不追问。请把这句转告用户。")
-    leftover = pre_uncompiled - marked
-    if leftover > 0 and not is_profile:
-        # 轮2 P2-1：漏列 source id 的证据会永久以增补在场且夜夜重编——当场点破
-        rec.setdefault("warnings", []).append(
-            f"该工作性质仍有 {leftover} 条未编译证据未被本版吸收"
-            "（source_memory_ids 漏列？）：它们将继续以增补注入，且夜间任务会因"
-            "未编译数>0 重复编译本类型")
+    if violations:
+        # 交互式落版（scheduled 有违规已在上方 return）：违规只警告不拦
+        rec.setdefault("warnings", []).extend(_render_violation(v) for v in violations)
+    if gate_warnings:
+        # G3/G4 证据覆盖警告（两 origin 同出；信息含原 leftover/aud 吸收数口径）
+        rec.setdefault("warnings", []).extend(gate_warnings)
+    _clear_nightly_reject(code)  # 成功落版（任意 origin）即清被拒计数（人工重出出口）
     rec["evidence_marked_compiled"] = marked
     replaced = f"取代 v{rec['supersedes']}" if rec["supersedes"] is not None else "首个版本"
     rec["session_note"] = (f"请提醒用户：v{rec['version']} 已生效（{replaced}），"
@@ -1292,19 +1428,15 @@ def _action_todo(data: dict) -> dict:
     return flow.set_session_todos(data.get("session"), data.get("todos"))
 
 
-def _action_scan(data: dict) -> dict:
-    return scan.run_scan()
-
-
 def _action_help(data: dict) -> dict:
     topic = str(data.get("topic") or "").strip()
     if topic == scan.SCHEDULED_TASKS_TOPIC:
         return {
             "ok": True, "topic": scan.SCHEDULED_TASKS_TOPIC,
-            "description": "twin 定时任务 spec（夜间 persona 编译 + 每周治理扫描）：Agent 据此在宿主平台创建等价任务。",
+            "description": "twin 定时任务 spec（单一夜间 persona 编译任务）：Agent 据此在宿主平台创建等价任务。",
             "agent_instruction": scan.AGENT_INSTRUCTION,
             "setup": scan.SCHEDULED_TASKS_SPEC,
-            "note": "提醒自消失：夜间编译（scheduled submit）或 scan 任一在 7 天内跑过即不再提示。",
+            "note": "提醒自消失：夜间编译（scheduled submit）7 天内跑过即不再提示。",
         }
     return {
         "ok": True,
@@ -1315,15 +1447,19 @@ def _action_help(data: dict) -> dict:
                      "对该受众的通用偏好（不限工作类型）传 scope=audience（此时 work_type 省略，"
                      "audience 必须归一成功）。",
             "status": "查看各 work_type 的 prompt 版本概况、受众画像（audience_profiles）、"
-                      "需重抽象的受众（audience_stale）、pending 数量与未编译统计。",
+                      "需重抽象的受众（audience_stale）、pending 数量、未编译统计、"
+                      "夜间被拒计数（nightly_rejected）与定时任务安装提醒。",
             "compile": "取编译素材包（旧版本 prompt 编译参考 + 未编译证据 + 同受众画像参考 + 编译规则），"
                        "由当前会话模型编译；独立会话执行、收尾即弃（session_note）。参数 work_type；"
                        "传 aud-{受众} 取受众画像素材包（该受众全部证据）。",
             "submit": "提交编译产物落版本并写文件镜像。必填 work_type/prompt_md；"
                       "建议带 source_memory_ids 与 model。返回 supersedes（被取代的旧 active 版本）；"
-                      "夜间定时任务落版必传 origin=scheduled（其余场景不要传）；"
-                      "取代旧版的交互式落版返回 compare_hint（双跑对比提示，转告用户；首个版本无）；"
-                      "work_type 传 aud-{受众} 即受众画像落版（derived，不消耗证据）。",
+                      "夜间定时任务落版必传 origin=scheduled（其余场景不要传），落版前过验证门"
+                      "（素材回声/分区标题未过拒绝且 active 不变、证据不动；无新证据可吸收时空转阻尼"
+                      "拒绝落版——两者都会在 status 的 nightly_rejected 累计显示）；交互式 submit "
+                      "只警告不拦；证据未全覆盖只出警告；取代旧版的交互式落版返回 compare_hint"
+                      "（双跑对比提示，转告用户；首个版本无）；work_type 传 aud-{受众} 即受众画像落版"
+                      "（derived，不消耗证据）。",
             "rollback": "回滚 persona 版本（零阻力：无确认、无警告）。work_type 必填；"
                         "version 省略回上一版本、传 n 回指定版本；不删历史（retired 可再激活），"
                         "版本号不回收（下次 submit 继续 MAX+1）。",
@@ -1354,8 +1490,6 @@ def _action_help(data: dict) -> dict:
             "task_recent": "最近任务列表。参数 limit（默认 10）。",
             "task_get": "取单个任务全量（含评审历史）。task_id。",
             "todo": "会话 todo 读写（plan-mode 同款语义：整体替换，至多一条 in_progress）。传 todos 替换，不传读取。",
-            "scan": "执行定时扫描（挂 Agent 端调度）：未编译偏好/pending 积压/开放任务汇总与建议；"
-                    "刷新 last_scan_at 使安装提醒自消失。",
             "help": "本帮助。",
         },
         "write_guidance": templates.WRITE_GUIDANCE,
@@ -1383,7 +1517,6 @@ _ACTIONS = {
     "task_recent": _action_task_recent,
     "task_get": _action_task_get,
     "todo": _action_todo,
-    "scan": _action_scan,
     "help": _action_help,
 }
 
