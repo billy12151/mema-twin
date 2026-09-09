@@ -2,9 +2,26 @@ from mema_twin import taxonomy
 
 
 def test_counts():
-    assert len(taxonomy.all_types("work_type")) == 34
-    assert len(taxonomy.all_types("audience")) == 10
-    assert len(taxonomy.all_types("purpose")) == 9
+    assert len(taxonomy.all_types("work_type")) == 33
+    assert len(taxonomy.all_types("audience")) == 9
+    assert len(taxonomy.all_types("purpose")) == 8
+
+
+def test_no_other_bucket():
+    """v0.3.8 归一门：无 other 杂项桶——真长尾走 canonicalize 立新码。"""
+    for kind in taxonomy.KINDS:
+        assert taxonomy.by_code(kind, "other") is None
+        assert taxonomy.match_exact(kind, "其他") is None
+        assert taxonomy.match_exact(kind, "其它") is None
+
+
+def test_self_aliases_after_cleanup():
+    """v0.3.8 C：删「私人」留「本人」。"""
+    t = taxonomy.by_code("audience", "self")
+    assert "本人" in t.aliases
+    assert "私人" not in t.aliases
+    assert taxonomy.match_exact("audience", "本人").code == "self"
+    assert taxonomy.match_exact("audience", "私人") is None
 
 
 def test_codes_unique_per_kind():

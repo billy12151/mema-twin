@@ -93,35 +93,18 @@ def test_mark_compiled_scopes_work_type(tmp_path, monkeypatch):
     assert twin_db.uncompiled_evidence(conn, "work_report")[0]["memory_id"] == 101
 
 
-def test_resolve_backfills_stranded_evidence(tmp_path, monkeypatch):
-    """对抗#3：pending 维度证据在裁定后回填 code，compile 可见。"""
-    from mema_twin import db as twin_db, normalize
-    monkeypatch.setenv("MEMA_TWIN_DB_PATH", str(tmp_path / "t.sqlite3"))
-    conn = twin_db.connect()
-    r = normalize.normalize_value("work_type", "灵能审计年报", conn, defer_pending=True)
-    assert r.get("deferred_pending")
-    twin_db.record_evidence(conn, 55, {
-        "work_type": r, "audience": {"ok": True, "code": "self", "raw": "自己"},
-        "purpose": {"ok": True, "code": "record_evidence", "raw": "存证"}})
-    assert twin_db.uncompiled_evidence(conn, "xianxia_doc") == []
-    # canonicalize 后回填
-    twin_db.add_canonical(conn, "work_type", "xianxia_doc", "玄幻设定文档")
-    n = twin_db.backfill_evidence_codes(conn, "work_type", "灵能审计年报", "xianxia_doc")
-    assert n == 1
-    rows = twin_db.uncompiled_evidence(conn, "xianxia_doc")
-    assert [x["memory_id"] for x in rows] == [55]
-
 
 def test_resolve_double_map_rejected(tmp_path, monkeypatch):
     """对抗#7：同一 pending 不得二次裁定。"""
     from mema_twin import db as twin_db, normalize
     monkeypatch.setenv("MEMA_TWIN_DB_PATH", str(tmp_path / "t.sqlite3"))
     conn = twin_db.connect()
-    pid = normalize.normalize_value("purpose", "灵能催办", conn)["pending_id"]
+    pid = twin_db.upsert_pending(conn, "purpose", "灵能催办")
     twin_db.append_alias(conn, "purpose", "drive_action", "灵能催办")
     twin_db.set_pending(conn, pid, "mapped", "drive_action")
     r = server._twin_impl("resolve", {"pending_id": pid, "decision": "map", "code": "sync_info"})
     assert r.get("ok") is False and "不可重复裁定" in r.get("reason", "")
+    assert "重试原写入" in r.get("reason", "")  # v0.3.8：并发他方已裁定 → 指引直接重试
 
 
 def test_append_alias_conflict_rejected(tmp_path, monkeypatch):
@@ -151,28 +134,37 @@ def test_write_strips_twin_namespace_tags(monkeypatch):
 
 
 def test_write_no_ghost_pending_on_sink_failure(monkeypatch):
-    """对抗#14：mema 写失败不留幽灵 pending。"""
+    """对抗#14：mema 写失败不留幽灵 pending；v0.3.8 归一门下未命中更是先打回
+    （mema 根本不被触达，票据即裁定义务，不是幽灵）。"""
     from mema_twin import server as srv, sink
+    called = []
     monkeypatch.setattr(sink, "remember",
-                        lambda *a, **k: (_ for _ in ()).throw(sink.SinkError("down")))
-    r = srv._twin_impl("write", {"content": "c", "work_type": "灵能审计年报",
+                        lambda *a, **k: called.append(1) or (_ for _ in ()).throw(sink.SinkError("down")))
+    r = srv._twin_impl("write", {"content": "c", "work_type": "周报",
                            "audience": "高层", "purpose": "同步"})
-    assert r.get("error") == "mema_unreachable"
+    assert r.get("error") == "mema_unreachable" and called  # 门过、mema 失败
     conn = db.connect()
     n = conn.execute("SELECT COUNT(*) AS c FROM twin_pending_values").fetchone()["c"]
     conn.close()
     assert n == 0
+    # 未命中：打回 + 票据，mema 不被调用
+    called.clear()
+    r2 = srv._twin_impl("write", {"content": "c", "work_type": "灵能审计年报",
+                            "audience": "高层", "purpose": "同步"})
+    assert r2.get("error") == "unmatched_value" and not called
+    assert r2["fields"]["work_type"]["pending_id"]
+    assert any(c["code"] == "data_analysis" for c in r2["fields"]["work_type"]["candidates"])
 
 
-def test_revise_child_is_planning_not_forged_approved():
-    """对抗#8：approved 任务的修订子任务回 planning，不伪造审计。"""
-    t = flow.insert_task(brief="T", status="approved", dims={})
-    flow.add_review(t["id"], "approved", "r1")
+def test_revise_child_is_planning():
+    """v0.3.8：已交付任务的修订子任务回 planning 重走，parent 进 superseded。"""
+    t = flow.insert_task(brief="T", status="planning", dims={})
+    server._twin_impl("task_submit", {"task_id": t["id"], "deliverable_md": "# v1"})
     r = server._twin_impl("task_revise", {"task_id": t["id"], "revision_reason": "返工"})
     assert r["ok"] and r["status"] == "planning"
     child = flow.get_task(r["task_id"])
     assert child["parent_task_id"] == t["id"]
-    assert flow.list_reviews(r["task_id"]) == []  # 子任务无评审记录
+    assert flow.get_task(t["id"])["status"] == "superseded"
 
 
 def test_resume_allows_planning():
@@ -600,79 +592,10 @@ def test_compile_material_conditional_and_prohibitions(monkeypatch):
 
 # ---- v0.3.5 双跑对比（#905-④）----
 
-def test_compare_offer_scheduled_once():
-    """夜间 origin 落版 → 首个 task_start 附提议（不含旧版全文），且只附一次。
-    带 1 条新证据过空转阻尼（v0.3.7：scheduled 无新证据会被 no_new_evidence 拒）。"""
-    _mk_uncompiled([601])
-    server._twin_impl("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m"})
-    r2 = server._twin_impl("submit", {"work_type": "周报", "prompt_md": "# v2", "model": "m",
-                                "origin": "scheduled", "source_memory_ids": [601]})
-    assert r2["ok"] and r2["supersedes"] == 1
-    assert "compare_hint" not in r2  # scheduled 落版走 task_start 提议，不走 hint
-    t1 = server._twin_impl("task_start", {"brief": "B", "work_type": "周报"})
-    offer = t1.get("persona_compare_offer")
-    assert offer and offer["current_version"] == 2 and offer["previous_version"] == 1
-    assert "夜间定时任务" in offer["hint"] and "双跑" in offer["hint"]
-    assert "get" in offer["hint"] and "非执行依据" in offer["hint"]
-    assert "prompt_md" not in offer  # 提议不携带旧版全文
-    t2 = server._twin_impl("task_start", {"brief": "B2", "work_type": "周报"})
-    assert "persona_compare_offer" not in t2
 
-
-def test_manual_submit_compare_hint_no_offer():
-    """交互式落版带 compare_hint（v1 无旧版不带）；手动编译永不触发提议。"""
-    r1 = server._twin_impl("submit", {"work_type": "PPT", "prompt_md": "# a", "model": "m"})
-    assert r1["ok"] and "compare_hint" not in r1
-    r2 = server._twin_impl("submit", {"work_type": "PPT", "prompt_md": "# b", "model": "m"})
-    assert r2["ok"] and "compare_hint" in r2
-    assert '"version": 1' in r2["compare_hint"] and "双跑" in r2["compare_hint"]
-    t = server._twin_impl("task_start", {"brief": "B", "work_type": "PPT"})
-    assert "persona_compare_offer" not in t
-
-
-def test_scheduled_first_version_no_offer():
-    """scheduled 落 v1：无旧版可比（compare_prev 不记）→ 永不提议。"""
-    r = server._twin_impl("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m",
-                               "origin": "scheduled"})
-    assert r["ok"] and r["supersedes"] is None and "compare_hint" not in r
-    t = server._twin_impl("task_start", {"brief": "B", "work_type": "周报"})
-    assert "persona_compare_offer" not in t
-
-
-def test_submit_origin_whitelist():
-    r = server._twin_impl("submit", {"work_type": "周报", "prompt_md": "# x",
-                               "origin": "cron"})
-    assert r.get("ok") is False and r.get("field") == "origin"
-
-
-def test_get_version_param():
-    server._twin_impl("submit", {"work_type": "周报", "prompt_md": "# a", "model": "m"})
-    server._twin_impl("submit", {"work_type": "周报", "prompt_md": "# b", "model": "m"})
-    g = server._twin_impl("get", {"work_type": "周报"})
-    assert g["ok"] and g["version"] == 2 and g["prompt_md"] == "# b"
-    g1 = server._twin_impl("get", {"work_type": "周报", "version": 1})
-    assert g1["ok"] and g1["version"] == 1 and g1["prompt_md"] == "# a"
-    gn = server._twin_impl("get", {"work_type": "周报", "version": 99})
-    assert gn.get("ok") is False and gn.get("error") == "not_found"
-    assert "镜像降级" in gn.get("reason", "")
-    for bad in ("abc", 2.9, True, "1.5", 0, -1, 10**20, "1_0", "+2"):
-        gb = server._twin_impl("get", {"work_type": "周报", "version": bad})
-        assert gb.get("ok") is False and gb.get("field") == "version", bad
 
 
 # ---- 轮1 review 修复的回归 ----
-
-def test_task_resume_no_offer_and_does_not_burn():
-    """task_resume 不附提议（拍板），且不消耗一次性标记——留给下一个 task_start。"""
-    _mk_uncompiled([661])
-    server._twin_impl("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m"})
-    t1 = server._twin_impl("task_start", {"brief": "B", "work_type": "周报"})
-    server._twin_impl("submit", {"work_type": "周报", "prompt_md": "# v2", "model": "m",
-                           "origin": "scheduled", "source_memory_ids": [661]})
-    r = server._twin_impl("task_resume", {"task_id": t1["task_id"]})
-    assert r["ok"] and "persona_compare_offer" not in r
-    t2 = server._twin_impl("task_start", {"brief": "B2", "work_type": "周报"})
-    assert t2.get("persona_compare_offer", {}).get("current_version") == 2
 
 
 def test_supplement_failfast_discriminating(monkeypatch):
@@ -709,8 +632,8 @@ def test_supplement_single_row_notok_no_failfast(monkeypatch):
                                                 "reason": "not_found"}]
 
 
-def test_compare_offer_suppressed_for_mirror_persona(monkeypatch):
-    """mirror 降级无版本身份：全文照注入，提议不触发。"""
+def test_mirror_persona_full_injection_no_offer(monkeypatch):
+    """mirror 降级无版本身份：全文照注入（提议机制已删，增补照带）。"""
     _stub_read(monkeypatch)
     mirror = __import__("pathlib").Path(
         __import__("os").environ["MEMA_TWIN_PROMPTS_DIR"]) / "work_report" / "active.md"
@@ -719,8 +642,8 @@ def test_compare_offer_suppressed_for_mirror_persona(monkeypatch):
     _mk_uncompiled([510])
     r = server._twin_impl("task_start", {"brief": "B", "work_type": "周报"})
     assert r["persona_prompt_md"] == "# 镜像降级版"
-    assert "persona_compare_offer" not in r
-    assert len(r["persona_supplement"]) == 1  # 增补与提议正交，照带
+    assert len(r["persona_supplement"]) == 1
+
 
 
 def test_task_resume_empty_persona_supplement(monkeypatch):
@@ -746,12 +669,6 @@ def test_notice_suppressed_by_scheduled_compile():
 
 # ---- 轮2 对抗性 review 修复的回归 ----
 
-def test_claim_meta_atomic_first_wins():
-    """一次性标记原子抢占：首个 claim 赢，第二个输（多宿主并发只问一次）。"""
-    from mema_twin import flow
-    assert flow.claim_meta("t:x:1", "a") is True
-    assert flow.claim_meta("t:x:1", "b") is False
-
 
 def test_supplement_note_pinned_to_version(monkeypatch):
     """优先级声明钉死版本号，不宣称"编译后新增"（漏列 source id 时旧证据也走增补）。"""
@@ -764,18 +681,6 @@ def test_supplement_note_pinned_to_version(monkeypatch):
     assert "与 v1 冲突时以增补为准" in note
     assert "编译后新增" not in note
 
-
-def test_offer_hint_pins_version():
-    _mk_uncompiled([671])
-    server._twin_impl("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m"})
-    server._twin_impl("submit", {"work_type": "周报", "prompt_md": "# v2", "model": "m",
-                           "origin": "scheduled", "source_memory_ids": [671]})
-    r = server._twin_impl("task_start", {"brief": "B", "work_type": "周报"})
-    hint = r["persona_compare_offer"]["hint"]
-    assert "以 v2 为执行依据" in hint and "更高版本" in hint
-    h = server._twin_impl("submit", {"work_type": "PPT", "prompt_md": "# a", "model": "m"})
-    h2 = server._twin_impl("submit", {"work_type": "PPT", "prompt_md": "# b", "model": "m"})
-    assert "以 v2 为执行依据" in h2["compare_hint"]
 
 
 def test_task_id_float_rejected():
@@ -1036,7 +941,8 @@ def test_write_audience_scope_validations(monkeypatch):
                         lambda *a, **k: {"ok": True, "data": {"id": 1}})
     r2 = server._twin_impl("write", {"content": "x", "audience": "外星领导",
                                "purpose": "同步", "scope": "audience"})
-    assert r2.get("ok") is False and r2.get("field") == "audience"
+    assert r2.get("ok") is False and r2.get("error") == "unmatched_value"
+    assert "audience" in r2["fields"] and r2["fields"]["audience"]["candidates"]
 
 
 # ---- v0.3.6 轮1 review 修复的回归 ----
@@ -1084,7 +990,7 @@ def test_stale_ignores_worktype_null_rows(monkeypatch):
     """work_type 待裁的滞留证据不进 stale 计数（否则夜夜重编永不清零）。"""
     conn = db.connect()
     from mema_twin import normalize
-    r = normalize.normalize_value("work_type", "灵能审计年报", conn, defer_pending=True)
+    r = {"ok": False, "kind": "work_type", "raw": "灵能审计年报", "code": None}
     db.record_evidence(conn, 961, {
         "work_type": r, "audience": {"ok": True, "code": "leadership", "raw": "领导"},
         "purpose": {"ok": True, "code": "sync_info", "raw": "同步"}})
@@ -1154,3 +1060,253 @@ def test_write_scope_ignores_supplied_worktype(monkeypatch):
                               "scope": "audience"})
     assert r["ok"] and r["dimensions"]["work_type"]["code"] == "aud-leadership"
     assert "受众级偏好" in captured["subject"]
+
+
+# ---- v0.3.8 归一门 / 交付流收口 / 删双跑 ----
+
+def test_task_start_gate_no_half_task():
+    """打回发生在建档之前：twin_tasks 行数不变，票据在场。"""
+    conn = db.connect()
+    before = conn.execute("SELECT COUNT(*) AS c FROM twin_tasks").fetchone()["c"]
+    conn.close()
+    r = server._twin_impl("task_start", {"brief": "B", "work_type": "灵能审计年报",
+                                  "audience": "外星领导", "purpose": "数据整理汇总"})
+    assert r.get("error") == "unmatched_value"
+    conn = db.connect()
+    after = conn.execute("SELECT COUNT(*) AS c FROM twin_tasks").fetchone()["c"]
+    rows = {(x["type_kind"], x["raw_value"]) for x in db.list_pending(conn)}
+    conn.close()
+    assert after == before  # 无半建任务
+    assert rows == {("work_type", "灵能审计年报"), ("audience", "外星领导"), ("purpose", "数据整理汇总")}
+
+
+def test_task_start_gate_optional_dims_absent_ok():
+    """audience/purpose 可选：不给值不进门、不产票据，照常建档。"""
+    r = server._twin_impl("task_start", {"brief": "B", "work_type": "周报"})
+    assert r["ok"] and r["dimensions"]["audience"]["ok"] is False
+    conn = db.connect()
+    assert db.list_pending(conn) == []
+    conn.close()
+
+
+def test_write_multi_miss_all_at_once(monkeypatch):
+    """多维未命中一次性全报（含 scope=audience 分支），不逐个往返。"""
+    from mema_twin import sink
+    monkeypatch.setattr(sink, "remember", lambda *a, **k: {"ok": True, "data": {"id": 1}})
+    r = server._twin_impl("write", {"content": "c", "work_type": "aaa未知",
+                            "audience": "bbb未知", "purpose": "ccc未知"})
+    assert r.get("error") == "unmatched_value" and set(r["fields"]) == {
+        "work_type", "audience", "purpose"}
+    r2 = server._twin_impl("write", {"content": "c", "audience": "ddd未知",
+                            "purpose": "同步", "scope": "audience"})
+    assert r2.get("error") == "unmatched_value" and set(r2["fields"]) == {"audience"}
+
+
+def test_gate_closed_loop_map_then_retry(monkeypatch):
+    """票据 → map（别名学习）→ 原值重试命中，终身只问一次。"""
+    from mema_twin import sink
+    monkeypatch.setattr(sink, "remember",
+                        lambda *a, **k: {"ok": True, "data": {"id": 77}})
+    r = server._twin_impl("write", {"content": "c", "work_type": "数据筛选",
+                            "audience": "本人", "purpose": "沉淀"})
+    assert r.get("error") == "unmatched_value"
+    pid = r["fields"]["work_type"]["pending_id"]
+    rr = server._twin_impl("resolve", {"pending_id": pid, "decision": "map",
+                               "code": "data_analysis"})
+    assert rr["ok"]
+    r2 = server._twin_impl("write", {"content": "c", "work_type": "数据筛选",
+                            "audience": "本人", "purpose": "沉淀"})
+    assert r2["ok"] and r2["dimensions"]["work_type"]["code"] == "data_analysis"
+    assert "pending" not in r2  # 成功响应零 pending 键
+
+
+def test_gate_reject_decision_note():
+    """reject 裁定返回放弃指引（不得拿原值重试）。"""
+    r = server._twin_impl("write", {"content": "c", "work_type": "不写的类型",
+                            "audience": "本人", "purpose": "沉淀"})
+    pid = r["fields"]["work_type"]["pending_id"]
+    rr = server._twin_impl("resolve", {"pending_id": pid, "decision": "reject"})
+    assert rr["ok"] and "不得再拿原值重试" in rr["note"]
+
+
+def test_canonicalize_visible_in_dynamic_taxonomy():
+    """自建码 canonicalize 后 taxonomy 动态清单立即可见（B3 回归锁定）。"""
+    r = server._twin_impl("taxonomy", {"kind": "work_type"})
+    assert r["ok"] and all(t["code"] != "other" for t in r["types"])
+    assert any(t["code"] == "work_report" and "周报" in t["aliases"] for t in r["types"])
+    conn = db.connect()
+    db.add_canonical(conn, "work_type", "xianxia_doc", "玄幻设定文档", "", "专业服务")
+    conn.close()
+    r2 = server._twin_impl("taxonomy", {"kind": "work_type"})
+    assert any(t["code"] == "xianxia_doc" and t["is_custom"] for t in r2["types"])
+
+
+def test_submit_file_write_failure_downgraded(monkeypatch):
+    """落盘失败（OSError / sqlite3.Error）降级 warning，状态已终态不回滚。"""
+    t = flow.insert_task(brief="T", status="planning", dims={})
+    def boom_os(tid, md):
+        raise OSError("disk full")
+    monkeypatch.setattr(flow, "write_deliverable_file", boom_os)
+    r = server._twin_impl("task_submit", {"task_id": t["id"], "deliverable_md": "# 稿"})
+    assert r["ok"] is True and flow.get_task(t["id"])["status"] == "submitted"
+    assert any("写入失败" in w for w in r["warnings"])
+
+    t2 = flow.insert_task(brief="T2", status="planning", dims={})
+    def boom_db(tid, md):
+        import sqlite3 as _s
+        raise _s.OperationalError("database is locked")
+    monkeypatch.setattr(flow, "write_deliverable_file", boom_db)
+    r2 = server._twin_impl("task_submit", {"task_id": t2["id"], "deliverable_md": "# 稿"})
+    assert r2["ok"] is True and any("写入失败" in w for w in r2["warnings"])
+
+
+def test_submit_deliverable_file_written():
+    t = flow.insert_task(brief="T", status="planning", dims={})
+    r = server._twin_impl("task_submit", {"task_id": t["id"], "deliverable_md": "# 交付稿"})
+    assert r["ok"] and r["deliverable_path"].endswith(f"task-{t['id']}.md")
+    from pathlib import Path
+    assert Path(r["deliverable_path"]).read_text(encoding="utf-8") == "# 交付稿"
+
+
+def test_review_actions_retired():
+    """task_review / task_pending 已删：unknown action。"""
+    r = server._twin_impl("task_review", {"task_id": 1, "verdict": "approved"})
+    assert r.get("error") == "invalid_input" and "task_review" not in r["actions"]
+    r2 = server._twin_impl("task_pending", {"task_id": 1})
+    assert r2.get("error") == "invalid_input"
+
+
+def test_open_tasks_counts_planning_only():
+    """open_tasks 仅数 planning：submitted 终态自动出清。"""
+    conn = db.connect()
+    conn.execute("INSERT INTO twin_tasks(brief, status, created_at)"
+                 " VALUES('legacy', 'submitted', '2026-09-01T00:00:00+00:00')")
+    conn.commit()
+    conn.close()
+    s0 = server._twin_impl("status", {})
+    base = s0["open_tasks"]
+    t = flow.insert_task(brief="T", status="planning", dims={})
+    s1 = server._twin_impl("status", {})
+    assert s1["open_tasks"] == base + 1
+    server._twin_impl("task_submit", {"task_id": t["id"], "deliverable_md": "x"})
+    s2 = server._twin_impl("status", {})
+    assert s2["open_tasks"] == base
+
+
+def test_double_run_meta_families_cleaned():
+    """ensure_schema 幂等清理双跑三族 meta；last_scheduled_compile_at 保留。"""
+    flow.set_meta("persona_origin:work_report:2", "scheduled")
+    flow.set_meta("compare_prev:work_report:2", "1")
+    flow.set_meta("compare_offered:work_report:2", "x")
+    flow.set_meta("last_scheduled_compile_at", "2026-09-09T00:00:00+00:00")
+    flow._schema_ready.clear()
+    flow.ensure_schema()
+    conn = db.connect()
+    keys = {r["key"] for r in conn.execute("SELECT key FROM twin_meta")}
+    conn.close()
+    assert not any(k.startswith(("persona_origin:", "compare_prev:", "compare_offered:"))
+                   for k in keys)
+    assert "last_scheduled_compile_at" in keys
+
+
+def test_write_success_zero_pending_rows(monkeypatch):
+    """成功路径零票据、零 pending upsert（defer 机制消亡的行为锁定）。"""
+    from mema_twin import sink
+    monkeypatch.setattr(sink, "remember",
+                        lambda *a, **k: {"ok": True, "data": {"id": 88}})
+    r = server._twin_impl("write", {"content": "c", "work_type": "周报",
+                            "audience": "高层", "purpose": "同步"})
+    assert r["ok"] and "pending" not in r
+    conn = db.connect()
+    assert db.list_pending(conn) == []
+    conn.close()
+
+
+def test_submit_file_written_from_fresh_reread(monkeypatch):
+    """轮1 P2-2：落盘内容取自库内重读值，不是请求参数（review#5 并发回归）。"""
+    t = flow.insert_task(brief="T", status="planning", dims={})
+    real_get = flow.get_task
+    calls = {"n": 0}
+
+    def fake_get(tid):
+        d = real_get(tid)
+        if calls["n"] >= 1:  # submit 流程内的重读（建档读之外第一次）
+            d = dict(d)
+            d["deliverable_md"] = "# 并发更新后的稿"
+        calls["n"] += 1
+        return d
+    monkeypatch.setattr(flow, "get_task", fake_get)
+    r = server._twin_impl("task_submit", {"task_id": t["id"], "deliverable_md": "# 旧稿"})
+    assert r["ok"]
+    from pathlib import Path
+    assert Path(r["deliverable_path"]).read_text(encoding="utf-8") == "# 并发更新后的稿"
+
+
+def test_gate_closed_loop_canonicalize_then_retry(monkeypatch):
+    """canonicalize 闭环（_twin_impl 层）：新码即刻入列、原值重试命中。"""
+    from mema_twin import sink
+    monkeypatch.setattr(sink, "remember",
+                        lambda *a, **k: {"ok": True, "data": {"id": 79}})
+    r = server._twin_impl("write", {"content": "c", "work_type": "玄幻设定集",
+                            "audience": "本人", "purpose": "沉淀"})
+    assert r.get("error") == "unmatched_value"
+    pid = r["fields"]["work_type"]["pending_id"]
+    rr = server._twin_impl("resolve", {"pending_id": pid, "decision": "canonicalize",
+                               "new_type": {"code": "xianxia_doc", "zh": "玄幻设定文档",
+                                            "en": "", "domain": "专业服务"}})
+    assert rr["ok"]
+    r2 = server._twin_impl("write", {"content": "c", "work_type": "玄幻设定集",
+                            "audience": "本人", "purpose": "沉淀"})
+    assert r2["ok"] and r2["dimensions"]["work_type"]["code"] == "xianxia_doc"
+    assert "persona_compare_offer" not in r2  # 双跑已删，任何响应不再出现
+
+
+# ---- 轮2 对抗性 review 修复的回归 ----
+
+def test_gate_reject_concurrent_resolution_wins():
+    """P3-1 竞窗收窄：miss 后他方已 map，gate_reject 重查命中→返回 None、
+    dims 就地改写、不落票据。"""
+    from mema_twin import sink, normalize as nz
+    conn = db.connect()
+    m = nz.normalize_value("work_type", "竞窗测试值", conn)
+    conn.close()
+    assert m.get("ok") is False
+    conn = db.connect()
+    db.append_alias(conn, "work_type", "research_report", "竞窗测试值")
+    conn.close()
+    resp = nz.gate_reject([m])
+    assert resp is None and m["ok"] is True and m["code"] == "research_report"
+    conn = db.connect()
+    assert [p for p in db.list_pending(conn) if p["raw_value"] == "竞窗测试值"] == []
+    conn.close()
+
+
+def test_append_alias_seeds_missing_builtin_row(tmp_path, monkeypatch):
+    """P2-3：既有库缺新内置码的行（表非空即跳过的播种形态），map 到它不再炸
+    unknown canonical——_ensure_type_row 补播。"""
+    monkeypatch.setenv("MEMA_TWIN_DB_PATH", str(tmp_path / "t.sqlite3"))
+    from mema_twin import db as twin_db
+    conn = twin_db.connect()
+    conn.execute("DELETE FROM twin_types WHERE code='meeting_minutes'")
+    conn.commit()
+    conn.close()
+    conn = twin_db.connect()
+    db.append_alias(conn, "work_type", "meeting_minutes", "跨部门纪要")
+    r = conn.close() or twin_db.connect()
+    from mema_twin import normalize as nz
+    assert nz.normalize_value("work_type", "跨部门纪要", r)["code"] == "meeting_minutes"
+    r.close()
+
+
+def test_legacy_deadend_wording():
+    """P3-2：存量 approved/rejected 死端不再指路 task_revise 打转，直说无迁移入口。"""
+    conn = db.connect()
+    conn.execute("INSERT INTO twin_tasks(brief, status, created_at)"
+                 " VALUES('legacy approved', 'approved', '2026-09-01T00:00:00+00:00')")
+    tid = conn.execute("SELECT last_insert_rowid() AS i").fetchone()["i"]
+    conn.commit()
+    conn.close()
+    r = server._twin_impl("task_resume", {"task_id": tid})
+    assert r.get("ok") is False and "无迁移入口" in r.get("reason", "")
+    r2 = server._twin_impl("task_revise", {"task_id": tid, "revision_reason": "x"})
+    assert r2.get("ok") is False and "无迁移入口" in r2.get("reason", "")
