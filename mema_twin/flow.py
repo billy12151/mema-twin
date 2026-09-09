@@ -1,14 +1,14 @@
-"""交付任务执行流（M2.1）：机制改造自 plan-mode-mcp（plan_mode/db.py + tools.py）。
+"""交付任务执行流（M2.1；v0.3.8 删评审环）：机制改造自 plan-mode-mcp。
 
 保留的 plan-mode 机制：连接工厂（每次操作新连接）、状态机 + supersede（开放任务
 自动让位）、行级审计（任务行不可变追加，状态变更盖 decided_at 时间戳）、
 lineage（revise 生成子任务并继承状态）、resume（恢复 todos 并新建 planning 行）、
 会话隔离的内存 todos（同一进程多会话互不串）。
 
-twin 改造点：任务对象从 plan 换成带三维度标签的交付任务；task_start/task_resume
-注入该 work_type 的 active persona prompt（这是分身进入执行流的注入点）；新增
-append-only 评审表 twin_task_reviews（每轮 review 一行，可审计的迭代历史）；用户
-明确不搬 plan-mode 的写作参考 prompt（persona 必须从用户自身信号长出来）。
+v0.3.8（设计文档 mema-twin-v0.3.8-design-2026-09-09.md A）：删除评审环——
+task_submit 即终点（planning → submitted 终态），approved/rejected/pending 三态
+与 task_review/task_pending/twin_task_reviews 表退役；交付物文件改在 submit 时
+落盘。评审 verdict 从无下游消费者，用户真实反应走对话 → twin.write 主路径。
 """
 from __future__ import annotations
 
@@ -19,17 +19,14 @@ from pathlib import Path
 
 from . import db, sink
 
-# 状态机（与 plan-mode 同构）：planning → submitted → approved/rejected；
-# pending = 审批被搁置（中断未决）；superseded = 被新任务让位（历史保留）。
-STATUSES = ("planning", "submitted", "approved", "rejected", "pending", "superseded")
-_OPEN_STATUSES = ("planning", "submitted", "pending")
-# 自动让位只收 planning/pending（review#6）：submitted 是在等人评审，开新任务
-# 不该把待评审的交付稿变成不可评审的 superseded（task_review 仅收 submitted）。
-_SUPERSEDE_STATUSES = ("planning", "pending")
-# planning 纳入可续作（对抗 review#8）：最常见的"中断续作"就是打到一半的进行中
-# 任务；plan-mode 不含 planning 是因为它的 resume 面向审批流，twin 面向执行流。
-_RESUMABLE_STATUSES = ("planning", "approved", "submitted", "pending")
-_REVISABLE_STATUSES = ("approved", "submitted", "pending")
+# 状态机（v0.3.8 三态）：planning → submitted（终态，交付即收口）；superseded =
+# 被新任务让位/修订/关闭（历史保留）。存量行的 approved/rejected/pending 仅作
+# 展示（legacy），不再有任何迁移入口。
+STATUSES = ("planning", "submitted", "superseded")
+_OPEN_STATUSES = ("planning",)
+_SUPERSEDE_STATUSES = ("planning",)  # submitted 是终态无需保护，让位只收 planning
+_RESUMABLE_STATUSES = ("planning",)  # 中断续作；已交付（submitted）返工走 task_revise
+_REVISABLE_STATUSES = ("submitted",)  # 交付后返工，子任务回 planning 重走
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS twin_tasks(
@@ -57,15 +54,6 @@ CREATE TABLE IF NOT EXISTS twin_tasks(
   revision_reason TEXT,
   loop_id INTEGER
 );
-CREATE TABLE IF NOT EXISTS twin_task_reviews(
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  task_id INTEGER NOT NULL,
-  round INTEGER NOT NULL DEFAULT 1,
-  verdict TEXT NOT NULL,
-  notes TEXT NOT NULL DEFAULT '',
-  created_at TEXT NOT NULL,
-  UNIQUE(task_id, round)
-);
 CREATE INDEX IF NOT EXISTS idx_twin_tasks_status ON twin_tasks(status);
 CREATE TABLE IF NOT EXISTS twin_meta(
   key TEXT PRIMARY KEY,
@@ -77,13 +65,20 @@ _schema_ready: set[str] = set()  # 已建表的 db 路径（测试会切 MEMA_TW
 
 
 def ensure_schema() -> None:
-    """twin_tasks 等表建在 twin.sqlite3（与既有表同库，db.connect 后追加执行）。"""
+    """twin_tasks 等表建在 twin.sqlite3（与既有表同库，db.connect 后追加执行）。
+    v0.3.8 顺带完成一次性退役清理（幂等）：DROP 评审表、删双跑三族 meta
+    （persona_origin/compare_prev/compare_offered；保留 last_scheduled_compile_at，
+    勿扩大前缀）。"""
     path = str(db.db_path())
     if path in _schema_ready:
         return
     conn = db.connect()
     try:
         conn.executescript(_SCHEMA)
+        conn.execute("DROP TABLE IF EXISTS twin_task_reviews")
+        conn.execute(
+            "DELETE FROM twin_meta WHERE key LIKE 'persona_origin:%'"
+            " OR key LIKE 'compare_prev:%' OR key LIKE 'compare_offered:%'")
         conn.commit()
     finally:
         conn.close()
@@ -311,48 +306,7 @@ def recent_tasks(limit: int = 10) -> list[dict]:
         conn.close()
 
 
-# ---- 评审（append-only 每轮一行）----
-
-def add_review(task_id: int, verdict: str, notes: str = "") -> dict:
-    if verdict not in ("approved", "changes_requested"):
-        raise ValueError("verdict must be approved | changes_requested")
-    conn = db.connect()
-    try:
-        for _attempt in range(3):  # UNIQUE(task_id, round)：并发评审撞轮次时重算（对抗 review#11）
-            row = conn.execute(
-                "SELECT COALESCE(MAX(round),0) AS r FROM twin_task_reviews WHERE task_id=?",
-                (int(task_id),),
-            ).fetchone()
-            rnd = int(row["r"]) + 1
-            try:
-                conn.execute(
-                    "INSERT INTO twin_task_reviews(task_id, round, verdict, notes, created_at)"
-                    " VALUES(?,?,?,?,?)",
-                    (int(task_id), rnd, verdict, notes or "", db.now_iso()),
-                )
-                conn.commit()
-                return {"task_id": int(task_id), "round": rnd, "verdict": verdict,
-                        "notes": notes or ""}
-            except sqlite3.IntegrityError:
-                conn.rollback()
-                if _attempt == 2:
-                    raise
-                continue
-        raise RuntimeError("unreachable")
-    finally:
-        conn.close()
-
-
-def list_reviews(task_id: int) -> list[dict]:
-    conn = db.connect()
-    try:
-        rows = conn.execute(
-            "SELECT * FROM twin_task_reviews WHERE task_id=? ORDER BY round",
-            (int(task_id),),
-        ).fetchall()
-        return [dict(r) for r in rows]
-    finally:
-        conn.close()
+# ---- 评审（v0.3.8 已删：append-only 评审表随评审环一并退役）----
 
 
 # ---- 交付物文件（approve 时落盘，审计工件，plan-mode 的 plan_file 同款）----
@@ -395,23 +349,6 @@ def set_meta(key: str, value: str) -> None:
             (key, value),
         )
         conn.commit()
-    finally:
-        conn.close()
-
-
-def claim_meta(key: str, value: str) -> bool:
-    """原子抢占（轮2 P2-3）：key 不存在则写入返回 True，已存在返回 False。
-    get_meta+set_meta 两连接之间有竞窗——http 多宿主并发 task_start 抢同一
-    compare_offered 标记时必须只赢一个，否则"只问一次"被问两次。"""
-    conn = db.connect()
-    try:
-        cur = conn.execute(
-            "INSERT INTO twin_meta(key, value) VALUES(?,?)"
-            " ON CONFLICT(key) DO NOTHING",
-            (key, value),
-        )
-        conn.commit()
-        return cur.rowcount == 1
     finally:
         conn.close()
 

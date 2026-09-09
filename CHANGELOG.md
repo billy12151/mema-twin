@@ -1,5 +1,48 @@
 # Changelog
 
+## [0.3.8] — 2026-09-09
+
+- **删任务评审环（task_submit 即终点）**：状态机六态砍三态（`planning → submitted 终态` /
+  superseded；approved/rejected/pending 退役为存量展示行）；删 `task_review`/`task_pending`
+  动作与 `twin_task_reviews` 表（ensure_schema 幂等 DROP）；task_submit 在状态迁移后重读库内
+  最新交付稿落盘 `deliverables/task-N.md`（OSError/sqlite3.Error 降级 warning 不回滚）；supersede
+  与 status 的 open_tasks 仅收 planning（存量僵尸 submitted 自动出清）；task_resume 仅 planning、
+  task_revise 仅 submitted、task_close 仅 planning；存量 approved/rejected 死端文案直说无迁移入口。
+  依据：评审 verdict 零下游消费者（25 任务仅 1 approved、10 submitted 一周无人裁定），依赖
+  Agent 转达的软提示实测等于不存在，用户反馈走对话 → twin.write 主路径。
+- **归一门（三维度清单硬约束 + 强制用户裁定）**：write/task_start 已提供的维度值未命中清单 →
+  **整笔打回**（`unmatched_value`，附动态候选清单 + 每值落 pending 裁定票据，task_start 打回在
+  建档之前无半建任务，多维未命中一次性全报）；Agent 必须问用户：resolve map（原值进别名表，
+  同一说法终身只问一次）/ canonicalize（新码即刻入列）/ reject（不入体系，不得重试原值）；
+  「已裁定不可重复裁定」报错指引并发场景直接重试写入；gate_reject 落票据前重查一次，并发他方
+  已裁定的维度就地转命中（竞窗收窄）。删三个枚举的 other 杂项桶；audience/purpose 仅 task_start
+  可选不变、write 三维必填不变；write 的 tags 校验提前到门前（miss+脏 tags 不制造裁定义务）。
+  残留风险（明示接受）：门保证清单在场+新值必经用户，不能证明 Agent 真问了用户。
+- **twin_types 存量迁移（幂等）**：删 3 行内置 other 种子（播种是 INSERT-only，只改内置枚举
+  不动库会静默失效）、audience/self 行摘「私人」（保留治理追加的「本人」，不整行覆写）、
+  twin_pending_values 删旧列 first_seen_memory_id；upsert_pending 返回值改回查（DO UPDATE 路径
+  lastrowid 不可靠）；append_alias 对「内置枚举有、twin_types 无行」的码补播行（防未来加内置码
+  后 map 炸 unknown canonical）。
+- **删双跑全家**：compare_offer（task_start 一次性提议）/ compare_hint（submit 响应提示）与
+  persona_origin/compare_prev/compare_offered 三族 meta 退役（ensure_schema 幂等清理；保留
+  last_scheduled_compile_at——夜间停转保险丝的刷新点，spec 文案补明 origin 三重用途）；死代码
+  一并清（flow.claim_meta、backfill_evidence_codes、write 成功响应 pending 键、defer_pending
+  机制）。get 的 version 参数、零阻力 rollback、验证门 G1/G2、空转阻尼、nightly_rejected、预算
+  可见保留为质量安全网。否决理由存档：救济免费且可逆（rollback 可再滚回）时事前确认无价值，
+  双跑可触发场景为空集。
+- **server.py 模块拆分（单文件 ≤1000 行）**：identity（client 身份 contextvar）/ pref_actions
+  （write/get/taxonomy/pending/resolve/void/status）/ compile_actions（compile/submit/rollback+
+  验证门+证据取数）/ task_actions（任务流+注入 helpers）；server.py 瘦身为工具面（260 行，
+  最大模块 512 行）；请求头经 contextvar 注入（复用 sink notices 模式），动作调用点形态不变，
+  `_twin_impl` 仍可从 `mema_twin.server` 导入；taxonomy action 动态化（内置+自建+治理别名，
+  与匹配侧同源）。
+- **夜间 spec**：submit 步骤删双跑句；新增 pending 明细调用（`twin(action="pending")`）——
+  归一门待裁票据进晨报汇总，留用户在场裁定，夜间不代裁。宿主已建定时任务需按新 spec 整体重建。
+- **self 别名**：删「私人」留「本人」（语义空间由 自己/自用/个人 覆盖）。
+- 设计文档：`~/ZCodeProject/docs/mema-twin-v0.3.8-design-2026-09-09.md`（含两轮评审明细：
+  轮 1 自审 6 项、轮 2 对抗性 13 项全部并入；处置对账 mema #948→方向采纳/机制已改、
+  #949→版本门否决+评审环删除）。184 测试全绿。
+
 ## [0.3.7] — 2026-09-07
 
 - **夜间编译验证门（瘦身版，#907/#908）**：夜间（`origin=scheduled`）submit 落版前过确定性

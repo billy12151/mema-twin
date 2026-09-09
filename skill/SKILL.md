@@ -20,7 +20,7 @@ description: 个人分身：工作类偏好沉淀与 persona prompt 编译，经
 - 用户修改/审阅了工作产物（PPT、文档、汇报、设计……），或显式要求沉淀工作偏好
   → `twin(action="write")`。**合并沉淀**：同一任务的一系列修改汇总为少量高质量条目，
   不要每改一处就写一条；拿不准且复用价值不高的，不写
-  - 评审轮次里用户的**采纳 / 忽略 / 跳过询问**等隐式行为同样是偏好信号，一并观察沉淀
+  - 用户对交付稿的**采纳 / 忽略 / 要求修改**等隐式行为同样是偏好信号，一并观察沉淀
     （判据不变："下次干同类活还适用吗"）；一次性异常不写
 - 用户表述是「对该受众的通用要求」（如"给领导的东西都要简洁白话"，不限工作类型）
   → `twin(action="write", data={..., "scope": "audience"})`：audience/purpose 必填、
@@ -33,13 +33,13 @@ description: 个人分身：工作类偏好沉淀与 persona prompt 编译，经
   建档并返回该工作性质的分身 prompt，严格按其中的偏好/结构/前置清单执行；
   带了 audience 时还会注入该受众的画像（audience_profile_md，通用口径参考，
   格式结构以本类型为准）；材料不齐全按前置清单向用户确认或要求补齐
-- 交付稿完成 → `twin(action="task_submit")`；用户审阅后
-  → `twin(action="task_review", verdict=approved|changes_requested, notes=...)`
-  通过即收口；changes 的意见**合并后** twin.write 沉淀（一轮 review 出少量条目，
-  不是每条意见写一条），改稿后**同一任务再 task_submit**
-  提交下一轮（轮次递增，评审历史全量可审计）
+- 交付稿完成 → `twin(action="task_submit")` 即收口（v0.3.8：submit 是终点，无评审环，
+  交付稿自动落盘留档）；用户看过稿子后的修改意见**合并后** twin.write 沉淀
+  （一轮反馈出少量条目，不是每条意见写一条）；要返工改稿 →
+  `twin(action="task_revise", data={"task_id": ...})` 生成修订任务重走（注意 revise
+  不恢复 todos、不重注入 persona，需要时重新 task_start）
 - 中断/隔日继续 → `twin(action="task_resume", data={"task_id": ...})`
-  （进行中、已提交、被搁置、已通过的任务都可续作）；长期不动的开放任务用
+  （仅进行中 planning 的任务，自动恢复 todos 并再注入分身）；不再做的进行中任务用
   `twin(action="task_close")` 显式关闭（关闭前先经用户确认，不要自行清理）
 - **同会话重复注入省 token**：同一会话再次 task_start/task_resume 同 work_type，
   且上文注入返回的 persona_version 仍在场（未被上下文压缩）→ 传
@@ -60,13 +60,6 @@ description: 个人分身：工作类偏好沉淀与 persona prompt 编译，经
 - `twin(action="void", data={"memory_id": N})` 作废一条偏好（冲突裁定"新替旧/撤销新写的"
   的执行动作）：行级作废、全链路排除、不可逆；曾入编译的证据会自动触发该类型夜间重编
   剔除该条款（persona_stale）
-- `task_start` 返回 `persona_compare_offer` 时：按 hint 询问用户一次（单用新版 / 新旧双跑），
-  同一版本只问这一次；用户同意双跑才调
-  `twin(action="get", data={"work_type":..., "version": previous_version})` 取旧版全文，
-  旧版仅对比参考、非执行依据，对比后一律以新版为执行依据；对比中用户挑出的不足照常
-  twin.write 沉淀
-- `submit` 返回 `compare_hint` 时：非阻塞转告用户一句"下一任务可要求新旧双跑对比"，
-  是否对比由用户决定，不追问
 - `status` 返回 scan_notice 时：按其 agent_instruction 询问用户是否创建定时任务
   ——夜间 persona 编译（每天，无人值守把未编译偏好整理落版、作废条款重编、受众画像
   重抽象），spec 在 `setup.tasks`；用户同意后在宿主平台侧建，之后不再重复问。
@@ -80,15 +73,21 @@ description: 个人分身：工作类偏好沉淀与 persona prompt 编译，经
 必带三字段 work_type / audience / purpose。
 事件性内容（做了什么、何时交付）走普通 memory.remember，不要走 twin.write。
 
-## 三字段选码（硬流程：先查清单再写）
+## 三字段选码（归一门：清单硬约束，未命中必问用户）
 
 - write / task_start 之前**必须**手上有枚举清单：同一会话首次先
   `twin(action="taxonomy")`（按需带 kind=work_type|audience|purpose）查清单，
   从清单里选最贴的 canonical code（或其别名/中文名）作为三字段的值——不要凭记忆造说法；
-  已查过的清单会话内直接复用，用户裁定 pending 后才需重查对应 kind
-- 清单里确实没有合适项时，给**你认为最合适的原始值**即可：它会自动进
-  pending 由用户裁定（map / canonicalize / reject），不要硬凑一个近义枚举
-- 不要依赖"我觉得我拿得准"——清单在手是每次必检的条件，不是拿不准时的补救
+  已查过的清单会话内直接复用（清单动态：用户裁定后新码/新别名立即生效，届时重查对应 kind）
+- 清单里确实没有合适项时，给**你认为最合适的原始值**：写入会被**整笔打回**
+  （错误里附完整清单与 pending 票据）——此时**必须问用户**二选一：
+  ① 归一到已有值 → `twin(action="resolve", data={"pending_id":…, "decision":"map", "code":…})`
+  （原值进别名表，同一说法终身只问这一次）；② 创建新值 →
+  `resolve(decision="canonicalize", new_type={code,zh,en,domain})`（新码即刻进清单）。
+  用户说"不在意"→ 选最贴近的已有值；用户说"这条不写"→ resolve(reject) 并放弃本次
+  （**reject 后不得再拿原值重试**）。裁定完成后用原值重试 write/task_start 即命中；
+  resolve 报"已裁定不可重复裁定"说明他方已裁定，直接重试写入即可
+- 不要硬凑近义枚举、也不要给"其他"——枚举里没有 other，杂项不配当分类
 
 ## compile / submit
 
@@ -110,5 +109,7 @@ description: 个人分身：工作类偏好沉淀与 persona prompt 编译，经
 
 ## 治理
 
-`twin(action="pending")` 查看 Agent 给的未识别值；
-`twin(action="resolve")` 做映射（map 到既有码）、新建（canonicalize）或拒绝（reject）。
+`twin(action="pending")` 查看归一门打回的待裁票据（含打回次数——夜间任务晨报会汇总，
+留你裁定，Agent 夜间不代裁）；
+`twin(action="resolve")` 做映射（map 到既有码并进别名表）、新建（canonicalize 立新码
+即刻入列）或拒绝（reject 不入体系，该值不得再重试）。

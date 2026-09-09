@@ -1,10 +1,10 @@
-"""mema-twin 三维度 canonical 枚举（v1，2026-09-02 定稿）。
+"""mema-twin 三维度 canonical 枚举（v1，2026-09-02 定稿；v0.3.8 删 other）。
 
 来源：ZCodeProject/docs/mema-avatar-design-2026-09-02.md 第 5 节（D9）。
-work_type 34 项（七域）/ audience 10 项 / purpose 9 项。
-别名只收常见精确写法；语义选码由调用方 Agent 对清单完成（SKILL 硬流程：
-先 taxonomy 查清单再写），清单都不合适给原始值进 pending 由用户治理裁定，
-绝不自动新建 canonical。
+work_type 33 项（七域）/ audience 9 项 / purpose 8 项。
+别名只收常见精确写法；语义选码由调用方 Agent 对清单完成（归一门：先 taxonomy
+查清单再写，未命中整笔打回、必须问用户裁定——v0.3.8）。无 other 杂项桶：
+真长尾由用户 canonicalize 立新码，进清单即自动可选。
 """
 from __future__ import annotations
 
@@ -96,8 +96,6 @@ _WORK_TYPES: tuple[CanonicalType, ...] = (
                   ("财务分析", "估值报告", "财务报告", "财报分析")),
     CanonicalType("academic_report", "论文与学术报告", "academic paper / report", "专业服务",
                   ("论文", "学术报告", "技术报告", "研究综述", "综述")),
-    # 其他（1）
-    CanonicalType("other", "其他", "other", "其他", ("其它",)),
 )
 
 _AUDIENCES: tuple[CanonicalType, ...] = (
@@ -118,8 +116,7 @@ _AUDIENCES: tuple[CanonicalType, ...] = (
     CanonicalType("public", "公开大范围", "public", "受众",
                   ("公开", "公开场合", "大范围", "对外发布", "社交媒体")),
     CanonicalType("self", "个人自用", "self", "受众",
-                  ("自己", "自用", "个人", "私人")),
-    CanonicalType("other", "其他", "other", "受众", ("其它",)),
+                  ("自己", "自用", "个人", "本人")),
 )
 
 _PURPOSES: tuple[CanonicalType, ...] = (
@@ -139,7 +136,6 @@ _PURPOSES: tuple[CanonicalType, ...] = (
                   ("求助", "协作", "求支持", "帮忙", "协助")),
     CanonicalType("record_evidence", "记录与存证", "record & evidence", "用途",
                   ("存证", "留痕", "备案", "记录")),
-    CanonicalType("other", "其他", "other", "用途", ("其它",)),
 )
 
 _BY_KIND: dict[str, tuple[CanonicalType, ...]] = {

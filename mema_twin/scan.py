@@ -44,6 +44,11 @@ SCHEDULED_TASKS_SPEC: dict = {
                  "data": {"note": "uncompiled 是各 work_type 未编译数（只处理 >0 的类型）；"
                                   "audience_stale 是需重抽象的受众（证据数≠画像吸收数或尚无画像）；"
                                   "persona_stale 是条款被作废待重编的类型（同样夜间重编落版）"}},
+                {"tool": "twin", "action": "pending",
+                 "data": {"rule": "归一门待裁票据（v0.3.8）：pending 非空时取明细"
+                                  "（type_kind/raw_value/hit_count=打回次数）列入收尾汇总——"
+                                  "这些是三维度打回待用户裁定的长尾（map/canonicalize/reject），"
+                                  "留待用户在场时裁定，夜间不代裁；为空则跳过本调用"}},
                 {"tool": "twin", "action": "compile",
                  "data": {"rule": "严格按素材包编译规则产出新版：素材为该类型全部在世证据"
                                   "（全量投影），与旧版本冲突以新证据为准，含义稳定表达自由，"
@@ -53,8 +58,9 @@ SCHEDULED_TASKS_SPEC: dict = {
                 {"tool": "twin", "action": "submit",
                  "data": {"origin": "scheduled",
                           "rule": "source ids 用素材包证据 id；origin=scheduled 必传"
-                                  "（夜间落版标记，供次日首任务双跑对比提议；漏传等于"
-                                  "放弃验证门）；submit 可能被拒：validation_failed"
+                                  "（夜间来源标记，三重用途：验证门 G1/G2 与空转阻尼仅对 "
+                                  "scheduled 生效、刷新 last_scheduled_compile_at 停转保险丝"
+                                  "——漏传等于绕过拦截且 7 天后误报体系停转）；submit 可能被拒：validation_failed"
                                   "（素材回声/缺分区标题）或 no_new_evidence（空转阻尼）"
                                   "——如实记录原因并跳过，不要为过门改产物（被拒时 "
                                   "active 未变、证据未消耗，次晚自动重试，连续被拒会在"

@@ -41,21 +41,23 @@ def test_start_supersedes_open_tasks(env):
     assert flow.get_task(c["id"])["status"] == "superseded"
 
 
-def test_review_lifecycle_and_audit(env):
+def test_submit_is_terminal(env):
+    """v0.3.8：task_submit 即终点——planning → submitted 后无任何迁移入口。"""
+    from mema_twin import server
     t = flow.insert_task(brief="T", status="planning", dims=_dims())
-    flow.update_deliverable(t["id"], "draft v1")
-    flow.set_status(t["id"], "submitted")
-    r1 = flow.add_review(t["id"], "changes_requested", "结论不突出")
-    flow.set_status(t["id"], "rejected", reason="结论不突出")
-    flow.update_deliverable(t["id"], "draft v2")
-    flow.set_status(t["id"], "submitted")
-    r2 = flow.add_review(t["id"], "approved", "通过")
-    flow.set_status(t["id"], "approved", reason="通过")
-    assert (r1["round"], r2["round"]) == (1, 2)
-    reviews = flow.list_reviews(t["id"])
-    assert [x["verdict"] for x in reviews] == ["changes_requested", "approved"]
-    final = flow.get_task(t["id"])
-    assert final["status"] == "approved" and final["decided_at"]
+    r = server._twin_impl("task_submit", {"task_id": t["id"], "deliverable_md": "# 稿"})
+    assert r["ok"] and "deliverable_path" in r
+    assert flow.get_task(t["id"])["status"] == "submitted"
+    # 再提交/关闭/续作一律拒绝（终态）；唯一出路是 task_revise
+    r2 = server._twin_impl("task_submit", {"task_id": t["id"], "deliverable_md": "# 又"})
+    assert r2.get("ok") is False
+    r3 = server._twin_impl("task_resume", {"task_id": t["id"]})
+    assert r3.get("ok") is False and "task_revise" in r3.get("reason", "")
+    r4 = server._twin_impl("task_close", {"task_id": t["id"]})
+    assert r4.get("ok") is False
+    r5 = server._twin_impl("task_revise", {"task_id": t["id"], "revision_reason": "返工"})
+    assert r5["ok"] and r5["status"] == "planning"
+    assert flow.get_task(t["id"])["status"] == "superseded"
 
 
 def test_resume_restores_todos_and_creates_new_task(env):
@@ -65,7 +67,6 @@ def test_resume_restores_todos_and_creates_new_task(env):
     ])
     t = flow.insert_task(brief="T", status="planning", dims=_dims(),
                          session_todos=flow.current_todos("s1"))
-    flow.set_status(t["id"], "approved")
     _t = flow.get_task(t["id"])
     # resume: 恢复 todos + 新建 planning
     nt = flow.insert_task(brief=_t["brief"], status="planning",
@@ -77,15 +78,18 @@ def test_resume_restores_todos_and_creates_new_task(env):
 
 
 def test_revise_lineage(env):
+    """v0.3.8：revise 仅收 submitted，子任务回 planning 重走。"""
+    from mema_twin import server
     t = flow.insert_task(brief="T", status="planning", dims=_dims())
-    flow.set_status(t["id"], "submitted")
-    child = flow.insert_task(brief="T'", status="submitted",
-                             dims=_dims(), parent_task_id=t["id"], iteration=1,
-                             revision_reason="用户要求补风险节")
-    flow.set_status(t["id"], "superseded", reason=f"revised by task #{child['id']}")
-    assert flow.get_task(child["id"])["status"] == "submitted"
+    server._twin_impl("task_submit", {"task_id": t["id"], "deliverable_md": "# v1"})
+    child = server._twin_impl("task_revise", {"task_id": t["id"],
+                                              "brief": "T'", "revision_reason": "补风险节"})
+    assert child["ok"] and child["status"] == "planning" and child["iteration"] == 1
     assert flow.get_task(t["id"])["status"] == "superseded"
-    assert flow.get_task(child["id"])["iteration"] == 1
+    assert flow.get_task(child["task_id"])["parent_task_id"] == t["id"]
+    # planning 任务不可 revise（直接继续执行）
+    r = server._twin_impl("task_revise", {"task_id": child["task_id"], "revision_reason": "x"})
+    assert r.get("ok") is False
 
 
 def test_todos_validation(env):
@@ -115,22 +119,17 @@ def test_meta_roundtrip(env):
     assert flow.get_meta("last_scan_at") == "2026-09-04T00:00:00+00:00"
 
 
-def test_resubmit_after_changes_requested(env):
-    """打回后同任务再提交（干跑发现的死路修复）：rejected 可再 submit。"""
+def test_submit_then_revise_new_round(env):
+    """v0.3.8：交付后返工 = revise 生成 planning 子任务重走，而非同任务重提交。"""
     from mema_twin import server
     t = flow.insert_task(brief="T", status="planning", dims=_dims())
-    r1 = server._twin_impl("task_submit", {"task_id": t["id"],
-                                     "deliverable_md": "v1"})
-    assert r1["ok"] and r1["round"] == 1
-    server._twin_impl("task_review", {"task_id": t["id"], "verdict": "changes_requested",
-                                "notes": "缺数字"})
-    assert flow.get_task(t["id"])["status"] == "rejected"
-    r2 = server._twin_impl("task_submit", {"task_id": t["id"],
-                                     "deliverable_md": "v2 带数字"})
-    assert r2["ok"] and r2["round"] == 2
-    r3 = server._twin_impl("task_review", {"task_id": t["id"], "verdict": "approved"})
-    assert r3["ok"] and "deliverable_path" in r3
-    assert flow.get_task(t["id"])["status"] == "approved"
+    r1 = server._twin_impl("task_submit", {"task_id": t["id"], "deliverable_md": "v1"})
+    assert r1["ok"] and "round" not in r1
+    r2 = server._twin_impl("task_revise", {"task_id": t["id"],
+                                    "deliverable_md": "v2 带数字", "revision_reason": "缺数字"})
+    assert r2["ok"] and r2["status"] == "planning"
+    r3 = server._twin_impl("task_submit", {"task_id": r2["task_id"], "deliverable_md": "v2 带数字"})
+    assert r3["ok"] and flow.get_task(r2["task_id"])["status"] == "submitted"
 
 
 def test_submit_snapshots_session_todos_for_resume(env):
@@ -145,8 +144,8 @@ def test_submit_snapshots_session_todos_for_resume(env):
 
 
 def test_supersede_spares_submitted(env):
-    """review#6：submitted 在等评审，开新任务不得把它变成不可评审的 superseded。"""
-    t1 = flow.insert_task(brief="待评审", status="submitted", dims=_dims())
+    """v0.3.8：submitted 是终态，让位只收 planning（终态行永不迁移）。"""
+    t1 = flow.insert_task(brief="已交付", status="submitted", dims=_dims())
     t2 = flow.insert_task(brief="新任务", status="planning", dims=_dims())
     assert flow.supersede_open_tasks(t2["id"]) == 0  # submitted 不让位
     assert flow.get_task(t1["id"])["status"] == "submitted"
@@ -155,16 +154,6 @@ def test_supersede_spares_submitted(env):
     assert flow.get_task(t2["id"])["status"] == "superseded"
 
 
-def test_resubmit_from_empty_session_keeps_todos(env):
-    """review#5：空会话重提不清掉任务行里已快照的 todos。"""
-    from mema_twin import server
-    flow.set_session_todos("s-full", [{"content": "a", "status": "pending"}])
-    t = flow.insert_task(brief="T", status="planning", dims=_dims())
-    server._twin_impl("task_submit", {"task_id": t["id"], "deliverable_md": "v1", "session": "s-full"})
-    server._twin_impl("task_review", {"task_id": t["id"], "verdict": "changes_requested"})
-    r = server._twin_impl("task_submit", {"task_id": t["id"], "deliverable_md": "v2", "session": "s-empty"})
-    assert r["ok"]
-    assert [x["content"] for x in flow.get_task(t["id"])["todos"]] == ["a"]
 
 
 # ---- 0.3.4 have_persona_version 注入短路（agent 申报式）----
@@ -234,7 +223,7 @@ def test_task_start_mirror_never_short_circuits(env):
 def test_task_resume_short_circuit(env):
     from mema_twin import server
     _make_versions(1)
-    t = flow.insert_task(brief="T", status="approved", dims=_dims())
+    t = flow.insert_task(brief="T", status="planning", dims=_dims())
     r = server._twin_impl("task_resume", {"task_id": t["id"], "have_persona_version": 1})
     assert r["ok"] and r["persona_unchanged"] is True and "persona_prompt_md" not in r
 

@@ -50,13 +50,16 @@ def test_spec_single_task():
     assert names == ["twin_nightly_compile"]  # twin_scan 已退役
     nightly = spec["tasks"][0]
     assert nightly["cadence"] == "daily"
-    assert [c["action"] for c in nightly["calls"]] == ["status", "compile", "submit", "compile", "submit"]
+    assert [c["action"] for c in nightly["calls"]] == ["status", "pending", "compile", "submit", "compile", "submit"]
     assert "twin" in scan.AGENT_INSTRUCTION
     assert "夜间 persona 编译" in scan.AGENT_INSTRUCTION
     assert "每周治理扫描" not in scan.AGENT_INSTRUCTION  # 单任务口径
     # 空转阻尼与被拒语义进了 spec（宿主快照同步的对照源）
-    submit_rule = nightly["calls"][2]["data"]["rule"]
+    submit_rule = nightly["calls"][3]["data"]["rule"]
     assert "validation_failed" in submit_rule and "no_new_evidence" in submit_rule
     assert "nightly_rejected" in submit_rule
     assert "pending_count" in submit_rule  # 汇总输出带治理计数（twin_scan 退役归置）
-    assert "保守封套" in nightly["calls"][1]["data"]["rule"]  # 夜间不做无因重组
+    assert "保守封套" in nightly["calls"][2]["data"]["rule"]  # 夜间不做无因重组
+    pending_rule = nightly["calls"][1]["data"]["rule"]
+    assert "待裁票据" in pending_rule and "夜间不代裁" in pending_rule  # v0.3.8 晨报兜底
+    assert "双跑" not in submit_rule  # v0.3.8：双跑句已删
