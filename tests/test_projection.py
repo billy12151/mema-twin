@@ -56,9 +56,9 @@ def test_compile_material_includes_compiled_evidence(monkeypatch):
     assert "全部偏好证据" in r["material"] and "全量投影" in r["material"]
 
 
-def test_find_fallback_only_when_alive_empty(monkeypatch):
-    """有在世行时绝不走 find 兜底（防素材集/门期望集分叉）；alive 为空才兜底。
-    read 先 stub（防单测真实联网——评审轮1 P2-4）。"""
+def test_compile_no_evidence_empty_material(monkeypatch):
+    """alive 为空 → 素材证据节为空（v0.3.9 删 find 兜底：无在世证据时正确行为
+    是素材为空，find 语义召回可能不相干的 mema 记忆属伪造素材）。find stub 防联网。"""
     from mema_twin import sink
     _stub_read(monkeypatch)
     calls = []
@@ -69,15 +69,15 @@ def test_find_fallback_only_when_alive_empty(monkeypatch):
             {"id": 811, "tags": ["twin:wt:work_report"], "subject": "s", "content": "c"}]}}
 
     monkeypatch.setattr(sink, "find", fake_find)
-    _mk_uncompiled([810])
     r = server._twin_impl("compile", {"work_type": "周报"})
-    assert r["ok"] and calls == []
-    r2 = server._twin_impl("compile", {"work_type": "周报"})
-    assert "[810]" in r2["material"] and calls == []
+    assert r["ok"] and calls == []  # 兜底已退役，find 一次都不该被调
+    assert "[811]" not in r["material"]
+    assert "（无在世证据——如仍要重编，可基于当前版本做结构化重写）" in r["material"]
 
 
 def test_compile_rules_trio_present(monkeypatch):
-    """编译规则三件套进素材包：稳定律 / 变更分级（归因）/ 硬预算（默认值）。"""
+    """编译规则三件套进素材包：稳定律 / 变更分级（归因）/ 硬预算（默认值）。
+    v0.3.9 增：简练优先（双模式）与类型模式反向守门。"""
     from mema_twin import sink
     monkeypatch.setattr(sink, "find", lambda *a, **k: {"ok": True, "data": {"results": []}})
     r = server._twin_impl("compile", {"work_type": "周报"})
@@ -85,8 +85,32 @@ def test_compile_rules_trio_present(monkeypatch):
     assert "含义稳定，表达自由" in m
     assert "归因到证据 id" in m or "归因到证据" in m
     assert f"≤{templates.BUDGET_TYPE_CHARS} 字符" in m
+    assert "简练优先" in m and "禁止为省字符牺牲可执行性" in m
+    assert "不制造单分支条件段" in m  # 反向守门
     r2 = server._twin_impl("compile", {"work_type": "aud-leadership"})
     assert f"≤{templates.BUDGET_AUD_CHARS} 字符" in r2["material"]
+    assert "简练优先" in r2["material"]
+    assert "禁止为省字符牺牲可执行性" in r2["material"]
+    assert "不制造单分支条件段" not in r2["material"]  # 守门只进类型规则
+
+
+def test_material_dimension_tags_and_distribution(monkeypatch):
+    """v0.3.9 F1：类型模式素材包证据行带 (受众:/用途:) code 标签 + 证据节前
+    维度分布摘要；画像模式两者皆无；空值跳过（不渲染「受众:」空段）。"""
+    _stub_read(monkeypatch)
+    _mk_uncompiled([801, 802], audience="leadership")
+    # 803 无受众/用途（v0.3.8 前历史行回填形态）
+    conn = db.connect()
+    db.record_evidence(conn, 803, {"work_type": {"ok": True, "code": "work_report",
+                                                  "raw": "周报"}})
+    conn.close()
+    r = server._twin_impl("compile", {"work_type": "周报"})
+    m = r["material"]
+    assert "（受众:leadership/用途:sync_info）" in m
+    assert "[803] 偏好803：内容803\n" in m  # 两值全空 → 省略整个括号
+    assert "> 维度分布：受众 leadership×2；用途 sync_info×2" in m
+    r2 = server._twin_impl("compile", {"work_type": "aud-leadership"})
+    assert "（受众:" not in r2["material"] and "维度分布" not in r2["material"]
 
 
 def test_status_size_and_budget_flag():
@@ -99,6 +123,71 @@ def test_status_size_and_budget_flag():
     s2 = server._twin_impl("status", {})
     ppt = next(x for x in s2["prompts"] if x["work_type"] == "presentation")
     assert ppt["over_budget"] is True
+
+
+def test_status_per_version_size_curve():
+    """v0.3.9 可见面：每个版本行都带 size_chars（增长曲线完整）。"""
+    for i in range(1, 4):
+        server._twin_impl("submit", {"work_type": "周报",
+                                      "prompt_md": f"# v{i}\n\n" + "规则。\n" * i * 100,
+                                      "model": "m"})
+    s = server._twin_impl("status", {})
+    p = next(x for x in s["prompts"] if x["work_type"] == "work_report")
+    sizes = [v["size_chars"] for v in p["versions"]]
+    assert len(sizes) == 3
+    assert all(isinstance(x, int) and x > 0 for x in sizes)
+    assert sizes == sorted(sizes)  # 同素材递增提交，曲线单调
+
+
+def test_domain_migration_from_old_seven(tmp_path, monkeypatch):
+    """v0.3.9 域重划升级测试：预构造旧七域库（绕过 db.connect 播种），
+    首个 db.connect() 触发迁移 → 33 内置码 domain 为新六域；custom 行不碰。
+    （db._migrated 按 db 路径缓存，全新 tmp_path 天然隔离。）"""
+    import sqlite3 as _sq
+    monkeypatch.setenv("MEMA_TWIN_DB_PATH", str(tmp_path / "old.sqlite3"))
+    monkeypatch.setenv("MEMA_TWIN_PROMPTS_DIR", str(tmp_path / "prompts"))
+    monkeypatch.setenv("MEMA_TWIN_DELIVERABLES_DIR", str(tmp_path / "deliverables"))
+    from mema_twin import taxonomy
+    raw = _sq.connect(str(tmp_path / "old.sqlite3"))
+    raw.execute("CREATE TABLE twin_types(type_kind TEXT NOT NULL, code TEXT NOT NULL,"
+                " label_zh TEXT, label_en TEXT, domain TEXT, aliases TEXT,"
+                " is_custom INTEGER NOT NULL DEFAULT 0, status TEXT, created_at TEXT,"
+                " PRIMARY KEY(type_kind, code))")
+    ts = "2026-09-02T00:00:00+00:00"
+    for t in taxonomy.all_types("work_type"):
+        # 用旧域值构造（v0.3.8 状态）：同 code 但 domain=旧七域之一
+        old_domain = "产品与研发" if t.code in ("product_doc", "user_manual") else "通用职场"
+        raw.execute("INSERT INTO twin_types VALUES(?,?,?,?,?,?,0,'active',?)",
+                    ("work_type", t.code, t.zh, t.en, old_domain, "[]", ts))
+    raw.execute("INSERT INTO twin_types VALUES(?,?,?,?,?,?,1,'active',?)",
+                ("work_type", "my_custom", "自建", "", "通用职场", "[]", ts))
+    raw.commit()
+    raw.close()
+    conn = db.connect()  # 触发 _migrate
+    got = {r["code"]: r["domain"] for r in conn.execute(
+        "SELECT code, domain FROM twin_types WHERE type_kind='work_type'")}
+    conn.close()
+    assert got["product_doc"] == "规格与执行"
+    assert got["user_manual"] == "教学与传授"
+    assert got["meeting_minutes"] == "记录与同步"
+    assert got["my_custom"] == "通用职场"  # custom 行不碰
+    newdoms = {v for k, v in got.items() if k != "my_custom"}
+    assert newdoms == {"规格与执行", "分析与复盘", "记录与同步",
+                       "说服与传播", "教学与传授", "法律与契约"}
+
+
+def test_last_scan_at_removed(tmp_path, monkeypatch):
+    """v0.3.9：flow.ensure_schema 删 twin_meta.last_scan_at 死键（twin_scan
+    v0.3.7 退役后无代码读取）。"""
+    monkeypatch.setenv("MEMA_TWIN_DB_PATH", str(tmp_path / "m.sqlite3"))
+    monkeypatch.setenv("MEMA_TWIN_PROMPTS_DIR", str(tmp_path / "prompts"))
+    monkeypatch.setenv("MEMA_TWIN_DELIVERABLES_DIR", str(tmp_path / "deliverables"))
+    flow._schema_ready.clear()
+    flow.ensure_schema()
+    flow.set_meta("last_scan_at", "2026-09-06T00:00:00+00:00")  # 模拟旧库存量死键
+    flow._schema_ready.clear()
+    flow.ensure_schema()  # 再次触发清理（幂等）
+    assert flow.get_meta("last_scan_at") is None
 
 
 # ---- void 与全链路排除 ----

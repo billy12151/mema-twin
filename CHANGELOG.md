@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.3.9] — 2026-09-10
+
+- **素材包维度可见（F1）**：compile 素材证据行渲染 `(受众:code/用途:code)` 标签（code 直渲染，与分区
+  标题/submit 对账同符号系；空值省略段，两值全空省略括号）+ 证据节前 `> 维度分布：受众 X×N；用途 Y×M`
+  摘要（空值跳过）——`_TYPE_RULES` 要求按受众/用途分条件段，素材此前看不见任何维度值（分叉靠猜）；
+  画像模式不加（audience 恒定是噪音）。配套反向守门规则「单一取值写无条件规则，不制造单分支条件段」
+  （防机械分叉撑大正文提前引爆预算）。
+- **编译规则「简练优先」（F3）**：_TYPE_RULES/_AUDIENCE_RULES 同步新增——最小可执行表述、同类合并、
+  示例只留一个、不写空洞要求；禁止为省字符抽象掉动作/条件/例外（一手压缩一手锁具体性）。
+- **status 逐版本体积曲线（F3）**：`versions[].size_chars` 每版都带（此前仅 active 版），完整增长
+  曲线可见，预算悬崖可测距。
+- **work_type 域重划（#958，七域改六域按产出物目标）**：规格与执行/分析与复盘/记录与同步/说服与传播/
+  教学与传授/法律与契约。四处同步：taxonomy.py 播种源 + db._migrate 幂等 UPDATE（is_custom=0 行，
+  custom 不碰）+ 升级测试（预构造旧域库）+ README 域清单行（顺带修英文摘要存量数字
+  34→33、10→9、9→8 对齐枚举实际）。最强单点修正：
+  user_manual 从「产品与研发」移入「教学与传授」。
+- **F6 清理**：twin_meta `last_scan_at` 死键删除（flow.ensure_schema 幂等，twin_scan v0.3.7 退役后
+  无代码读取）；`compile_actions._fetch_evidence_find` 兜底召回退役（无在世证据时正确行为是素材为空；
+  索引真丢失的正解=按 twin:wt:* tags 从 mema 重建，需要时再写脚本）——sink.find 函数保留（测试防联网
+  stub 依赖属性存在）。
+- **安装卫生（F5，复发两次根修）**：新增 Makefile `install-skill`（cp -p 分发三宿主技能目录，禁 mv）；
+  README 安装节改推 make；.gitignore 补 .DS_Store。
+- **task_revise guidance 补句**：帮助文案补「修订反馈中的可复用偏好走 twin.write 沉淀」（与
+  task_submit 口径对齐）。
+
 ## [0.3.8] — 2026-09-09
 
 - **删任务评审环（task_submit 即终点）**：状态机六态砍三态（`planning → submitted 终态` /

@@ -161,6 +161,7 @@ def _action_status(data: dict) -> dict:
                                   {"work_type": r["work_type"], "active": None, "versions": []})
             item = dict(r)
             size = len(item.pop("prompt_md") or "")
+            item["size_chars"] = size  # v0.3.9：每个版本行带体积——status 即得完整增长曲线
             v["versions"].append(item)
             if r["status"] == "active":
                 v["active"] = r["version"]

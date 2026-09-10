@@ -196,7 +196,8 @@ def _action_help(data: dict) -> dict:
                            "已交付（submitted）的返工走 task_revise。",
             "task_revise": "已交付任务修订返工（仅 submitted）。task_id + brief/deliverable_md/"
                            "revision_reason 至少其一；子任务回 planning 重走执行并记 lineage"
-                           "（不恢复 todos、不重注入 persona，需要时重新 task_start）。",
+                           "（不恢复 todos、不重注入 persona，需要时重新 task_start）；"
+                           "修订反馈中的可复用偏好走 twin.write 沉淀。",
             "task_close": "显式关闭进行中任务（仅 planning），历史保留可审计。",
             "task_recent": "最近任务列表。参数 limit（默认 10）。",
             "task_get": "取单个任务全量。task_id。",

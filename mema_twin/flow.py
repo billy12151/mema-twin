@@ -68,7 +68,8 @@ def ensure_schema() -> None:
     """twin_tasks 等表建在 twin.sqlite3（与既有表同库，db.connect 后追加执行）。
     v0.3.8 顺带完成一次性退役清理（幂等）：DROP 评审表、删双跑三族 meta
     （persona_origin/compare_prev/compare_offered；保留 last_scheduled_compile_at，
-    勿扩大前缀）。"""
+    勿扩大前缀）；v0.3.9 增删 twin_meta.last_scan_at 死键（twin_scan v0.3.7
+    退役后无代码读取）。"""
     path = str(db.db_path())
     if path in _schema_ready:
         return
@@ -79,6 +80,7 @@ def ensure_schema() -> None:
         conn.execute(
             "DELETE FROM twin_meta WHERE key LIKE 'persona_origin:%'"
             " OR key LIKE 'compare_prev:%' OR key LIKE 'compare_offered:%'")
+        conn.execute("DELETE FROM twin_meta WHERE key='last_scan_at'")
         conn.commit()
     finally:
         conn.close()

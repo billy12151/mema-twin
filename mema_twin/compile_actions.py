@@ -12,25 +12,7 @@ import json
 import re
 
 from . import db, flow, identity, sink, store, taxonomy, templates
-from .pref_actions import _bucket, _mark_persona_stale
-
-
-def _fetch_evidence_find(conn, code: str, client: str | None = None) -> list[dict]:
-    """兜底召回：twin_evidence 索引为空时（索引落地前的存量数据）退回
-    mema find 语义召回（include_content=true，0.15.4 起默认索引页无正文）。"""
-    t = taxonomy.by_code("work_type", code)
-    q = f"{t.zh if t else code} 用户偏好 规则 结构"
-    resp = sink.find(q, _bucket(), client=client)
-    if not resp.get("ok"):
-        return []
-    payload = resp.get("data") or {}
-    results = payload.get("results") or payload.get("matches") or []
-    tag = f"twin:wt:{code}"
-    compiled = set()
-    for v in store.list_versions(conn, code):
-        compiled.update(v["source_memory_ids"])
-    return [r for r in results
-            if tag in (r.get("tags") or []) and str(r.get("id")) not in compiled]
+from .pref_actions import _bucket, _mark_persona_stale  # _bucket: read 通路存桶标识
 
 
 def _read_evidence_rows(rows: list[dict], client: str | None = None,
@@ -76,11 +58,13 @@ def _read_evidence_rows(rows: list[dict], client: str | None = None,
 def _fetch_evidence(conn, code: str, client: str | None = None) -> tuple[list[dict], list[dict]]:
     """compile 证据（v0.3.7 全量投影）：该类型**全部在世证据**（uncompiled+compiled，
     排除 void）逐条 read——每版从头重编，弱底稿不遗传、作废行天然不在场；与验证门
-    G3 期望集同源（alive_evidence）。索引无在世行时退 find 兜底（存量数据引导期）；
-    兜底场景 alive 为空 → G3 vacuous，集合不同源可接受。"""
+    G3 期望集同源（alive_evidence）。v0.3.9 删 find 兜底召回（索引落地前存量数据
+    引导期已过；无在世证据时正确行为是素材为空——find 语义召回可能不相干的
+    mema 记忆属伪造素材。索引真丢失的正解：按 twin:wt:* 等 tags 从 mema 重建
+    twin_evidence，一次性脚本，需要时再写）。"""
     rows = db.alive_evidence(conn, code)
     if not rows:
-        return _fetch_evidence_find(conn, code, client), []
+        return [], []
     return _read_evidence_rows(rows, client)
 
 

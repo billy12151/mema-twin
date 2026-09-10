@@ -22,8 +22,12 @@ _TYPE_RULES = (
     "只吸收有证据支撑的偏好；仅出现一次的偏好须标注（单次观察）。",
     "按固定分区组织：整体风格 / 结构与格式 / 话术与用语 / 受众适配（按 audience 分条件段）"
     "/ 用途适配（按 purpose 分条件段）/ 前置确认清单（开工前应核对的材料与问题）。",
+    "受众/用途某维度只有单一取值时，该维度写无条件规则，不制造单分支条件段。",
     "每条规则后用 `<!-- src: <memory_id> -->` 标注来源记忆 id，保证可溯源。",
     "与旧版本冲突的新证据以新证据为准。",
+    "简练优先：规则以最小可执行表述为准——同类偏好合并为一条，示例只留最有代表性的"
+    "一个，不重复分区标题已表达的信息，不写空洞要求（如『注意结构清晰』）。"
+    "禁止为省字符牺牲可执行性：动作、条件、例外不得抽象掉。",
     "含义稳定，表达自由：证据未变动的规则含义必须不变（不得收紧、放宽、增删限制条件）；"
     "合并重叠条目、条件化改写、重组分区、优化措辞不受限——禁止的是无因语义变化，不是优化。",
     f"硬预算：正文 ≤{BUDGET_TYPE_CHARS} 字符或 ≤{BUDGET_TYPE_RULES} 条（顶层列表行）；"
@@ -44,6 +48,9 @@ _AUDIENCE_RULES = (
     "子受众差异写成条件段（例：若为技术评审场合则…）。",
     "每条规则后用 `<!-- src: <memory_id> -->` 标注来源记忆 id，保证可溯源。",
     "与旧版画像冲突的新证据以新证据为准。",
+    "简练优先：规则以最小可执行表述为准——同类偏好合并为一条，示例只留最有代表性的"
+    "一个，不重复分区标题已表达的信息，不写空洞要求（如『注意结构清晰』）。"
+    "禁止为省字符牺牲可执行性：动作、条件、例外不得抽象掉。",
     "含义稳定，表达自由：证据未变动的规则含义必须不变；合并、条件化改写与重组不受限。",
     f"硬预算：正文 ≤{BUDGET_AUD_CHARS} 字符或 ≤{BUDGET_AUD_RULES} 条（顶层列表行）；"
     "超限必须合并或淘汰，淘汰须写明依据。",
@@ -104,12 +111,37 @@ def compile_prompt_material(work_type: str, work_type_zh: str,
     else:
         parts.append(f"\n## 全部偏好证据（{len(evidence)} 条，全量投影——每版从头重编，"
                      "已吸收的证据同样在场）\n\n")
+        # 维度分布摘要（v0.3.9 F1）：分条件段的依据前置可见；空值跳过；单取值也显示
+        aud_cnt: dict[str, int] = {}
+        pur_cnt: dict[str, int] = {}
+        for e in evidence:
+            a = (e.get("audience") or "").strip()
+            p = (e.get("purpose") or "").strip()
+            if a:
+                aud_cnt[a] = aud_cnt.get(a, 0) + 1
+            if p:
+                pur_cnt[p] = pur_cnt.get(p, 0) + 1
+        if aud_cnt or pur_cnt:
+            segs = [f"受众 {'、'.join(f'{k}×{n}' for k, n in aud_cnt.items())}"] if aud_cnt else []
+            if pur_cnt:
+                segs.append(f"用途 {'、'.join(f'{k}×{n}' for k, n in pur_cnt.items())}")
+            parts.append(f"> 维度分布：{'；'.join(segs)}\n\n")
     if evidence:
         for e in evidence:
             mid = e.get("id", "?")
             subject = e.get("subject") or ""
             content = e.get("content") or ""
-            parts.append(f"- [{mid}] {subject}：{content}\n")
+            if not audience_mode:
+                # 维度标签（v0.3.9 F1）：code 直渲染（与正文分区标题/submit 对账同
+                # 符号系）；空值省略对应段，两值全空省略整个括号
+                a = (e.get("audience") or "").strip()
+                p = (e.get("purpose") or "").strip()
+                tag = "/".join(x for x in (f"受众:{a}" if a else "",
+                                          f"用途:{p}" if p else "") if x)
+                parts.append(f"- [{mid}] {subject}（{tag}）：{content}\n" if tag
+                             else f"- [{mid}] {subject}：{content}\n")
+            else:
+                parts.append(f"- [{mid}] {subject}：{content}\n")
     else:
         parts.append("（无在世证据——如仍要重编，可基于当前版本做结构化重写）\n")
     # 已作废条款（防御性，常驻）：全量投影下作废行已不在证据集合，此节防旧版
