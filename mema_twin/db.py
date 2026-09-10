@@ -124,12 +124,13 @@ _migrated: set[str] = set()
 
 
 def _migrate(conn: sqlite3.Connection, key: str) -> None:
-    """v0.3.8 幂等迁移（评审 P1-1：播种是 INSERT-only，只改内置枚举不动库则
-    生产库静默失效）：
-    ① 删 3 行内置 other 种子（仅 is_custom=0——防误删用户同名自建码）；
-    ② audience/self 行摘除别名「私人」（仅移除该项，不整行覆写——保留治理追加）；
-    ③ twin_pending_values 删旧列 first_seen_memory_id（v0.3.8 票据无 mema id：
-      归一门打回发生在写入之前）。
+    """幂等迁移（v0.3.8 P1-1 起的先例：播种是 INSERT-only，只改内置枚举不动库
+    则生产库静默失效）：
+    ① v0.3.8 删 3 行内置 other 种子（仅 is_custom=0——防误删用户同名自建码）；
+    ② v0.3.8 audience/self 行摘除别名「私人」（仅移除该项，不整行覆写——保留治理追加）；
+    ③ v0.3.8 twin_pending_values 删旧列 first_seen_memory_id（归一门打回发生在写入之前）；
+    ④ v0.3.9 work_type 域重划（#958 按产出物目标六域）：内置 33 码 domain 对齐
+      taxonomy 播种源（UPDATE 仅 is_custom=0 行——custom 码的 domain 不动）。
     """
     if key in _migrated:
         return
@@ -155,6 +156,11 @@ def _migrate(conn: sqlite3.Connection, key: str) -> None:
             conn.execute("ALTER TABLE twin_pending_values DROP COLUMN first_seen_memory_id")
         except sqlite3.Error:
             pass  # sqlite <3.35 不支持 DROP COLUMN：列留空无碍（仅写入侧已收窄）
+    for t in taxonomy.all_types("work_type"):
+        conn.execute(
+            "UPDATE twin_types SET domain=? WHERE type_kind='work_type' AND code=? AND is_custom=0",
+            (t.domain, t.code),
+        )
     conn.commit()
     _migrated.add(key)
 

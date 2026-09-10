@@ -9,3 +9,5 @@ twin.sqlite3*
 prompts/
 deliverables/
 .workbuddy/
+
+.DS_Store

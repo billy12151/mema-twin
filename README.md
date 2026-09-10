@@ -11,7 +11,7 @@
 mema-twin is a personal work twin built on top of mema (memory-arbiter). It extracts
 reusable work preferences (style, structure, wording, pre-flight checklists) into
 dimension-tagged memories, compiles them into versioned persona prompts per work type
-(34 work types / 10 audiences / 9 purposes in v1), and serves the active prompt to
+(33 work types / 9 audiences / 8 purposes in v1), and serves the active prompt to
 agents before they start a piece of work. Preferences live in mema; compiled prompts
 live in twin's own SQLite with a file mirror for fallback and human review.
 
@@ -72,7 +72,11 @@ live in twin's own SQLite with a file mirror for fallback and human review.
   每版从头重编，弱底稿不遗传、证据库是唯一事实源；配套编译规则三件套：含义稳定表达自由
   （证据未动的规则不得变含义，合并/条件化/重组自由）、硬预算（类型 8000 字符/60 条、
   画像 4000/40，超限强制合并淘汰并写明依据）、版本间变更分级（语义变更须归因证据 id 或
-  预算）。status 附带各类型 active 体积与超预算标记。
+  预算）；v0.3.9 增简练优先（最小可执行表述，禁为省字符抽象掉动作/条件/例外）与素材包
+  受众/用途维度标签。status 附带各版本体积曲线（size_chars）与 active 超预算标记。
+  索引若真丢失，正解是按 `twin:wt:*` 等 tags 从 mema 重建 twin_evidence（一次性脚本，
+  需要时再写；mema 数据无损）——不做 find 语义兜底召回（v0.3.9 退役：可能召回不相干
+  记忆属伪造素材）。
 - **冲突链路**：twin.write 透传 mema 的 notice（`mema_notices` + 分诊指引随响应）——
   similar_active_memory 疑似重复静默分诊；语义冲突 notice 分诊后真冲突才问用户三选项
   （都留/新替旧/撤销新写的）。`void` 动作作废证据（行级、全链路排除、不可逆）；曾入编译
@@ -102,7 +106,8 @@ live in twin's own SQLite with a file mirror for fallback and human review.
 
 ## 维度枚举 v1
 
-work_type 33 项（七域：通用职场/方案商务/产品研发/管理制度/培训知识/创意内容/专业服务）、
+work_type 33 项（六域：规格与执行/分析与复盘/记录与同步/说服与传播/教学与传授/法律与契约——
+按产出物目标分类，v0.3.9 重划）、
 audience 9 项、purpose 8 项（v0.3.8 删 other 杂项桶）。清单见 `mema_twin/taxonomy.py` 或
 `twin(action="taxonomy")`（动态：含自建 canonical）。后续版本可扩展；真长尾经用户
 canonicalize 立新码进清单。
@@ -132,8 +137,8 @@ MCP 客户端配置（Claude Desktop / Cursor / 通用 stdio 均可）：
 }
 ```
 
-装好 skill 引导：把 `skill/SKILL.md` 放到客户端的 skills 目录，Agent 才知道何时
-调 `twin.write` / `task_start`。
+装好 skill 引导：仓库根 `make install-skill` 把 `skill/SKILL.md` 分发到三宿主技能目录
+（zcode / jingleAI / workbuddy，cp 保留源文件），Agent 才知道何时调 `twin.write` / `task_start`。
 
 ## 开发（本地源码）
 

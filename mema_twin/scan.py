@@ -103,7 +103,7 @@ def _parse_iso(ts: str | None) -> _dt.datetime | None:
 def scan_notice() -> dict | None:
     """夜间编译停转保险丝：scheduled submit 刷的 last_scheduled_compile_at
     7 天内跑过 → 无提醒（体系在转）；从未跑过或超窗 → 提醒安装/检查夜间任务。
-    twin_scan 退役后单键判定（last_scan_at 为历史死键，不再参与）。"""
+    twin_scan 退役后单键判定（last_scan_at 死键 v0.3.9 已从 twin_meta 删除）。"""
     flow.ensure_schema()
     now = _dt.datetime.now(_dt.timezone.utc)
     last = _parse_iso(flow.get_meta("last_scheduled_compile_at"))

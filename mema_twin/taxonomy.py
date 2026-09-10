@@ -1,7 +1,7 @@
 """mema-twin 三维度 canonical 枚举（v1，2026-09-02 定稿；v0.3.8 删 other）。
 
 来源：ZCodeProject/docs/mema-avatar-design-2026-09-02.md 第 5 节（D9）。
-work_type 33 项（七域）/ audience 9 项 / purpose 8 项。
+work_type 33 项（六域，v0.3.9 按产出物目标重划）/ audience 9 项 / purpose 8 项。
 别名只收常见精确写法；语义选码由调用方 Agent 对清单完成（归一门：先 taxonomy
 查清单再写，未命中整笔打回、必须问用户裁定——v0.3.8）。无 other 杂项桶：
 真长尾由用户 canonicalize 立新码，进清单即自动可选。
@@ -23,78 +23,79 @@ class CanonicalType:
 
 
 _WORK_TYPES: tuple[CanonicalType, ...] = (
-    # 通用职场（7）
-    CanonicalType("work_report", "工作汇报", "work report", "通用职场",
+    # work_type 33 项（六域按产出物目标，v0.3.9 重划；组内顺序沿用 v1 编排）
+    # —— 原「通用职场」域成员 ——
+    CanonicalType("work_report", "工作汇报", "work report", "记录与同步",
                   ("周报", "月报", "季度总结", "季度汇报", "述职", "述职报告", "工作总结")),
-    CanonicalType("presentation", "演讲与汇报材料", "presentation deck", "通用职场",
+    CanonicalType("presentation", "演讲与汇报材料", "presentation deck", "说服与传播",
                   ("PPT", "路演", "路演材料", "发言稿", "演讲稿", "答辩材料", "汇报PPT", "slides")),
-    CanonicalType("meeting_minutes", "会议纪要", "meeting minutes", "通用职场",
+    CanonicalType("meeting_minutes", "会议纪要", "meeting minutes", "记录与同步",
                   ("纪要", "会议记录", "例会纪要", "评审记录", "访谈记录")),
-    CanonicalType("comm_copy", "邮件与沟通文案", "email & comm copy", "通用职场",
+    CanonicalType("comm_copy", "邮件与沟通文案", "email & comm copy", "记录与同步",
                   ("邮件", "email", "沟通文案", "群通告", "IM消息", "站内信")),
-    CanonicalType("project_plan", "项目与实施计划", "project plan", "通用职场",
+    CanonicalType("project_plan", "项目与实施计划", "project plan", "规格与执行",
                   ("项目计划", "实施计划", "排期", "项目排期", "行动计划")),
-    CanonicalType("retrospective", "复盘与总结", "retrospective", "通用职场",
+    CanonicalType("retrospective", "复盘与总结", "retrospective", "分析与复盘",
                   ("复盘", "项目复盘", "经验总结", "总结", "复盘总结")),
-    CanonicalType("personal_notes", "个人笔记", "personal notes", "通用职场",
+    CanonicalType("personal_notes", "个人笔记", "personal notes", "记录与同步",
                   ("笔记", "学习笔记", "灵感记录", "随手记")),
-    # 方案与商务（5）
-    CanonicalType("proposal", "方案书与解决方案", "proposal / solution doc", "方案与商务",
+    # —— 原「方案与商务」域成员 ——
+    CanonicalType("proposal", "方案书与解决方案", "proposal / solution doc", "说服与传播",
                   ("方案书", "解决方案", "业务方案", "售前方案", "建议方案")),
-    CanonicalType("bid_document", "投标与标书", "bid / tender doc", "方案与商务",
+    CanonicalType("bid_document", "投标与标书", "bid / tender doc", "说服与传播",
                   ("标书", "投标文件", "投标书", "应答文件", "询价回复")),
-    CanonicalType("contract_draft", "合同与协议起草", "contract drafting", "方案与商务",
+    CanonicalType("contract_draft", "合同与协议起草", "contract drafting", "法律与契约",
                   ("合同", "协议", "合同起草", "协议起草", "补充协议")),
-    CanonicalType("marketing_copy", "营销与对外文案", "marketing copy", "方案与商务",
+    CanonicalType("marketing_copy", "营销与对外文案", "marketing copy", "说服与传播",
                   ("营销文案", "推广文案", "活动文案", "文案", "产品介绍文案")),
-    CanonicalType("press_release", "公关与新闻稿", "press release", "方案与商务",
+    CanonicalType("press_release", "公关与新闻稿", "press release", "说服与传播",
                   ("新闻稿", "通稿", "公关稿", "对外声明")),
-    # 产品与研发（8）
-    CanonicalType("product_doc", "产品文档", "product doc (PRD)", "产品与研发",
+    # —— 原「产品与研发」域成员 ——
+    CanonicalType("product_doc", "产品文档", "product doc (PRD)", "规格与执行",
                   ("PRD", "prd", "需求文档", "需求说明书", "MRD", "功能规格")),
-    CanonicalType("software_design", "软件设计", "software design doc", "产品与研发",
+    CanonicalType("software_design", "软件设计", "software design doc", "规格与执行",
                   ("架构设计", "详细设计", "概要设计", "接口文档", "设计文档")),
-    CanonicalType("tech_eval", "技术评估与选型", "tech evaluation", "产品与研发",
+    CanonicalType("tech_eval", "技术评估与选型", "tech evaluation", "分析与复盘",
                   ("选型报告", "可行性分析", "可行性报告", "PoC")),
-    CanonicalType("research_report", "调研报告", "research report", "产品与研发",
+    CanonicalType("research_report", "调研报告", "research report", "分析与复盘",
                   ("竞品分析", "竞品报告", "行业研究", "技术调研", "调研")),
-    CanonicalType("data_analysis", "数据分析报告", "data analysis report", "产品与研发",
+    CanonicalType("data_analysis", "数据分析报告", "data analysis report", "分析与复盘",
                   ("数据报告", "分析报告", "经营分析", "报表解读")),
-    CanonicalType("test_report", "测试与验收报告", "test / acceptance report", "产品与研发",
+    CanonicalType("test_report", "测试与验收报告", "test / acceptance report", "记录与同步",
                   ("测试报告", "验收报告", "质量报告")),
-    CanonicalType("incident_report", "故障与事故报告", "incident report", "产品与研发",
+    CanonicalType("incident_report", "故障与事故报告", "incident report", "分析与复盘",
                   ("事故报告", "故障报告", "故障通报", "事故复盘")),
-    CanonicalType("user_manual", "手册与操作指南", "user manual / guide", "产品与研发",
+    CanonicalType("user_manual", "手册与操作指南", "user manual / guide", "教学与传授",
                   ("使用手册", "用户手册", "手册", "指南", "操作指南", "运维指南", "说明书", "FAQ")),
-    # 管理与制度（5）
-    CanonicalType("policy_sop", "制度与流程规范", "policy / SOP", "管理与制度",
+    # —— 原「管理与制度」域成员 ——
+    CanonicalType("policy_sop", "制度与流程规范", "policy / SOP", "规格与执行",
                   ("制度", "管理制度", "SOP", "流程规范", "规范", "管理办法")),
-    CanonicalType("official_doc", "公文与行政文件", "official admin doc", "管理与制度",
+    CanonicalType("official_doc", "公文与行政文件", "official admin doc", "记录与同步",
                   ("公文", "行政文件", "通知", "请示", "函件", "红头文件", "公告")),
-    CanonicalType("budget_proposal", "预算与立项申请", "budget / project approval", "管理与制度",
+    CanonicalType("budget_proposal", "预算与立项申请", "budget / project approval", "说服与传播",
                   ("立项报告", "预算申请", "立项申请", "采购申请", "预算报告")),
-    CanonicalType("performance_review", "绩效与评价材料", "performance review", "管理与制度",
+    CanonicalType("performance_review", "绩效与评价材料", "performance review", "分析与复盘",
                   ("绩效评语", "绩效评价", "晋升材料", "晋升答辩材料", "推荐信")),
-    CanonicalType("jd_recruit", "岗位与招聘材料", "JD / recruiting", "管理与制度",
+    CanonicalType("jd_recruit", "岗位与招聘材料", "JD / recruiting", "规格与执行",
                   ("JD", "岗位说明", "招聘启事", "面试题", "招聘材料")),
-    # 培训与知识（2）
-    CanonicalType("training_material", "培训与教学材料", "training material", "培训与知识",
+    # —— 原「培训与知识」域成员 ——
+    CanonicalType("training_material", "培训与教学材料", "training material", "教学与传授",
                   ("课件", "教程", "培训材料", "内训讲义", "讲义")),
-    CanonicalType("knowledge_doc", "知识库文档", "knowledge doc", "培训与知识",
+    CanonicalType("knowledge_doc", "知识库文档", "knowledge doc", "教学与传授",
                   ("知识库", "wiki", "知识条目", "最佳实践")),
-    # 创意与内容（2）
-    CanonicalType("creative_brief", "创意简报与大纲", "creative brief", "创意与内容",
+    # —— 原「创意与内容」域成员 ——
+    CanonicalType("creative_brief", "创意简报与大纲", "creative brief", "规格与执行",
                   ("创意方案", "创意简报", "活动策划", "策划案", "内容大纲")),
-    CanonicalType("video_script", "视频与脚本文案", "video script", "创意与内容",
+    CanonicalType("video_script", "视频与脚本文案", "video script", "说服与传播",
                   ("脚本", "短视频脚本", "直播话术", "分镜", "分镜脚本")),
-    # 专业服务（4）
-    CanonicalType("due_diligence", "尽调与审计报告", "due diligence / audit", "专业服务",
+    # —— 原「专业服务」域成员 ——
+    CanonicalType("due_diligence", "尽调与审计报告", "due diligence / audit", "分析与复盘",
                   ("尽调报告", "尽职调查", "尽调", "审计报告")),
-    CanonicalType("legal_opinion", "法律与合规文书", "legal / compliance doc", "专业服务",
+    CanonicalType("legal_opinion", "法律与合规文书", "legal / compliance doc", "法律与契约",
                   ("法律意见", "法律意见书", "合规文书", "合规分析", "律师函")),
-    CanonicalType("financial_analysis", "财务与估值分析", "financial analysis", "专业服务",
+    CanonicalType("financial_analysis", "财务与估值分析", "financial analysis", "分析与复盘",
                   ("财务分析", "估值报告", "财务报告", "财报分析")),
-    CanonicalType("academic_report", "论文与学术报告", "academic paper / report", "专业服务",
+    CanonicalType("academic_report", "论文与学术报告", "academic paper / report", "分析与复盘",
                   ("论文", "学术报告", "技术报告", "研究综述", "综述")),
 )
 
