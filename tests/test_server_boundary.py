@@ -1310,3 +1310,122 @@ def test_legacy_deadend_wording():
     assert r.get("ok") is False and "无迁移入口" in r.get("reason", "")
     r2 = server._twin_impl("task_revise", {"task_id": tid, "revision_reason": "x"})
     assert r2.get("ok") is False and "无迁移入口" in r2.get("reason", "")
+
+
+# ---- v0.3.10 write 任务上下文维度继承（#959）----
+
+def _stub_remember_capture(monkeypatch):
+    """capture sink.remember（防联网），返回 captured dict（tags/memory id）。"""
+    from mema_twin import sink
+    captured = {}
+
+    def fake_remember(content, subject, tags, workspace, source_ref="", event_time="", client=None):
+        captured["tags"] = tags
+        captured["content"] = content
+        return {"ok": True, "data": {"id": 777}}
+    monkeypatch.setattr(sink, "remember", fake_remember)
+    return captured
+
+
+def test_write_inherits_all_dims_from_task(monkeypatch):
+    """task_id + 仅 content：三维度全部沿用任务行（task_start 已归一的 canonical
+    code），归一门零打扰；响应 dims_inherited 列出继承项；审计面不变（twin:*
+    tags + twin_evidence 三 code 列）。"""
+    captured = _stub_remember_capture(monkeypatch)
+    t = server._twin_impl("task_start", {"brief": "B", "work_type": "周报",
+                                          "audience": "高层", "purpose": "同步"})
+    assert t["ok"]
+    tid = t["task_id"]
+    r = server._twin_impl("write", {"content": "偏好内容", "task_id": tid})
+    assert r["ok"] is True
+    assert sorted(r["dims_inherited"]) == ["audience", "purpose", "work_type"]
+    assert r["dimensions"]["work_type"]["code"] == "work_report"
+    assert r["dimensions"]["audience"]["code"] == "leadership"
+    assert r["dimensions"]["purpose"]["code"] == "sync_info"
+    assert "twin:wt:work_report" in captured["tags"]
+    assert "twin:au:leadership" in captured["tags"]
+    assert "twin:pu:sync_info" in captured["tags"]
+    conn = db.connect()
+    row = conn.execute("SELECT work_type, audience, purpose FROM twin_evidence"
+                       " WHERE memory_id=777").fetchone()
+    conn.close()
+    assert row["work_type"] == "work_report" and row["audience"] == "leadership"
+
+
+def test_write_explicit_dims_override_inheritance(monkeypatch):
+    """显式传入优先：work_type 显式给值则不继承；未给的 audience/purpose 继承。"""
+    _stub_remember_capture(monkeypatch)
+    t = server._twin_impl("task_start", {"brief": "B", "work_type": "周报",
+                                          "audience": "高层", "purpose": "同步"})
+    tid = t["task_id"]
+    r = server._twin_impl("write", {"content": "c", "task_id": tid, "work_type": "PPT"})
+    assert r["ok"] is True
+    assert r["dims_inherited"] == ["audience", "purpose"]
+    assert r["dimensions"]["work_type"]["code"] == "presentation"
+
+
+def test_write_task_not_found(monkeypatch):
+    r = server._twin_impl("write", {"content": "c", "task_id": 99999,
+                                     "work_type": "周报", "audience": "高层", "purpose": "同步"})
+    assert r["ok"] is False and r["error"] == "invalid_input" and r["field"] == "task_id"
+    assert "99999" in r["reason"]
+
+
+def test_write_malformed_task_id_types():
+    for bad in (True, 1.9, [1], {"x": 1}, "abc", "12a"):
+        r = server._twin_impl("write", {"content": "c", "task_id": bad,
+                                         "work_type": "周报", "audience": "高层", "purpose": "同步"})
+        assert r.get("ok") is False and r.get("field") == "task_id", bad
+
+
+def test_write_task_null_dim_falls_back_required(monkeypatch):
+    """任务行维度可空（task_start 的 audience/purpose 可选）：继承不到时回退
+    required 报错且说明来自任务空维度，不是静默猜。"""
+    _stub_remember_capture(monkeypatch)
+    t = server._twin_impl("task_start", {"brief": "B", "work_type": "周报"})
+    tid = t["task_id"]
+    r = server._twin_impl("write", {"content": "c", "task_id": tid})
+    assert r["ok"] is False and r["error"] == "invalid_input" and r["field"] == "audience"
+    assert "继承不到" in r["reason"] and f"#{tid}" in r["reason"]
+
+
+def test_write_scope_audience_with_task_inheritance(monkeypatch):
+    """scope=audience + task_id：audience/purpose 从任务继承，work_type 不继承
+    （受众级偏好不绑工种），落 aud-{code} 证据行。"""
+    captured = _stub_remember_capture(monkeypatch)
+    t = server._twin_impl("task_start", {"brief": "B", "work_type": "周报",
+                                          "audience": "高层", "purpose": "同步"})
+    tid = t["task_id"]
+    r = server._twin_impl("write", {"content": "c", "scope": "audience",
+                                     "task_id": tid})
+    assert r["ok"] is True
+    assert sorted(r["dims_inherited"]) == ["audience", "purpose"]
+    assert r["dimensions"]["work_type"]["code"] == "aud-leadership"
+    assert "twin:au:leadership" in captured["tags"]
+    assert not any(x.startswith("twin:wt:") for x in captured["tags"])  # 任务行 work_type 不进 tags
+    conn = db.connect()
+    row = conn.execute("SELECT work_type FROM twin_evidence WHERE memory_id=777").fetchone()
+    conn.close()
+    assert row["work_type"] == "aud-leadership"
+
+
+def test_write_without_task_id_unchanged(monkeypatch):
+    """裸写（不传 task_id）路径不变：缺维度照旧 required，归一门照旧生效。"""
+    _stub_remember_capture(monkeypatch)
+    r = server._twin_impl("write", {"content": "c"})
+    assert r["ok"] is False and r["error"] == "invalid_input" and r["field"] == "work_type"
+    assert r["reason"] == "required" and "dims_inherited" not in r
+
+
+def test_write_blank_dim_treated_as_missing_inherits(monkeypatch):
+    """显式空串/纯空白维度按"缺失"处理走继承（与 task_start 判空同款口径，
+    裸写时空串会打回 required——两径差异由此测试锁定）。"""
+    _stub_remember_capture(monkeypatch)
+    t = server._twin_impl("task_start", {"brief": "B", "work_type": "周报",
+                                          "audience": "高层", "purpose": "同步"})
+    r = server._twin_impl("write", {"content": "c", "task_id": t["task_id"],
+                                     "work_type": "   ", "audience": "",
+                                     "purpose": "同步"})  # purpose 显式：不进继承清单
+    assert r["ok"] is True
+    assert sorted(r["dims_inherited"]) == ["audience", "work_type"]
+    assert r["dimensions"]["work_type"]["code"] == "work_report"

@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.3.10] — 2026-09-11
+
+- **write 任务上下文维度继承（#959 用户拍板）**：`write` 新增可选 `task_id`——改稿/返工现场沉淀偏好时，
+  缺省维度直接沿用所属任务行的三维度（task_start 建档时已过归一门的 canonical code），不再从零重判
+  打扰用户。规则：显式传入优先于继承；只补必填维度（`scope=audience` 不继承 work_type）；任务行维度
+  为空时回退 required 报错并注明「继承不到」（不静默猜）；裸写不传 task_id 照旧全显式走归一门
+  （#951 数据入口正确性不动）；task_id 不存在/类型脏直接 invalid_input。响应新增 `dims_inherited`
+  列出继承项（透明面）；审计面不变（twin_evidence 三 code 列 + twin:wt/au/pu tags）。
+  依据：维度值在 task_start 已被用户确认过，返工现场重复重判属多余打扰且重复有出错概率——
+  继承消除猜的必要（优于「暂定归属」只降低猜错代价）。
+
 ## [0.3.9] — 2026-09-10
 
 - **素材包维度可见（F1）**：compile 素材证据行渲染 `(受众:code/用途:code)` 标签（code 直渲染，与分区
