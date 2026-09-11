@@ -147,6 +147,9 @@ def _action_help(data: dict) -> dict:
                      "（先 taxonomy 查清单选码；清单无合适项的值会被整笔打回并附清单——"
                      "必须问用户：归一到已有值（resolve map）还是创建新值（resolve "
                      "canonicalize，即刻入清单），裁定后重试）；"
+                     "改稿/返工现场沉淀时可传 task_id：缺省维度沿用该任务的三维度"
+                     "（task_start 已归一；scope=audience 时不继承 work_type；显式传入优先，"
+                     "响应 dims_inherited 列出继承项）；"
                      "可选 subject/tags/source_ref/client（多 Agent 共接时 client 填宿主标识，如 kimi/jinleai）。"
                      "对该受众的通用偏好（不限工作类型）传 scope=audience（此时 work_type 省略）。",
             "status": "查看各 work_type 的 prompt 版本概况（含体积/超预算标记）、受众画像"

@@ -54,9 +54,43 @@ def _action_write(data: dict) -> dict:
                 "reason": "scope 仅接受 audience（受众级偏好）；普通类型偏好不要传"}
     audience_scoped = scope == "audience"
     required = ("audience", "purpose") if audience_scoped else ("work_type", "audience", "purpose")
+    # 任务上下文维度继承（#959，v0.3.10）：改稿/返工现场沉淀偏好时，缺省维度沿用
+    # 所属任务行的三维度——task_start 建档时已过归一门（canonical code），重复重判
+    # 属多余打扰。显式传入优先于继承；只补必填维度（scope=audience 不继承
+    # work_type）；裸写不传 task_id 照旧全显式走归一门（#951 数据入口正确性不动）。
+    inherited: list[str] = []
+    task_ctx: dict | None = None
+    raw_tid = data.get("task_id")
+    if raw_tid is not None:
+        if isinstance(raw_tid, bool) or not isinstance(raw_tid, (int, str)):
+            return {"ok": False, "error": "invalid_input", "field": "task_id",
+                    "reason": f"invalid task_id: {raw_tid!r}（任务整数 id，task_recent/task_get 可查）"}
+        try:
+            tid = int(raw_tid)
+        except ValueError:
+            return {"ok": False, "error": "invalid_input", "field": "task_id",
+                    "reason": f"invalid task_id: {raw_tid!r}（任务整数 id，task_recent/task_get 可查）"}
+        if str(tid) != str(raw_tid).strip() and not isinstance(raw_tid, int):
+            return {"ok": False, "error": "invalid_input", "field": "task_id",
+                    "reason": f"invalid task_id: {raw_tid!r}（任务整数 id，task_recent/task_get 可查）"}
+        flow.ensure_schema()  # fresh 库直传 task_id 也走 not_found 判定，而非 no such table
+        record = flow.get_task(tid)
+        if not record:
+            return {"ok": False, "error": "invalid_input", "field": "task_id",
+                    "reason": f"任务 #{tid} 不存在（task_recent/task_get 查 id）"}
+        task_ctx = record
+        for f in required:
+            if not str(data.get(f) or "").strip():
+                v = str(record.get(f) or "").strip()
+                if v:
+                    data[f] = v
+                    inherited.append(f)
     for f in required:
         if not str(data.get(f) or "").strip():
-            return {"ok": False, "error": "invalid_input", "field": f, "reason": "required"}
+            reason = ("required"
+                      if task_ctx is None
+                      else f"required——任务 #{task_ctx.get('id')} 的 {f} 为空，继承不到，请显式传入")
+            return {"ok": False, "error": "invalid_input", "field": f, "reason": reason}
         if len(str(data[f])) > _RAW_MAX_CHARS:
             return {"ok": False, "error": "invalid_input", "field": f,
                     "reason": f"超出 {_RAW_MAX_CHARS} 字符上限（维度值应是短枚举说法）"}
@@ -114,6 +148,9 @@ def _action_write(data: dict) -> dict:
     ok = bool(resp.get("ok"))
     out: dict = {"ok": ok, "memory": resp.get("data") if ok else resp,
                  "dimensions": dims}
+    if inherited:
+        # 继承透明面：哪些维度来自任务行（显式传入的不在此列）
+        out["dims_inherited"] = inherited
     if ok:
         mid = _memory_id_of(resp.get("data"))
         conn = db.connect()
