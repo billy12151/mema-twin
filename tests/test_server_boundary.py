@@ -1429,3 +1429,30 @@ def test_write_blank_dim_treated_as_missing_inherits(monkeypatch):
     assert r["ok"] is True
     assert sorted(r["dims_inherited"]) == ["audience", "work_type"]
     assert r["dimensions"]["work_type"]["code"] == "work_report"
+
+
+# ---- v0.3.11 线格式 content 单写（对齐 mema 0.16.5 flip）----
+def test_tool_result_single_write_compact():
+    """工具响应显式钉成 content 单写：仅一个 TextContent、compact JSON、
+    structuredContent 为 None（防 SDK 默认双写/indent 副本回潮——此前单写
+    是裸 -> dict 注解生成 outputSchema 失败的侥幸，改注解会静默翻转）。"""
+    import asyncio
+    import json
+
+    from mcp.types import CallToolResult
+
+    r = asyncio.run(server.twin(action="help", data=None))
+    assert isinstance(r, CallToolResult)
+    assert r.structuredContent is None
+    assert r.isError is False
+    assert len(r.content) == 1
+    block = r.content[0]
+    assert block.type == "text"
+    assert "\n" not in block.text  # compact：无 indent 换行
+    body = json.loads(block.text)
+    assert body["ok"] is True and "actions" in body
+    assert body == server._twin_impl("help", {})  # 信封内语义与实现体一致
+    # 钉注册元数据（评审 P2）：返回注解若被改成 dict[str, Any]/TypedDict，
+    # output_schema 变非 None → 线上每次调用对 structuredContent=None 硬错误，
+    # 而只测信封的断言照样全绿——这行才堵住 CHANGELOG 自称要堵的洞
+    assert server.mcp._tool_manager.get_tool("twin").fn_metadata.output_schema is None

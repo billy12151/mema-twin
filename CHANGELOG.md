@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.3.11] — 2026-09-14
+
+- **线格式 content 单写钉死（对齐 mema 0.16.5 flip）**：工具响应显式构造 `CallToolResult`——单一
+  `content[0].text` 承载 compact JSON（`separators=(",", ":")`，吃掉 FastMCP indent=2 副本的线体积），
+  无 `structuredContent`，`tools/list` 不带 outputSchema。此前单写纯属侥幸：裸 `-> dict` 注解使 FastMCP
+  生成 outputSchema 失败、SDK 才跳过默认双写（structuredContent + indent=2 content 副本并存，mema
+  实测 2-3x 线膨胀）；任何给返回加 TypedDict/BaseModel 注解或 `structured_output=True` 的重构都会
+  不惊动任何人地翻回双写——现以显式构造 + `-> CallToolResult` 注解（FastMCP designed 逃生口）把
+  单写钉成设计。响应体语义不变（ok/error dict 原样 json 序列化），信封回归测试锁定（单块文本、
+  compact、structuredContent 为 None、与 `_twin_impl` 输出等价）。对抗性评审一轮无 P1：补注册
+  元数据断言（`output_schema is None`——只测信封防不住「改注解翻双写还硬错误」，评审 P2）、
+  `json.dumps(default=str)` 对齐旧路径非 JSON 值静默兜底（评审 P3）。
+
 ## [0.3.10] — 2026-09-11
 
 - **write 任务上下文维度继承（#959 用户拍板）**：`write` 新增可选 `task_id`——改稿/返工现场沉淀偏好时，

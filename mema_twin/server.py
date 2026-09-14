@@ -9,10 +9,12 @@ sink, scan, templates)，无环。
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 
 import anyio.to_thread
 from mcp.server.fastmcp import FastMCP
+from mcp.types import CallToolResult, TextContent
 
 from . import identity, pref_actions, scan, sink, task_actions, templates
 from . import compile_actions
@@ -21,7 +23,7 @@ mcp = FastMCP("mema-twin", stateless_http=True)  # http 模式免 initialize 直
 
 
 @mcp.tool()
-async def twin(action: str, data: dict | None = None) -> dict:
+async def twin(action: str, data: dict | None = None) -> CallToolResult:
     """个人分身 twin：按工作性质沉淀用户工作偏好，编译版本化 persona prompt，
     经交付任务流注入执行，并提供定时任务建议。
 
@@ -34,7 +36,32 @@ async def twin(action: str, data: dict | None = None) -> dict:
     # sync 实现体放线程池（评审轮2 P2-4）：FastMCP 对 sync 工具直接在事件循环上
     # 调用，而 compile 全量投影后逐条 read（最坏 30s/条）会独占循环、拖挂其他宿主
     # 的并发调用；anyio.to_thread 传播 contextvars（身份头注入不受影响）
-    return await anyio.to_thread.run_sync(lambda: _twin_impl(action, data))
+    result = await anyio.to_thread.run_sync(lambda: _twin_impl(action, data))
+    return _single_text_result(result)
+
+
+def _single_text_result(result: dict) -> CallToolResult:
+    """content 单写 compact JSON（v0.3.11 拍板，对齐 mema 0.16.5 flip 的
+    `_single_text_copy`）。
+
+    FastMCP 对可识别为 dict 的返回值默认双写：compact structuredContent 一份 +
+    indent=2 的 content[0].text 副本（mema 实测 2-3x 线膨胀）。twin 此前单写
+    纯属侥幸——裸 `-> dict` 注解让 outputSchema 生成失败、SDK 跳过 structured
+    分支；谁将来给返回加 TypedDict/BaseModel 注解或 structured_output=True，
+    会不惊动任何人地翻回双写。故显式构造 CallToolResult 把单写钉成设计：
+    content 是全客户端唯一必读的通道（structuredContent 是 2025-03 后的可选
+    字段，只发它老客户端看到空结果——mema/WorkBuddy 实测案例）；响应体语义
+    不变（ok/error dict），只收 indent 的线体积。返回注解标 CallToolResult
+    是 FastMCP 的 designed 逃生口：FuncMetadata 不带 outputSchema，
+    convert_result 对 CallToolResult 实例原样透传。
+    """
+    return CallToolResult(content=[TextContent(
+        type="text",
+        # default=str 对齐旧路径容错：FastMCP 的 _convert_to_content 对非 JSON 值
+        # 静默 str() 兜底，缺了它这类值会从"宿主拿到 ok 载荷"变成 isError 硬错
+        # （评审 P3：当前返回值全 JSON-safe，属防线而非现状修复）
+        text=json.dumps(result, ensure_ascii=False, separators=(",", ":"),
+                        default=str))])
 
 
 def _twin_impl(action: str, data: dict | None = None) -> dict:
