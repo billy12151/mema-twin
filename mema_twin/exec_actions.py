@@ -23,19 +23,24 @@ _DESC_MAX = 2000
 _QUESTION_MAX = 500
 _NOTE_MAX = 500
 _ENTRY_MAX = 50
+_REFLECTION_MAX = 2000
+_REASON_MAX = 500
+_TOOL_NAME_MAX = 100
+_PURPOSE_MAX = 500
 
 # 迁移合法性表：key=(from, to)。backfill=True 的迁移自动标追认；reason_required /
 # reflection_required 为对应字段必填的迁移。未列出的组合一律打回。
 _TRANSITIONS: dict[tuple[str, str], dict] = {}
 for _to in ("in_progress", "done", "failed", "blocked", "skipped"):
     _TRANSITIONS[("pending", _to)] = {"backfill": _to in ("done", "failed")}
+_TRANSITIONS[("pending", "skipped")] = {"reason_required": True}  # 跳过必带原因（v3.3 ⑧）
 _TRANSITIONS[("in_progress", "pending")] = {}
 _TRANSITIONS[("in_progress", "done")] = {}
 _TRANSITIONS[("in_progress", "failed")] = {"reflection_required": True}
 _TRANSITIONS[("in_progress", "blocked")] = {"reason_required": True}
 _TRANSITIONS[("in_progress", "skipped")] = {"reason_required": True}
 _TRANSITIONS[("done", "pending")] = {"reason_required": True}  # 撤销完成（审计）
-_TRANSITIONS[("done", "skipped")] = {}
+_TRANSITIONS[("done", "skipped")] = {"reason_required": True}
 _TRANSITIONS[("failed", "in_progress")] = {}  # 原步骤重试
 _TRANSITIONS[("failed", "done")] = {}
 _TRANSITIONS[("failed", "blocked")] = {"reason_required": True}
@@ -185,6 +190,11 @@ def _apply_step_transition(conn, step: dict, to: str, reason: str | None,
     if rule.get("reflection_required") and not reflection:
         raise ValueError("失败步骤必须写 reflection（发生了什么/为什么失败/下次怎么办）——"
                          "这是服务端硬约束，夜间评估靠它挖掘「失败→对策」模式")
+    # 长度帽（对抗评审轮2 P2-5）：reflection/reason 进 task_evaluate 素材包，无帽失控
+    if len(reason or "") > _REASON_MAX:
+        raise ValueError(f"reason 过长（上限 {_REASON_MAX} 字符）")
+    if len(reflection or "") > _REFLECTION_MAX:
+        raise ValueError(f"reflection 过长（上限 {_REFLECTION_MAX} 字符）")
     task_id = int(step["task_id"])
     if to == "in_progress":
         gate = (_gate_blocking_questions(conn, task_id, int(step["id"]))
@@ -193,20 +203,32 @@ def _apply_step_transition(conn, step: dict, to: str, reason: str | None,
         if gate is not None:
             raise _GateReject(gate)
     ts = db.now_iso()
-    cur = conn.execute(
-        "UPDATE twin_plan_steps SET status=?, reason=COALESCE(?, reason),"
-        " reflection=COALESCE(?, reflection), backfilled=?,"
-        " decided_at=COALESCE(decided_at, ?)"
-        " WHERE id=? AND status=?",
-        (to, reason, reflection,
-         1 if rule.get("backfill") else int(step.get("backfilled") or 0),
-         ts, int(step["id"]), frm))
+    sql = ("UPDATE twin_plan_steps SET status=?, reason=COALESCE(?, reason),"
+           " reflection=COALESCE(?, reflection), backfilled=?,"
+           " decided_at=COALESCE(decided_at, ?)"
+           " WHERE id=? AND status=?")
+    params: list = [to, reason, reflection,
+                    1 if rule.get("backfill") else int(step.get("backfilled") or 0),
+                    ts, int(step["id"]), frm]
+    if to == "in_progress":
+        # 单一 in_progress 不变量折进条件 UPDATE：先查后改的进程内门存在跨宿主
+        # 竞窗（两宿主并发推进两个不同步骤都能过门），写入瞬间原子复查兜底
+        sql += (" AND NOT EXISTS(SELECT 1 FROM twin_plan_steps"
+                " WHERE task_id=? AND status='in_progress' AND id!=?)")
+        params += [task_id, int(step["id"])]
+    cur = conn.execute(sql, params)
     if cur.rowcount == 0:
         fresh = conn.execute("SELECT status FROM twin_plan_steps WHERE id=?",
                              (int(step["id"]),)).fetchone()
-        raise ValueError(
-            f"步骤 #{step['id']} 状态已并发变更为 {fresh['status'] if fresh else '?'}"
-            f"（期望 {frm!r}），请重读后重试")
+        if fresh is None or fresh["status"] != frm:
+            raise ValueError(
+                f"步骤 #{step['id']} 状态已并发变更为 {fresh['status'] if fresh else '?'}"
+                f"（期望 {frm!r}），请重读后重试")
+        gate = _gate_single_in_progress(conn, task_id, int(step["id"])) or {
+            "ok": False, "error": "invalid_input",
+            "reason": (f"步骤 #{step['id']} 推进失败：并发窗口内另一步骤已进入"
+                       " in_progress，请重读后重试")}
+        raise _GateReject(gate)
     out: dict = {"step_id": int(step["id"]), "task_id": task_id, "status": to,
                  "backfilled": bool(rule.get("backfill"))}
     if to == "failed":
@@ -242,28 +264,34 @@ def _task_planning_guard(conn, task_id: int, need_plan: bool = False) -> dict | 
 # ---- 环检测（节点→依赖邻接表；返回环路径节点序列）----
 
 def _find_cycle(edges: dict[int, list[int]]) -> list[int] | None:
+    """迭代 DFS（对抗评审轮2 P3-1：递归版在 ~1000 步正向依赖链上 RecursionError
+    抛穿错误边界）。返回环路径节点序列。"""
     WHITE, GRAY, BLACK = 0, 1, 2
     color = {n: WHITE for n in edges}
-
-    def dfs(n: int, stack: list[int]) -> list[int] | None:
-        color[n] = GRAY
-        for m in edges.get(n, ()):
-            if m not in color:
-                continue
-            if color[m] == GRAY:
-                return stack + [n, m]
-            if color[m] == WHITE:
-                found = dfs(m, stack + [n])
-                if found:
-                    return found
-        color[n] = BLACK
-        return None
-
-    for n in list(edges):
-        if color[n] == WHITE:
-            found = dfs(n, [])
-            if found:
-                return found
+    for start in list(edges):
+        if color[start] != WHITE:
+            continue
+        color[start] = GRAY
+        stack = [(start, iter(edges.get(start, ())))]
+        path = [start]
+        while stack:
+            node, children = stack[-1]
+            advanced = False
+            for m in children:
+                if m not in color:
+                    continue
+                if color[m] == GRAY:
+                    return path[path.index(m):] + [m]
+                if color[m] == WHITE:
+                    color[m] = GRAY
+                    stack.append((m, iter(edges.get(m, ()))))
+                    path.append(m)
+                    advanced = True
+                    break
+            if not advanced:
+                color[node] = BLACK
+                stack.pop()
+                path.pop()
     return None
 
 
@@ -364,8 +392,22 @@ def _action_plan_set(data: dict) -> dict:
             return {"ok": False, "error": "invalid_input",
                     "field": f"open_questions[{i}].step_ids",
                     "reason": f"序号超出范围 1..{len(steps_in)}"}
+        blocking_raw = q.get("blocking", False)
+        if isinstance(blocking_raw, bool):
+            blocking = 1 if blocking_raw else 0
+        elif isinstance(blocking_raw, int) and blocking_raw in (0, 1):
+            blocking = blocking_raw
+        else:
+            return {"ok": False, "error": "invalid_input",
+                    "field": f"open_questions[{i}].blocking",
+                    "reason": "需是布尔值 true/false（字符串 \"false\" 不接受——会被误判为 true）"}
+        if blocking and not qids:
+            # blocking 疑问不锚定步骤就永远拦不住任何推进（对抗评审轮1 P3-7）
+            return {"ok": False, "error": "invalid_input",
+                    "field": f"open_questions[{i}].step_ids",
+                    "reason": "blocking=true 的疑问必须关联至少一个步骤"}
         parsed_q.append({"question": text, "seqs": [int(x) for x in qids],
-                         "blocking": 1 if q.get("blocking") else 0})
+                         "blocking": blocking})
     flow.ensure_schema()
     conn = db.connect()
     try:
@@ -378,11 +420,11 @@ def _action_plan_set(data: dict) -> dict:
             f" WHERE task_id=? AND status IN ({','.join('?' * len(STEP_OPEN_STATUSES))})",
             (db.now_iso(), task_id, *STEP_OPEN_STATUSES))
         replanned = replanned_rows.rowcount
-        if replanned:
-            # 重建计划的疑问同处置：旧 open 疑问随旧计划废弃（answered 保留历史）
-            conn.execute(
-                "DELETE FROM twin_plan_questions WHERE task_id=? AND status='open'",
-                (task_id,))
+        # 旧 open 疑问随计划重建一并废弃（answered 保留历史）——不设 replanned 条件：
+        # 全闭环但有遗留 open 疑问的任务重建计划时同样要清（对抗评审轮2 P3-4）
+        conn.execute(
+            "DELETE FROM twin_plan_questions WHERE task_id=? AND status='open'",
+            (task_id,))
         ts = db.now_iso()
         out_steps = []
         for i, s in enumerate(parsed):
@@ -440,6 +482,8 @@ def _action_step_update(data: dict) -> dict:
     try:
         step_id = int(sid)
     except ValueError:
+        return {"ok": False, "error": "invalid_input", "reason": f"invalid step_id: {sid!r}"}
+    if step_id < 0 or step_id > 2**63 - 1:  # 巨整数进 SQLite 绑定会抛 OverflowError
         return {"ok": False, "error": "invalid_input", "reason": f"invalid step_id: {sid!r}"}
     to = str(data.get("status") or "").strip()
     flow.ensure_schema()
@@ -611,6 +655,13 @@ def _action_plan_revise(data: dict) -> dict:
                     return {"ok": False, "error": "invalid_input",
                             "field": "steps_add.description",
                             "reason": f"过长（上限 {_DESC_MAX} 字符）"}
+                deps_in = s.get("depends_on") or []
+                if not isinstance(deps_in, list) or any(
+                        isinstance(d, bool) or not isinstance(d, int) for d in deps_in):
+                    conn.rollback()
+                    return {"ok": False, "error": "invalid_input",
+                            "field": "steps_add.depends_on",
+                            "reason": "必须是步骤 id 整数列表"}
                 cur = conn.execute(
                     "INSERT INTO twin_plan_steps"
                     "(task_id, seq, title, description, depends_on, status, created_at)"
@@ -618,16 +669,18 @@ def _action_plan_revise(data: dict) -> dict:
                     (task_id, int(max_seq) + 1 + i, title, desc, "[]", ts))
                 added.append({"id": int(cur.lastrowid),
                               "seq": int(max_seq) + 1 + i, "title": title,
-                              "deps_in": [int(x) for x in (s.get("depends_on") or [])
-                                          if isinstance(x, int)
-                                          and not isinstance(x, bool)]})
+                              "deps_in": [int(d) for d in deps_in]})
         # ④ 环校验（本代全量 depends_on 图，含新增与修改）
         all_rows = conn.execute(
             "SELECT id, depends_on FROM twin_plan_steps WHERE task_id=?",
             (task_id,)).fetchall()
         edges = {int(r["id"]): _loads_ids(r["depends_on"]) for r in all_rows}
         for a in added:
-            edges[a["id"]] = [d for d in a["deps_in"] if d != a["id"]]
+            if a["id"] in a["deps_in"]:  # 与 plan_set 同口径：自依赖打回，不静默剥除
+                conn.rollback()
+                return {"ok": False, "error": "invalid_input",
+                        "field": "steps_add.depends_on", "reason": "步骤不可依赖自身"}
+            edges[a["id"]] = list(a["deps_in"])
         valid = set(edges)
         bad = _validate_dep_targets(edges, valid, "depends_on")
         if bad:
@@ -651,6 +704,10 @@ def _action_plan_revise(data: dict) -> dict:
                 conn.rollback()
                 return {"ok": False, "error": "invalid_input", "field": "answers",
                         "reason": "每项需要整数 question_id 与非空 answer"}
+            if len(ans) > _QUESTION_MAX:
+                conn.rollback()
+                return {"ok": False, "error": "invalid_input", "field": "answers.answer",
+                        "reason": f"过长（上限 {_QUESTION_MAX} 字符）"}
             row = conn.execute(
                 "SELECT id, status FROM twin_plan_questions WHERE id=? AND task_id=?",
                 (qid, task_id)).fetchone()
@@ -679,6 +736,15 @@ def _action_plan_revise(data: dict) -> dict:
         out["updated"] = updated
     if answered:
         out["answered"] = answered
+    if not (removed or added or updated or answered):
+        # 仅 revision_reason 的 no-op（对抗评审轮2 P3-5）：如实告知零变更，
+        # 不给「计划已修订」的成功假信号
+        out["no_changes"] = True
+        out["note"] = ("本次仅提交 revision_reason，未产生任何步骤/疑问变更。"
+                       "修订说明需伴随 steps_add/steps_update/steps_remove/answers"
+                       " 之一才会实际生效。")
+        out["guidance"] = "计划未变更。"
+        return out
     out["guidance"] = ("计划已修订。被阻塞的步骤现在可推进；全部闭环后 task_submit 收口。")
     return out
 
@@ -715,6 +781,13 @@ def _action_tool_log(data: dict) -> dict:
                     "reason": f"须是 {'/'.join(TOOL_OUTCOMES)} 之一"}
         note = str(e.get("note") or "").strip()
         digest = str(e.get("skill_digest") or "").strip()
+        purpose = str(e.get("purpose") or "").strip()
+        if len(tool) > _TOOL_NAME_MAX:
+            return {"ok": False, "error": "invalid_input", "field": f"entries[{i}].tool",
+                    "reason": f"过长（上限 {_TOOL_NAME_MAX} 字符）"}
+        if len(purpose) > _PURPOSE_MAX:
+            return {"ok": False, "error": "invalid_input", "field": f"entries[{i}].purpose",
+                    "reason": f"过长（上限 {_PURPOSE_MAX} 字符）"}
         if len(note) > _NOTE_MAX:
             return {"ok": False, "error": "invalid_input", "field": f"entries[{i}].note",
                     "reason": f"过长（上限 {_NOTE_MAX} 字符）"}
@@ -722,7 +795,7 @@ def _action_tool_log(data: dict) -> dict:
             return {"ok": False, "error": "invalid_input",
                     "field": f"entries[{i}].skill_digest",
                     "reason": f"过长（上限 {_NOTE_MAX} 字符）"}
-        parsed.append((tool, str(e.get("purpose") or "").strip(), outcome,
+        parsed.append((tool, purpose, outcome,
                        note, digest))
     flow.ensure_schema()
     conn = db.connect()
@@ -829,12 +902,16 @@ def copy_plan_to_task(conn, from_tid: int, to_tid: int) -> dict:
         q = dict(r)
         old_refs = _loads_ids(q.get("step_ids"))
         mapped = [id_map[d] for d in old_refs if d in id_map]
-        q_dropped += len(old_refs) - len(mapped)
+        if not mapped:
+            # 关联步骤全部已闭环：疑问属于旧代（对抗评审轮2 P3-3）——照拷会产出
+            # step_ids=[] 的 open+blocking 僵尸，永不拦任何步骤却污染统计与警告
+            q_dropped += 1
+            continue
         conn.execute(
             "INSERT INTO twin_plan_questions"
             "(task_id, question, step_ids, blocking, status, created_at)"
             " VALUES(?,?,?,?, 'open', ?)",
             (int(to_tid), q["question"], _dump_ids(mapped),
              int(q["blocking"] or 0), ts))
-    return {"steps": len(rows), "questions": len(q_rows),
-            "deps_dropped": deps_dropped}
+    return {"steps": len(rows), "questions": len(q_rows) - q_dropped,
+            "questions_dropped": q_dropped, "deps_dropped": deps_dropped}

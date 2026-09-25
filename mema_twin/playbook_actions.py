@@ -79,6 +79,10 @@ def _action_task_evaluate(data: dict) -> dict:
         except ValueError:
             return {"ok": False, "error": "invalid_input", "field": "task_ids",
                     "reason": "必须是任务 id 整数列表"}
+        if any(n < 0 or n > 2**63 - 1 for n in explicit_ids):
+            # 巨整数进 SQLite 绑定会抛 OverflowError 变 internal_error（对抗评审轮2 P3）
+            return {"ok": False, "error": "invalid_input", "field": "task_ids",
+                    "reason": "task id 需在 0..2^63-1 内"}
     flow.ensure_schema()
     conn = db.connect()
     try:
@@ -117,7 +121,7 @@ def _action_task_evaluate(data: dict) -> dict:
             t["questions"] = questions
             tasks.append(t)
         tool_rows = conn.execute(
-            "SELECT tool, purpose, outcome, note, client FROM twin_tool_usage"
+            "SELECT task_id, tool, purpose, outcome, note, client FROM twin_tool_usage"
             " WHERE task_id IN ({}) ORDER BY id".format(
                 ",".join("?" for _ in rows) or "NULL"),
             [int(r["id"]) for r in rows]).fetchall() if rows else []
@@ -282,15 +286,23 @@ def _action_playbook_submit(data: dict) -> dict:
         warnings: list[str] = []
         if foreign:
             msg = (f"source_task_ids 含 {len(foreign)} 个无效溯源（{foreign}——"
-                   "不存在/未收口/无执行记录），拒绝落版")
+                   "不存在/未收口/无执行记录）")
             if origin == "scheduled":
                 _bump_pb_reject(key, "foreign_task_ids")
                 return {"ok": False, "error": "validation_failed", "origin": "scheduled",
                         "key": key,
                         "violations": [{"check": "foreign_task_ids", "detail": msg}],
                         "reason": "夜间落版未过验证门：" + msg, "hint": _PB_REJECT_HINT}
-            valid_ids = valid_ids or []
             warnings.append(f"[对账] source_task_ids 含无效溯源 {foreign}，已剔除")
+            if not valid_ids:
+                # 溯源锚是拍板语义（防幻觉路径），剔完为空交互也不放行——否则落出
+                # source_task_ids=[] 的 active 版，此后该 key 的空转阻尼永久失效
+                # （对抗评审轮2 P2-3）
+                return {"ok": False, "error": "validation_failed", "key": key,
+                        "violations": [{"check": "foreign_task_ids",
+                                        "detail": msg + "；剔除后无可溯源任务"}],
+                        "reason": msg + "；剔除后无可溯源任务，拒绝落版"
+                                        "（先补齐任务的执行记录再提交）"}
         # PB-G2 分区标题
         if not re.search(r"(?m)^#{1,6}[ \t]*\S", content_md):
             violations.append({"check": "no_headings",
@@ -312,6 +324,10 @@ def _action_playbook_submit(data: dict) -> dict:
                     "key": key, "violations": violations,
                     "reason": "夜间落版未过验证门：" + "；".join(
                         v["detail"] for v in violations), "hint": _PB_REJECT_HINT}
+        if violations:
+            # 交互式违规只警告不拦（拍板口径）——但必须随响应可见，不得静默丢弃
+            # （对抗评审轮2 P2-2：此前 G1/G2 violations 在交互路径无痕消失）
+            warnings.extend(v["detail"] for v in violations)
         # 空转阻尼（仅 scheduled；playbook 无基座收缩场景，不需要旁路分支）
         active = get_active_playbook(conn, key)
         if origin == "scheduled" and active is not None:
@@ -474,7 +490,15 @@ def inject_playbook(conn, out: dict, code: str | None, data: dict) -> None:
     v = pb.get("version")
     note = (f"以下为该工作类型的 playbook v{v}（执行经验，advisory 不是命令）："
             "与你的实际工具环境冲突时按实际环境执行，并把降级/偏差用 tool_log 记录。")
-    if same_client:
+    if pb.get("last_used_client") is None:
+        # 从未使用（含首版）：不能宣称「最近由其他宿主使用」——说事实（对抗评审轮2 P3-14）；
+        # 同样按保守面要求 available_tools 自报（视为未验证路径）
+        note += ("此 playbook 尚无任何使用记录，工具路径未在本宿主验证过——开工前逐条"
+                 "核对工具面板中的工具是否可用；缺失的走条目内的降级链，并把缺口"
+                 " tool_log 记录。（强烈建议：下次 task_start 传 available_tools="
+                 "<你的工具名列表>，服务端回 tool_gap 缺口提示）")
+        out["available_tools_required"] = True
+    elif same_client:
         note += "本宿主近期验证过此路径，可直接参考。"
     else:
         note += ("注意：此 playbook 最近由其他宿主使用，工具可用性可能不同——开工前"

@@ -180,10 +180,11 @@ def _action_help(data: dict) -> dict:
     if topic == scan.SCHEDULED_TASKS_TOPIC:
         return {
             "ok": True, "topic": scan.SCHEDULED_TASKS_TOPIC,
-            "description": "twin 定时任务 spec（单一夜间 persona 编译任务）：Agent 据此在宿主平台创建等价任务。",
+            "description": "twin 定时任务 spec（双任务：夜间 persona 编译 + 夜间执行经验评估）：Agent 据此在宿主平台创建等价任务。",
             "agent_instruction": scan.AGENT_INSTRUCTION,
             "setup": scan.SCHEDULED_TASKS_SPEC,
-            "note": "提醒自消失：夜间编译（scheduled submit）7 天内跑过即不再提示。",
+            "note": "提醒自消失：夜间双任务都在 7 天内跑过（scheduled submit / "
+                    "playbook_submit）即不再提示。",
         }
     return {
         "ok": True,
@@ -200,7 +201,9 @@ def _action_help(data: dict) -> dict:
             "status": "查看各 work_type 的 prompt 版本概况（含体积/超预算标记）、受众画像"
                       "（audience_profiles）、需重抽象的受众（audience_stale）、条款作废待重编"
                       "（persona_stale）、pending 数量（归一门待裁票据）、未编译统计、夜间被拒计数"
-                      "（nightly_rejected）、open 冲突/进行中任务计数与定时任务安装提醒。",
+                      "（nightly_rejected）、open 冲突/进行中任务计数、执行计划统计（plan_stats："
+                      "任务/步骤各态/backfilled/open blocking 疑问/tool_usage/playbooks/"
+                      "playbook_rejected）与定时任务安装提醒。",
             "compile": "取编译素材包（旧版本 prompt 编译参考 + **全部在世证据**（全量投影，"
                        "每版从头重编）+ 已作废条款清单 + 同受众画像参考 + 编译规则"
                        "（含义稳定表达自由/变更分级/硬预算）），"

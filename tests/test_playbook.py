@@ -125,8 +125,9 @@ def test_submit_foreign_ids_scheduled_vs_interactive(env):
     finally:
         conn.close()
     assert cnt and json.loads(cnt)["count"] == 1
-    ok = _submit(tid=ghost)  # 交互式：剔除 + 警告落版
-    assert ok["ok"] and any("剔除" in w for w in ok["warnings"])
+    ok = _submit(tid=ghost)  # 交互式：全 foreign 剔完为空也拒（对抗评审轮2 P2-3：
+    # 落出 source_task_ids=[] 的 active 版会让该 key 空转阻尼永久失效）
+    assert ok["ok"] is False and ok["error"] == "validation_failed"
 
 
 def test_submit_g1_echo_and_selflock(env):
@@ -194,7 +195,8 @@ def test_inject_continuity_levels(env):
     _submit(tid=t["id"])
     # task_start 走全链路需要 mema——直接用 inject_playbook 单测
     from mema_twin import db, identity
-    # 同 client（playbook 无 last_used_client → 视为换 client 重注入）
+    # 首次注入（playbook 无 last_used_client）：保守重注入 + 要 available_tools，
+    # 但措辞如实说「尚无使用记录」而非谎称「其他宿主使用过」（对抗评审轮2 P3-14）
     out1: dict = {}
     conn = db.connect()
     try:
@@ -202,7 +204,7 @@ def test_inject_continuity_levels(env):
     finally:
         conn.close()
     assert "playbook_md" in out1 and out1["available_tools_required"] is True
-    assert "其他宿主" in out1["playbook_note"]
+    assert "尚无任何使用记录" in out1["playbook_note"]
     # 同 client 再注入 → 轻注入
     out2: dict = {}
     conn = db.connect()
@@ -255,3 +257,77 @@ def test_playbook_markers_in_material(env):
     out = server._twin_impl("task_evaluate", {})
     for marker in templates.PLAYBOOK_MARKERS:
         assert marker in out["material"], marker
+
+
+def test_status_playbook_rejected_surface(env):
+    playbook_actions._bump_pb_reject("work_report", "foreign_task_ids")
+    out = server._twin_impl("status", {})
+    assert out["ok"]
+    rej = out["plan_stats"]["playbook_rejected"]
+    assert rej[0]["key"] == "work_report" and rej[0]["count"] == 1
+    assert rej[0]["last_check"] == "foreign_task_ids"
+
+
+# ---- 轮2 对抗评审修复回归 ----
+
+def test_evaluate_tool_usage_cap_is_per_task(env):
+    # P1（轮2）：SELECT 漏 task_id 让「每任务 20 条」退化成全局 20 条——多任务
+    # 批次后位任务的工具记录整批丢失且水位照推（永久漏评）
+    t1 = _closed_task()
+    t2 = _closed_task(reflection=None)
+    for tid, purpose in ((t1["id"], "P1"), (t2["id"], "P2")):
+        server._twin_impl("tool_log", {"task_id": tid, "entries": [
+            {"tool": f"t{tid}-{i}", "purpose": purpose, "outcome": "fail",
+             "note": "n"} for i in range(25)]})
+    r = server._twin_impl("task_evaluate", {"task_ids": [t1["id"], t2["id"]]})
+    assert r["ok"]
+    assert "目的：P1" in r["material"] and "目的：P2" in r["material"]
+    assert f"t{t1['id']}-19" in r["material"]  # 前位任务 20 条封顶
+    assert f"t{t1['id']}-24" not in r["material"]
+    assert f"t{t2['id']}-0" in r["material"]  # 后位任务不再被全局闸吞掉
+
+
+def test_submit_interactive_gate_violations_surface_as_warnings(env):
+    # P2（轮2）：交互式 G1/G2 违规只警告不拦，但必须随响应可见（不得静默丢弃）
+    t = _closed_task()
+    r = server._twin_impl("playbook_submit", {
+        "key": "work_report", "content_md": "no headings here",
+        "source_task_ids": [t["id"]], "model": "test"})
+    assert r["ok"] is True
+    assert any("Markdown 标题" in w for w in r.get("warnings", []))
+
+
+def test_inject_tool_gap_indented_panel_lines(env):
+    # P2（轮2）：编译规则示例行自带缩进，模型照抄缩进时 tool_gap 解析不能失效
+    t = _closed_task()
+    indented = ("# playbook\n\n## 工具面板\n\n"
+                "  - 工具 `rg`：找代码；首选 rg；降级 grep；兜底人工。\n"
+                "  - 工具 `kimi-skill`：周报模板；首选 v2；降级 v1；兜底手写。\n\n"
+                "## 失败规避\n\n- 先确认模板版本 `<!-- task: %d -->`\n") % t["id"]
+    r = _submit(tid=t["id"], content=indented)
+    assert r["ok"]
+    out: dict = {}
+    conn = flow.db.connect()
+    try:
+        playbook_actions.inject_playbook(conn, out, "work_report",
+                                         {"client": "kimi",
+                                          "available_tools": ["rg"]})
+    finally:
+        conn.close()
+    assert out.get("tool_gap") == ["kimi-skill"]
+
+
+def test_evaluate_rejects_huge_task_ids(env):
+    r = server._twin_impl("task_evaluate", {"task_ids": [2**70]})
+    assert r["ok"] is False and r["error"] == "invalid_input"
+
+
+def test_playbook_material_total_cap(env):
+    # P2（轮2）：素材包总闸——超限截掉后位任务并标注，防大 reflection 打爆编译上下文
+    big = [{"id": i, "brief": "b" * 600, "outcome": "success",
+            "steps": [{"seq": 1, "title": "s", "status": "done",
+                       "reflection": "r" * 2000, "reason": ""}],
+            "questions": []} for i in range(1, 60)]
+    m = templates.compile_playbook_material("work_report", None, big, [])
+    assert "素材包超限截断" in m
+    assert len(m) < 65_000

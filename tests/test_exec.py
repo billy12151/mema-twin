@@ -445,3 +445,211 @@ def test_status_plan_stats(env):
     stats = out["plan_stats"]
     assert stats["tasks_planned"] == 1
     assert stats["steps_total"] == 3
+
+
+# ---- 轮1 review 修复回归 ----
+
+def test_pending_skip_requires_reason(env):
+    t = _mk_task()
+    r = _plan(t["id"])
+    s1 = _step_ids(r)[1]
+    miss = server._twin_impl("step_update", {"step_id": s1, "status": "skipped"})
+    assert miss["ok"] is False and "reason" in miss["reason"]
+    ok = server._twin_impl("step_update", {"step_id": s1, "status": "skipped",
+                                           "reason": "该步不适用"})
+    assert ok["ok"]
+
+
+def test_single_in_progress_db_level_catch(env, monkeypatch):
+    # 竞窗模拟：先查门瞬间另一行还不是 in_progress（返回 None 放行），
+    # 写入瞬间由条件 UPDATE 的 NOT EXISTS 不变量兜底拦下
+    t = _mk_task()
+    r = _plan(t["id"], steps=[{"title": "a"}, {"title": "b"}])
+    ids = _step_ids(r)
+    conn = flow.db.connect()
+    try:
+        conn.execute("UPDATE twin_plan_steps SET status='in_progress' WHERE id=?",
+                     (ids[2],))
+        conn.commit()
+    finally:
+        conn.close()
+    real_gate = exec_actions._gate_single_in_progress
+    calls = {"n": 0}
+
+    def flaky(*a, **k):
+        calls["n"] += 1
+        return real_gate(*a, **k) if calls["n"] > 1 else None
+
+    monkeypatch.setattr(exec_actions, "_gate_single_in_progress", flaky)
+    blocked = server._twin_impl("step_update",
+                                {"step_id": ids[1], "status": "in_progress"})
+    assert blocked["ok"] is False and "in_progress" in blocked["reason"]
+    assert blocked["in_progress_steps"][0]["id"] == ids[2]
+    assert exec_actions.get_step(ids[1])["status"] == "pending"  # 未被打入
+
+
+def test_plan_revise_add_deps_strict(env):
+    t = _mk_task()
+    r = _plan(t["id"])
+    ids = _step_ids(r)
+    conn = flow.db.connect()
+    try:
+        next_id = conn.execute(
+            "SELECT COALESCE(MAX(id),0)+1 AS n FROM twin_plan_steps").fetchone()["n"]
+    finally:
+        conn.close()
+    self_dep = server._twin_impl("plan_revise", {
+        "task_id": t["id"], "steps_add": [{"title": "n1", "depends_on": [next_id]}]})
+    assert self_dep["ok"] is False and "依赖自身" in self_dep["reason"]
+    bad_type = server._twin_impl("plan_revise", {
+        "task_id": t["id"], "steps_add": [{"title": "n1", "depends_on": ["x"]}]})
+    assert bad_type["ok"] is False and "整数" in bad_type["reason"]
+    ok = server._twin_impl("plan_revise", {
+        "task_id": t["id"], "steps_add": [{"title": "n1", "depends_on": [ids[1]]}]})
+    assert ok["ok"] and ok["added"][0]["depends_on"] == [ids[1]]
+
+
+# ---- 轮2 对抗评审修复回归 ----
+
+def test_deep_dependency_chain_no_recursion_error(env):
+    # 600 步正向链：迭代 DFS 不再 RecursionError（轮2 P3-1）
+    t = _mk_task()
+    steps = [{"title": "s0"}] + [{"title": f"s{j}", "depends_on": [j]}
+                                 for j in range(1, 600)]
+    r = server._twin_impl("plan_set", {"task_id": t["id"], "steps": steps})
+    assert r["ok"] and len(r["steps"]) == 600
+
+
+def test_done_to_skipped_requires_reason(env):
+    t = _mk_task()
+    r = _plan(t["id"])
+    s1 = _step_ids(r)[1]
+    assert server._twin_impl("step_update", {"step_id": s1, "status": "done"})["ok"]
+    miss = server._twin_impl("step_update", {"step_id": s1, "status": "skipped"})
+    assert miss["ok"] is False and "reason" in miss["reason"]
+
+
+def test_reflection_length_cap(env):
+    t = _mk_task()
+    r = _plan(t["id"])
+    s1 = _step_ids(r)[1]
+    server._twin_impl("step_update", {"step_id": s1, "status": "in_progress"})
+    bad = server._twin_impl("step_update", {"step_id": s1, "status": "failed",
+                                            "reflection": "长" * 2001})
+    assert bad["ok"] is False and "reflection" in bad["reason"]
+
+
+def test_blocking_question_strict_typing_and_anchor(env):
+    t = _mk_task()
+    # 字符串 "false" 不再被真值判定成 blocking=true（轮1 P3-7 / 轮2 修复）
+    bad = server._twin_impl("plan_set", {
+        "task_id": t["id"], "steps": [{"title": "a"}],
+        "open_questions": [{"question": "q", "blocking": "false"}]})
+    assert bad["ok"] is False and bad["field"] == "open_questions[0].blocking"
+    # blocking 疑问必须锚定至少一个步骤
+    no_anchor = server._twin_impl("plan_set", {
+        "task_id": t["id"], "steps": [{"title": "a"}],
+        "open_questions": [{"question": "q", "blocking": True, "step_ids": []}]})
+    assert no_anchor["ok"] is False and "step_ids" in no_anchor["field"]
+
+
+def test_plan_set_cleans_stale_open_questions_even_without_replan(env):
+    # 全闭环但有遗留 open 疑问：重建计划时同样清掉（轮2 P3-4）
+    t = _mk_task()
+    r = _plan(t["id"], questions=[{"question": "旧疑问", "blocking": True,
+                                   "step_ids": [1]}])
+    ids = _step_ids(r)
+    for sid in ids.values():
+        server._twin_impl("step_update", {"step_id": sid, "status": "done"})
+    r2 = server._twin_impl("plan_set", {"task_id": t["id"],
+                                        "steps": [{"title": "新计划"}]})
+    assert r2["ok"]
+    conn = flow.db.connect()
+    try:
+        left = conn.execute(
+            "SELECT COUNT(*) AS c FROM twin_plan_questions WHERE task_id=?"
+            " AND status='open'", (t["id"],)).fetchone()["c"]
+    finally:
+        conn.close()
+    assert left == 0
+
+
+def test_plan_revise_reason_only_reports_no_changes(env):
+    t = _mk_task()
+    _plan(t["id"])
+    r = server._twin_impl("plan_revise", {"task_id": t["id"],
+                                          "revision_reason": "只是说明"})
+    assert r["ok"] and r["no_changes"] is True
+    assert "未变更" in r["guidance"]
+
+
+def test_resume_drops_zombie_blocking_questions(env):
+    # 疑问只关联已闭环步骤：resume 时不带入新代（否则成永不拦人却污染统计的僵尸）
+    t = _mk_task()
+    r = _plan(t["id"], questions=[{"question": "q", "blocking": True, "step_ids": [2]}])
+    ids = _step_ids(r)
+    server._twin_impl("step_update", {"step_id": ids[2], "status": "done"})
+    server._twin_impl("step_update", {"step_id": ids[3], "status": "done"})
+    # ids[1] 保持 pending（open）→ resume 有步骤可拷；疑问锚全部已闭环 → 丢弃
+    res = server._twin_impl("task_resume", {"task_id": t["id"]})
+    assert res["ok"]
+    assert res["plan_copied"]["steps"] == 1
+    assert res["plan_copied"]["questions_dropped"] == 1
+    conn = flow.db.connect()
+    try:
+        rows = conn.execute(
+            "SELECT COUNT(*) AS c FROM twin_plan_questions WHERE task_id=?",
+            (res["new_task_id"],)).fetchone()["c"]
+    finally:
+        conn.close()
+    assert rows == 0
+
+
+def test_submit_gate_atomic_recheck(env, monkeypatch):
+    # 收口门 TOCTOU（轮2 P2-1）：预检放行（此刻无计划）→ 窗口内他宿主 plan_set
+    # 建出未闭环步骤（借 update_deliverable 的调用时机注入竞窗）→ 条件 UPDATE
+    # 的 NOT EXISTS 原子拦下
+    t = _mk_task()
+    real_gate = exec_actions.submit_gate
+    calls = {"n": 0}
+
+    def flaky(conn, task_id):
+        calls["n"] += 1
+        return None if calls["n"] == 1 else real_gate(conn, task_id)
+
+    monkeypatch.setattr(exec_actions, "submit_gate", flaky)
+    real_ud = flow.update_deliverable
+
+    def sneak(tid, deliverable, **kw):
+        real_ud(tid, deliverable, **kw)
+        server._twin_impl("plan_set", {"task_id": t["id"],
+                                       "steps": [{"title": "s1"}, {"title": "s2"}]})
+
+    monkeypatch.setattr(flow, "update_deliverable", sneak)
+    blocked = server._twin_impl("task_submit", {"task_id": t["id"],
+                                                "deliverable_md": "# d"})
+    assert blocked["ok"] is False and "未闭环" in blocked["reason"]
+    assert flow.get_task(t["id"])["status"] == "planning"  # 未被打入 submitted
+
+
+def test_task_close_atomic_on_race(env):
+    # close 竞争失败时不再留下已强跳的步骤（轮2 P2-2：状态迁移先于步骤跳过）
+    t = _mk_task()
+    _plan(t["id"])
+    # 模拟并发：任务状态在 close 前已被他宿主迁走 → 前置条件失守 → 无步骤被跳
+    conn = flow.db.connect()
+    try:
+        conn.execute("UPDATE twin_tasks SET status='submitted' WHERE id=?", (t["id"],))
+        conn.commit()
+    finally:
+        conn.close()
+    r = server._twin_impl("task_close", {"task_id": t["id"]})
+    assert r["ok"] is False
+    conn = flow.db.connect()
+    try:
+        skipped = conn.execute(
+            "SELECT COUNT(*) AS c FROM twin_plan_steps WHERE task_id=?"
+            " AND status='skipped'", (t["id"],)).fetchone()["c"]
+    finally:
+        conn.close()
+    assert skipped == 0  # 状态未迁成功 → 步骤原样保留

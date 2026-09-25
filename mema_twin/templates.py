@@ -93,8 +93,21 @@ PLAYBOOK_SECTION_MARKERS = (
 PLAYBOOK_MARKERS = PLAYBOOK_TITLE_MARKERS + tuple(
     f"## {m}" for m in PLAYBOOK_SECTION_MARKERS)
 
-# 工具面板行格式（tool_gap 解析依赖）：`- 工具 `name`：…`
-TOOL_PANEL_LINE_RE = r"(?m)^- 工具 `([^`]+)`"
+# 工具面板行格式（tool_gap 解析依赖）：`- 工具 `name`：…`；允许行首缩进——
+# 编译规则示例行自带两格缩进，模型照抄缩进时解析不能失效（对抗评审轮2 P2-4）
+TOOL_PANEL_LINE_RE = r"(?m)^[ \t]*- 工具 `([^`]+)`"
+
+# 素材包渲染护栏（对抗评审轮2 P2-5）：单字段渲染截断（库内全文保留）+
+# 包级总闸（超出即截掉后位任务并标注，防 2MB reflection 打爆编译上下文）
+_PB_RENDER_MAX = 500
+_PB_MATERIAL_MAX = 60_000
+
+
+def _clip(text: str, limit: int = _PB_RENDER_MAX) -> str:
+    t = (text or "").strip()
+    if len(t) <= limit:
+        return t
+    return t[:limit] + "…（截断）"
 
 
 _PLAYBOOK_RULES = (
@@ -136,31 +149,43 @@ def compile_playbook_material(key: str, active: dict | None,
     else:
         parts.append("（无——这是首个版本 v1）\n")
     parts.append(f"\n## 任务执行记录（{len(tasks)} 个任务）\n\n")
+    included = 0
     if tasks:
         for t in tasks:
             outcome = t.get("outcome") or "未记录"
-            parts.append(f"### 任务 #{t['id']}：{t.get('brief') or ''}"
-                         f"（outcome={outcome}）\n\n")
+            section: list[str] = [
+                f"### 任务 #{t['id']}：{_clip(t.get('brief') or '')}"
+                f"（outcome={outcome}）\n\n"]
             for s in (t.get("steps") or []):
                 line = f"- #{s['seq']} {s['title']} [{s['status']}]"
                 if (s.get("reflection") or "").strip():
-                    line += f"（反思：{s['reflection'].strip()}）"
+                    line += f"（反思：{_clip(s['reflection'])}）"
                 if (s.get("reason") or "").strip():
-                    line += f"（{s['reason'].strip()}）"
-                parts.append(line + "\n")
+                    line += f"（{_clip(s['reason'])}）"
+                section.append(line + "\n")
             for q in (t.get("questions") or []):
                 if q["status"] == "answered":
-                    parts.append(f"- 疑问（已澄清）：{q['question']} → {q['answer']}\n")
+                    section.append(f"- 疑问（已澄清）：{_clip(q['question'])}"
+                                   f" → {_clip(q.get('answer') or '')}\n")
                 else:
-                    parts.append(f"- 疑问（{'blocking，' if q['blocking'] else ''}"
-                                 f"未答）：{q['question']}\n")
+                    section.append(f"- 疑问（{'blocking，' if q['blocking'] else ''}"
+                                   f"未答）：{_clip(q['question'])}\n")
+            if sum(len(p) for p in parts) + sum(len(p) for p in section) > _PB_MATERIAL_MAX:
+                parts.append(f"\n（素材包超限截断：已含 {included}/{len(tasks)} 个任务的"
+                             "记录，其余未带——收窄 reflection 长度或减小 limit 后重取）\n")
+                break
+            parts.extend(section)
+            included += 1
+        if included == 0:
+            parts.append("（无收口任务）\n")
     else:
         parts.append("（无收口任务）\n")
     parts.append(f"\n## 工具使用记录（{len(tool_usage)} 条，按目的分组、组内按宿主分层）\n\n")
     if tool_usage:
         by_purpose: dict[str, list[dict]] = {}
         for u in tool_usage:
-            by_purpose.setdefault(u.get("purpose") or "(未注明目的)", []).append(u)
+            by_purpose.setdefault(_clip(u.get("purpose") or "(未注明目的)", 200),
+                                  []).append(u)
         for purpose, usages in by_purpose.items():
             parts.append(f"- 目的：{purpose}\n")
             by_client: dict[str, list[dict]] = {}
@@ -170,7 +195,7 @@ def compile_playbook_material(key: str, active: dict | None,
                 ok = sum(1 for x in items if x["outcome"] == "success")
                 parts.append(f"  - 宿主 {client}：{ok}/{len(items)} 成功"
                              + ("；备注：" + "；".join(
-                                 f"`{x['tool']}` {x['note']}" for x in items
+                                 f"`{x['tool']}` {_clip(x['note'], 200)}" for x in items
                                  if (x.get("note") or "").strip())
                                 if any((x.get("note") or "").strip() for x in items) else "")
                              + "\n")

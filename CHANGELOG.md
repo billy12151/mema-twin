@@ -40,7 +40,7 @@ P1 执行计划层 / P2 深拷贝与收口 / P3 playbook 闭环）。
   last_used_client，同宿主轻注入（全文+近期验证提示），换宿主重注入（+降级链提示
   +`available_tools_required`），下次 task_start 传 available_tools 服务端逐条比对
   工具面板回 `tool_gap`；playbook 是 advisory，与实际环境冲突按实际执行。
-  `tool_log` 批量记工具经验（1..50，outcome ∈ success/fail/degraded/skipped）。
+  `tool_log` 批量记工具经验（1..50，outcome ∈ success/fail/degraded）。
   pb- 前缀进 code 保留段（validate_code_segment）防与 playbook key 混淆。
 - **P0 升级提示**：`update_monitor` daemon 线程每 24h 拉 GitHub 双通道
   （raw.githubusercontent → contents API 兜底）比对 pyproject 版本，`twin_notices`
@@ -48,12 +48,31 @@ P1 执行计划层 / P2 深拷贝与收口 / P3 playbook 闭环）。
   update_available 同版本 7 天抑制、post_upgrade 真升级发一次（首装建基线不发）；
   版本单源 importlib.metadata（修 0.3.8/0.3.11 drift）回落仓库 pyproject；
   env `MEMA_TWIN_UPDATE_CHECK=0` 关闭。
-- **R0 classify_code 单点收敛**：`db.classify_code(code)` 统一 aud- 特判伪类型分派
+- **R0 classify_code 单点收敛**：`store.classify_code(code)` 统一 aud- 特判伪类型分派
   （此前 ≥8 处散落判定）；compile_actions 两处替换为单函数调用。
 - **SKILL.md/README 同步**：SKILL.md 新增「执行流（v0.4）」段（两档路由、打卡与追认、
   open_questions 咨询流、tool_log 采样规则、playbook advisory 底线、twin_notices
   分诊）；README 设计要点/动作表/环境变量三处同步（新表、7 个新 action、
   update env）；status 响应新增 `plan_stats` 桶。
+- **两轮 review 修复（轮1 8 项 + 轮2 独立对抗评审 1 P1/7 P2）**：status 补
+  `playbook_rejected` 计数面（被拒提示此前引用了不存在的字段）；pending→skipped
+  与 done→skipped 必带 reason（拍板 ⑧ skipped reason 必填）；单一 in_progress
+  不变量折进条件 UPDATE（跨宿主竞窗原子兜底）；收口门折进 submit 条件 UPDATE
+  堵死 TOCTOU（门查后他宿主 plan_set 插步不再绕过）+ task_close 单事务（竞争
+  失败不再留下已强跳步骤）；task_evaluate 工具记录截断恢复每任务口径（SELECT
+  漏 task_id 曾退化成全局 20 条闸，多任务批次后位任务工具证据被永久吞掉）；
+  交互式 playbook_submit 的 G1/G2 违规警告可见化（此前静默丢弃）+ 全无效溯源
+  拒落版（防 source_task_ids=[] 的 active 版令空转阻尼永久失效）；tool_gap
+  解析兼容缩进行（与编译规则示例自洽）；reflection/reason/brief/answer/tool_log
+  字段长度帽 + 素材包 60k 总闸（渲染截断，库内全文保留）；`_find_cycle` 迭代化
+  （深依赖链不再 RecursionError 抛穿）；plan_set 无条件清遗留 open 疑问；深拷贝
+  丢弃锚点全失的僵尸 blocking 疑问并回传 questions_dropped；revision_reason-only
+  如实回 no_changes；blocking 入参严格布尔且必须锚定步骤；task_id/step_id 显式
+  id 范围界（0..2^63-1）；scan_notice 升级双任务口径（评估任务停转同样触发重
+  提醒）；升级检查常驻进程链式续检（兑现「daemon 24h 比对」）；首次注入文案
+  如实（不再对从未使用的 playbook 谎称「其他宿主使用过」）；测试防真实联网；
+  .gitignore 挡 playbooks/。266 绿（基线 197 + exec 37 / playbook 19 /
+  update_monitor 12 / scan 评审回归）。
 - 测试 247 绿（基线 197 + 新增 test_exec 25 / test_playbook 13 / test_update_monitor 12）。
 
 ## [0.3.11] — 2026-09-14
