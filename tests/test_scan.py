@@ -47,16 +47,24 @@ def test_naive_timestamp_does_not_crash():
 def test_spec_single_task():
     spec = scan.SCHEDULED_TASKS_SPEC
     names = [t["name"] for t in spec["tasks"]]
-    assert names == ["twin_nightly_compile"]  # twin_scan 已退役
+    # v0.4：编译 + 执行经验评估两任务（twin_scan 已退役；职责分离、失败互不拖累）
+    assert names == ["twin_nightly_compile", "twin_nightly_playbook_evaluate"]
     nightly = spec["tasks"][0]
     assert nightly["cadence"] == "daily"
     assert [c["action"] for c in nightly["calls"]] == ["status", "pending", "compile", "submit", "compile", "submit"]
+    evaluate = spec["tasks"][1]
+    assert evaluate["cadence"] == "daily"
+    assert [c["action"] for c in evaluate["calls"]] == ["status", "task_evaluate", "playbook_submit"]
     assert "twin" in scan.AGENT_INSTRUCTION
     assert "夜间 persona 编译" in scan.AGENT_INSTRUCTION
+    assert "执行经验评估" in scan.AGENT_INSTRUCTION
     assert "每周治理扫描" not in scan.AGENT_INSTRUCTION  # 单任务口径
     # 空转阻尼与被拒语义进了 spec（宿主快照同步的对照源）
     submit_rule = nightly["calls"][3]["data"]["rule"]
     assert "validation_failed" in submit_rule and "no_new_evidence" in submit_rule
+    pb_rule = evaluate["calls"][2]["data"]["rule"]
+    assert "validation_failed" in pb_rule and "no_new_evidence" in pb_rule
+    assert evaluate["calls"][2]["data"]["origin"] == "scheduled"
     assert "nightly_rejected" in submit_rule
     assert "pending_count" in submit_rule  # 汇总输出带治理计数（twin_scan 退役归置）
     assert "保守封套" in nightly["calls"][2]["data"]["rule"]  # 夜间不做无因重组

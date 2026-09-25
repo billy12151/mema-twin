@@ -379,7 +379,7 @@ def _action_submit(data: dict) -> dict:
                                    prompt_md,
                                    source_ids,
                                    model=str(data.get("model") or ""))
-        if store.split_audience_profile(code) is None:
+        if store.classify_code(code) == store.CODE_KIND_WORK_TYPE:
             marked = db.mark_compiled(conn, source_ids, rec["version"], code)
         else:
             # 画像派生不消耗证据（AR-2）：aud- 行永远保持 uncompiled 给类型编译
@@ -388,7 +388,7 @@ def _action_submit(data: dict) -> dict:
         conn.close()
     rec["ok"] = True
     rec["supersedes"] = rec.pop("superseded_version")  # 落版即裁决：本版取代的旧 active 版本
-    is_profile = store.split_audience_profile(code) is not None
+    is_profile = store.classify_code(code) == store.CODE_KIND_AUDIENCE_PROFILE
     if is_profile:
         rec["derived"] = True
         rec["note"] = ("受众画像版本：派生自该受众全部证据，不消耗证据"

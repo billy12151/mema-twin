@@ -12,6 +12,12 @@ from . import db, taxonomy
 # 复用版本/rollback/镜像全套；画像派生自该受众的全部证据，不消耗证据。
 AUD_PREFIX = "aud-"
 
+# 键空间分派（v0.4 R0）：twin_prompt_versions 里只有真类型与受众画像伪类型两种；
+# playbook 不在本键空间（独立表 twin_playbooks），无需第三分支。pb- 前缀已在
+# validate_code_segment 保留（防 work_type code 撞 playbook 键名空间）。
+CODE_KIND_WORK_TYPE = "work_type"
+CODE_KIND_AUDIENCE_PROFILE = "audience_profile"
+
 
 def audience_profile_code(audience_code: str) -> str:
     return f"{AUD_PREFIX}{audience_code}"
@@ -23,6 +29,13 @@ def split_audience_profile(work_type: str) -> str | None:
     if wt.startswith(AUD_PREFIX) and len(wt) > len(AUD_PREFIX):
         return wt[len(AUD_PREFIX):]
     return None
+
+
+def classify_code(code: str) -> str:
+    """伪类型分派单点：新增伪类型时在此扩展，替换散落的字符串特判（R0 收敛）。"""
+    return (CODE_KIND_AUDIENCE_PROFILE
+            if split_audience_profile(code) is not None
+            else CODE_KIND_WORK_TYPE)
 
 
 def _is_known_audience(conn: sqlite3.Connection, audience_code: str) -> bool:

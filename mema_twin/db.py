@@ -86,12 +86,14 @@ def now_iso() -> str:
 def validate_code_segment(value: str) -> str:
     """canonical code 会进文件路径（prompts/<code>/）、meta 键与 hint 内嵌的
     调用示例：白名单字符集（轮2 P3-1/P3-2）。aud- 前缀保留给受众画像伪类型
-    （v0.3.6 AR-1）：真类型不许伪装成画像。"""
+    （v0.3.6 AR-1）；pb- 前缀保留给 playbook 键空间（v0.4）：真类型不许伪装。"""
     v = (value or "").strip()
     if not v or len(v) > 64 or not _CODE_RE.match(v):
         raise ValueError(f"unsafe code segment: {value!r}（仅允许字母/数字/下划线/连字符）")
     if v.startswith("aud-"):
         raise ValueError(f"保留前缀：{value!r}（aud- 专属受众画像伪类型，不可作普通 code）")
+    if v.startswith("pb-"):
+        raise ValueError(f"保留前缀：{value!r}（pb- 专属 playbook 键空间，不可作普通 code）")
     return v
 
 
@@ -130,7 +132,9 @@ def _migrate(conn: sqlite3.Connection, key: str) -> None:
     ② v0.3.8 audience/self 行摘除别名「私人」（仅移除该项，不整行覆写——保留治理追加）；
     ③ v0.3.8 twin_pending_values 删旧列 first_seen_memory_id（归一门打回发生在写入之前）；
     ④ v0.3.9 work_type 域重划（#958 按产出物目标六域）：内置 33 码 domain 对齐
-      taxonomy 播种源（UPDATE 仅 is_custom=0 行——custom 码的 domain 不动）。
+      taxonomy 播种源（UPDATE 仅 is_custom=0 行——custom 码的 domain 不动）；
+    ⑤ v0.4 twin_tasks 加 outcome / available_tools 两列（旧库 ALTER 补列；新库
+      DDL 已含——flow.ensure_schema 建表可能晚于本迁移，探列前先探表存在）。
     """
     if key in _migrated:
         return
@@ -161,6 +165,14 @@ def _migrate(conn: sqlite3.Connection, key: str) -> None:
             "UPDATE twin_types SET domain=? WHERE type_kind='work_type' AND code=? AND is_custom=0",
             (t.domain, t.code),
         )
+    has_tasks = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='twin_tasks'"
+    ).fetchone() is not None
+    if has_tasks:
+        task_cols = {r["name"] for r in conn.execute("PRAGMA table_info(twin_tasks)")}
+        for col in ("outcome", "available_tools"):
+            if col not in task_cols:
+                conn.execute(f"ALTER TABLE twin_tasks ADD COLUMN {col} TEXT")
     conn.commit()
     _migrated.add(key)
 

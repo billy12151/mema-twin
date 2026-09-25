@@ -52,13 +52,75 @@ CREATE TABLE IF NOT EXISTS twin_tasks(
   parent_task_id INTEGER,
   iteration INTEGER NOT NULL DEFAULT 0,
   revision_reason TEXT,
-  loop_id INTEGER
+  loop_id INTEGER,
+  outcome TEXT,
+  available_tools TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_twin_tasks_status ON twin_tasks(status);
 CREATE TABLE IF NOT EXISTS twin_meta(
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS twin_plan_steps(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id INTEGER NOT NULL,
+  seq INTEGER NOT NULL,
+  title TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  depends_on TEXT NOT NULL DEFAULT '[]',
+  status TEXT NOT NULL DEFAULT 'pending',
+  reason TEXT,
+  reflection TEXT,
+  backfilled INTEGER NOT NULL DEFAULT 0,
+  origin_step_id INTEGER,
+  created_at TEXT NOT NULL,
+  decided_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_twin_plan_steps_task
+  ON twin_plan_steps(task_id, status);
+CREATE TABLE IF NOT EXISTS twin_plan_questions(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id INTEGER NOT NULL,
+  question TEXT NOT NULL,
+  step_ids TEXT NOT NULL DEFAULT '[]',
+  blocking INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'open',
+  answer TEXT,
+  answered_at TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_twin_plan_questions_task
+  ON twin_plan_questions(task_id, status);
+CREATE TABLE IF NOT EXISTS twin_playbooks(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  key TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  content_md TEXT NOT NULL,
+  source_task_ids TEXT NOT NULL DEFAULT '[]',
+  model TEXT NOT NULL DEFAULT '',
+  origin TEXT,
+  status TEXT NOT NULL DEFAULT 'active',
+  last_used_client TEXT,
+  last_used_at TEXT,
+  created_at TEXT NOT NULL,
+  activated_at TEXT,
+  UNIQUE(key, version)
+);
+CREATE INDEX IF NOT EXISTS idx_twin_playbooks_key
+  ON twin_playbooks(key, status);
+CREATE TABLE IF NOT EXISTS twin_tool_usage(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id INTEGER,
+  tool TEXT NOT NULL,
+  purpose TEXT NOT NULL DEFAULT '',
+  outcome TEXT NOT NULL,
+  note TEXT NOT NULL DEFAULT '',
+  skill_digest TEXT NOT NULL DEFAULT '',
+  client TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_twin_tool_usage_task
+  ON twin_tool_usage(task_id);
 """
 
 _schema_ready: set[str] = set()  # 已建表的 db 路径（测试会切 MEMA_TWIN_DB_PATH，不能单布尔）
@@ -154,7 +216,8 @@ def insert_task(*, brief: str, status: str,
                 persona_version: int | None = None,
                 parent_task_id: int | None = None, iteration: int = 0,
                 revision_reason: str | None = None, client: str | None = None,
-                session_todos: list[dict] | None = None) -> dict:
+                session_todos: list[dict] | None = None,
+                available_tools: list[str] | None = None) -> dict:
     dims = dims or {}
 
     def code(kind: str) -> str | None:
@@ -167,8 +230,9 @@ def insert_task(*, brief: str, status: str,
             "INSERT INTO twin_tasks(work_type, audience, purpose,"
             " work_type_raw, audience_raw, purpose_raw, brief, interpreted_intent,"
             " deliverable_md, todos, status, reason, client, agent_id,"
-            " persona_version, created_at, parent_task_id, iteration, revision_reason)"
-            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " persona_version, created_at, parent_task_id, iteration, revision_reason,"
+            " available_tools)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (code("work_type"), code("audience"), code("purpose"),
              str((dims.get("work_type") or {}).get("raw") or ""),
              str((dims.get("audience") or {}).get("raw") or ""),
@@ -179,7 +243,9 @@ def insert_task(*, brief: str, status: str,
              client or sink._env_client(),
              "mema-twin",
              persona_version, db.now_iso(), parent_task_id, iteration,
-             (revision_reason or "").strip() or None),
+             (revision_reason or "").strip() or None,
+             json.dumps(available_tools, ensure_ascii=False)
+             if available_tools is not None else None),
         )
         task_id = int(cur.lastrowid)
         conn.commit()
@@ -277,6 +343,19 @@ def set_deliverable_path(task_id: int, path: str) -> None:
     try:
         conn.execute("UPDATE twin_tasks SET deliverable_path=? WHERE id=?",
                      (path, int(task_id)))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def mark_outcome(task_id: int, outcome: str) -> None:
+    """任务结果列（v0.4）：success=task_submit 收口；failed/superseded=task_close。
+    失败任务不会走 submit——失败信号必须由 close 显式写入，否则 outcome 永远
+    NULL、与「未完成」不可区分（评审 R1-6）。"""
+    conn = db.connect()
+    try:
+        conn.execute("UPDATE twin_tasks SET outcome=? WHERE id=?",
+                     (outcome, int(task_id)))
         conn.commit()
     finally:
         conn.close()

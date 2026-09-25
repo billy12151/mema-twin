@@ -83,6 +83,32 @@ live in twin's own SQLite with a file mirror for fallback and human review.
   的证据被作废触发 `persona_stale` 夜间自动重编，受众侧经 audience_stale 计数差重抽象；
   素材包常驻「已作废条款」节防旧版参考带回作废条款。status 附 open_conflicts/open_tasks
   治理计数。
+- **执行计划层（v0.4）**：建档任务默认走计划（两档路由：无重复执行价值的一次性事务
+  才豁免建档，既已建档必须 `plan_set` 后动手）——plan_set 落 `twin_plan_steps` 六态
+  步骤（pending/in_progress/done/failed/blocked/skipped；done∪skipped=闭环）与
+  open_questions，直接放行无审批门；to=in_progress 过三门（blocking 疑问 → 依赖
+  （依赖满足=done∪skipped）→ 单一 in_progress）；pending 直跳 done/failed 自动标
+  backfilled（允许补打卡，审计可见）；failed 必带 reflection（服务端硬门）。收口门：
+  task_submit 建档任务未闭环步骤整笔打回（附 open_steps 清单），闭环后 outcome=success
+  落任务行；task_close 显式关闭时未闭环步骤批量 skipped(reason=closed)。plan_revise
+  支持 remove/update/add/answers 四类修订单次提交（固定顺序执行），answers 写回
+  open_questions 解锁 blocking；task_resume/task_revise 深拷贝未完结步骤到新 task_id
+  （origin_step_id 溯源、depends_on 重映射，旧代已终结依赖剥除）。中断续作历史
+  （transitions）只增不删。
+- **执行经验 playbook 闭环（v0.4）**：任务闭环后夜间任务 `task_evaluate` 按水位
+  （twin_meta 单调推进）打包执行记录（reflection/tool_log/步骤路径）出素材包 → 会话
+  模型提炼 playbook（per work_type，独立表 `twin_playbooks`，与 persona 版本互不相扰）
+  → `playbook_submit` 落版（`playbooks/<key>/` 镜像；origin=scheduled 过验证门：素材
+  回声 G1/无标题 G2/溯源校验/空转阻尼，交互式只警告）；task_start/task_resume 注入
+  active playbook（work_type 两级回退到 global）——**连续性分级**：同一宿主
+  （last_used_client）重复使用只轻注入全文+近期验证提示，换宿主重注入并要求
+  `available_tools`（下次 task_start 传，服务端逐条比对工具面板回 `tool_gap`）；
+  playbook 是 advisory 参考，与实际环境冲突按实际执行。`playbook_rollback` 同
+  persona rollback 语义。
+- **升级提示（v0.4）**：daemon 线程每 24h 拉 GitHub（raw + API 双通道）比对 pyproject
+  版本，`twin_notices` 随 ok 响应携带（update_available 7 天/版本抑制；post_upgrade
+  首装建基线不发）；版本单源 importlib.metadata（回落仓库 pyproject）。env
+  `MEMA_TWIN_UPDATE_CHECK=0` 关闭。
 
 ## 工具（单工具动作式）
 
@@ -95,12 +121,18 @@ live in twin's own SQLite with a file mirror for fallback and human review.
 | `compile` | 取编译素材包（旧版本 prompt 编译参考 + **全部在世证据**（全量投影）+ 已作废条款清单 + 编译规则（稳定律/硬预算/变更分级）），独立会话执行、做完即弃 |
 | `submit` | 提交编译产物，落版本并写镜像（返回 `supersedes`），回写证据编译标记；夜间定时任务落版传 `origin=scheduled`（过**验证门**：素材回声/缺分区标题拒绝、无新证据空转阻尼拒绝，均在 status 的 nightly_rejected 累计；证据未全覆盖与交互式违规只警告） |
 | `rollback` | 回滚 persona 版本（零阻力）：`version` 省略回上一版，传 n 回指定版；不删历史、版本号不回收 |
-| `status` | 版本概况（含体积/超预算标记）、受众画像（audience_profiles）与重抽象队列（audience_stale）、条款作废待重编（persona_stale）、未编译统计、pending 数量（归一门待裁票据）、夜间被拒计数（nightly_rejected）、open 冲突/进行中任务计数、定时任务安装提醒 |
+| `status` | 版本概况（含体积/超预算标记）、受众画像（audience_profiles）与重抽象队列（audience_stale）、条款作废待重编（persona_stale）、未编译统计、pending 数量（归一门待裁票据）、夜间被拒计数（nightly_rejected）、open 冲突/进行中任务计数、执行计划统计（plan_stats：任务/步骤各态/backfilled/open blocking 疑问/tool_usage/playbooks）、定时任务安装提醒 |
 | `taxonomy` | 列枚举清单（动态：含治理追加别名与自建 canonical；kind ∈ work_type/audience/purpose） |
 | `pending` / `resolve` | 归一门待裁票据的查看与治理（map=归一并进别名表 / canonicalize=立新码入列 / reject=不入体系且不得重试原值） |
-| `task_start` | 开工建档并注入 persona prompt + 未编译增补（`have_persona_version` 申报同会话已注入版本，未变则省略重复注入；带 audience 时注入受众画像 `audience_profile_md`/雏形；audience/purpose 可选，给了值必须在清单内） |
-| `task_submit` | 提交交付稿并收口（**submit 即终点**，v0.3.8 无评审环），落盘 `deliverables/task-N.md`；交付后用户反馈走 twin.write |
-| `task_resume` / `task_revise` / `task_close` | 续作进行中任务（仅 planning，恢复 todos）/ 已交付任务修订返工（仅 submitted，子任务回 planning 记 lineage）/ 显式关闭进行中任务 |
+| `task_start` | 开工建档并注入 persona prompt + 未编译增补 + active playbook（连续性分级）；`have_persona_version` 申报同会话已注入版本，未变则省略重复注入；带 audience 时注入受众画像 `audience_profile_md`/雏形；audience/purpose 可选，给了值必须在清单内；可选 `available_tools`（工具名列表，服务端与 playbook 工具面板比对回 `tool_gap`） |
+| `plan_set` | 建档任务列步骤计划（v0.4 执行计划层）：steps（title/depends_on）+ open_questions（可标 blocking），直接放行开工；重复调用即重排（未完结步骤标 skipped(replanned)，done 保留） |
+| `step_update` | 步骤状态机打卡（六态；to=in_progress 过三门：blocking 疑问→依赖→单一 in_progress）；done/failed 闭环（failed 必带 reflection；pending 直跳标 backfilled 追认） |
+| `plan_revise` | 修订单次提交：steps_remove（仅 pending 且不被本代未删步骤依赖）/ steps_update（改 deps/状态走状态机）/ steps_add / answers（open_questions 写回解锁 blocking） |
+| `tool_log` | 批量记工具经验（tool/purpose/outcome ∈ success/fail/degraded/skipped，可附 note/skill_digest），task_evaluate 素材来源 |
+| `task_submit` | 提交交付稿并收口（**submit 即终点**，v0.3.8 无评审环），落盘 `deliverables/task-N.md`；建过计划的任务收口门拦未闭环步骤；outcome 自动 success；open blocking 疑问仅警告；交付后用户反馈走 twin.write |
+| `task_resume` / `task_revise` / `task_close` | 续作进行中任务（仅 planning，恢复 todos + 深拷贝未完结计划到新 task_id）/ 已交付任务修订返工（仅 submitted，子任务回 planning 记 lineage + 同款深拷贝）/ 显式关闭进行中任务（outcome=failed\|superseded，未闭环步骤批量 skipped(closed)） |
+| `task_evaluate` | 打包水位后已闭环任务的执行记录（reflection/tool_log/步骤路径）出 playbook 素材包（夜间任务调用；水位单调，可显式补评估） |
+| `playbook_submit` / `playbook_rollback` | playbook 落版（origin=scheduled 过验证门：溯源/素材回声 G1/无标题 G2/空转阻尼；交互式只警告）与回滚（省略 version 回上一版） |
 | `task_recent` / `task_get` | 任务列表 / 单任务全量 |
 | `todo` | 会话 todo 读写（plan-mode 同款语义） |
 
@@ -160,6 +192,8 @@ uv venv && uv pip install -e ".[test]"
 | `MEMA_TWIN_TRANSPORT` | `stdio` | `stdio`（默认，单机零运维）或 `http`（多 Agent 共接，mema 同款形态） |
 | `MEMA_TWIN_HTTP_HOST` / `MEMA_TWIN_HTTP_PORT` | `127.0.0.1` / `8765` | http 模式监听地址；端点 `/mcp`，无状态直调（免 initialize） |
 | `MEMA_TWIN_CLIENT_ID` | `zcode` | 宿主客户端默认身份（zcode/kimi/...）。http 模式下连接头 `X-Mema-Client` 是权威身份（`data.client` 只能与头一致或省略，不一致打回，堵跨宿主冒充）；stdio 无头时 `data.client` > 本 env。agent_id 与 mema 侧偏好存储桶均写死为 `mema-twin`（子 agent 范式）——按 agent_id 一次查出所有经 twin 落库的偏好，配合 `twin:*` 标签双保险 |
+| `MEMA_TWIN_UPDATE_CHECK` | 开启 | `0`/`false`/`off` 关闭版本更新检查（daemon 线程，24h 一次，失败静默） |
+| `MEMA_TWIN_UPDATE_STATE_PATH` | `~/.local/share/mema-twin/update_state.json` | 更新检查状态文件（抑制窗口/升级基线） |
 
 ## 多 Agent 共接（http 模式）
 
