@@ -16,8 +16,9 @@ import anyio.to_thread
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, TextContent
 
-from . import identity, pref_actions, scan, sink, task_actions, templates
-from . import compile_actions
+from . import identity, playbook_actions, pref_actions, scan, sink, task_actions
+from . import templates, update_monitor
+from . import compile_actions, exec_actions
 
 mcp = FastMCP("mema-twin", stateless_http=True)  # http 模式免 initialize 直调（mema 同款）
 
@@ -29,7 +30,9 @@ async def twin(action: str, data: dict | None = None) -> CallToolResult:
 
     动作：write / get / compile / submit / rollback / status / taxonomy / pending /
     resolve / void / task_start / task_submit / task_resume / task_revise /
-    task_close / task_recent / task_get / todo / help。
+    task_close / task_recent / task_get / todo / plan_set / step_update /
+    plan_revise / tool_log / task_evaluate / playbook_submit / playbook_rollback /
+    help。
     先 twin(action="help") 查看各动作参数与引导。compile 返回素材包，由当前会话模型
     编译（建议在强模型会话中执行），submit 提交回库落版本并写文件镜像。
     """
@@ -64,6 +67,20 @@ def _single_text_result(result: dict) -> CallToolResult:
                         default=str))])
 
 
+def _attach_twin_notices(result) -> None:
+    """升级提示出口（v0.4 P0）：仅 ok 响应附 twin_notices——notice 按版本抑制键
+    存续，无丢失风险，下次成功响应必然再出。与 mema_notices 完全独立的键，互不
+    干扰；两数组同现时各自独立分诊。本函数任何故障不击穿已成功的工具响应。"""
+    if not isinstance(result, dict) or not result.get("ok"):
+        return
+    try:
+        ns = update_monitor.consume_notices()
+    except Exception:  # 更新检查是搭车件，绝不让它把 ok 变 internal_error
+        return
+    if ns:
+        result["twin_notices"] = ns
+
+
 def _twin_impl(action: str, data: dict | None = None) -> dict:
     data = data or {}
     handler = _ACTIONS.get(action)
@@ -85,6 +102,7 @@ def _twin_impl(action: str, data: dict | None = None) -> dict:
         if notices and isinstance(result, dict):
             result["mema_notices"] = notices
             result["mema_notices_guidance"] = _notices_guidance(notices)
+        _attach_twin_notices(result)
         return result
     except sink.SinkError as e:
         return {"ok": False, "error": "mema_unreachable", "reason": str(e)}
@@ -228,10 +246,46 @@ def _action_help(data: dict) -> dict:
                            "revision_reason 至少其一；子任务回 planning 重走执行并记 lineage"
                            "（不恢复 todos、不重注入 persona，需要时重新 task_start）；"
                            "修订反馈中的可复用偏好走 twin.write 沉淀。",
-            "task_close": "显式关闭进行中任务（仅 planning），历史保留可审计。",
+            "task_close": "显式关闭进行中任务（仅 planning），历史保留可审计。"
+                          "可选 outcome ∈ failed|superseded（缺省 superseded）——"
+                          "失败要显式标 failed，否则结果列与未完成任务无法区分；"
+                          "关闭时未闭环步骤自动按 closed 跳过。",
             "task_recent": "最近任务列表。参数 limit（默认 10）。",
             "task_get": "取单个任务全量。task_id。",
             "todo": "会话 todo 读写（plan-mode 同款语义：整体替换，至多一条 in_progress）。传 todos 替换，不传读取。",
+            "plan_set": "建执行计划（开工第一件事；凡建档任务默认走计划，拿不准时建）。"
+                        "必填 task_id/steps（[{title, description?, depends_on?}]，"
+                        "depends_on 引用 1-based 序号，不许自引用/成环）；"
+                        "可选 open_questions（[{question, step_ids?, blocking?}]，"
+                        "blocking 缺省 false）——没把握、确认不了的点列在这里，要紧的"
+                        "标 blocking，先与用户澄清，答复经 plan_revise(answers=…) 写回。"
+                        "响应即可开工，无审批门。重复调用=重建计划（旧未完结步骤按 "
+                        "replanned 跳过，done 历史保留）。",
+            "step_update": "步骤打卡。step_id/status（六态：pending/in_progress/done/"
+                           "failed/blocked/skipped）；skipped/blocked 必填 reason；"
+                           "failed 必填 reflection（服务端硬门）；pending 直跳 done/failed"
+                           " 自动标 backfilled（追认合法）。三门：blocking 疑问未解答、"
+                           "依赖未闭环、已有单一 in_progress 时推进会被拒。",
+            "plan_revise": "修订计划（仅 planning 且已建计划）。steps_add / "
+                           "steps_update（可改 title/description/depends_on/status，"
+                           "状态迁移同 step_update 规则）/ steps_remove（仅未开工且未被"
+                           "依赖可删）/ answers（[{question_id, answer}] 写回 owner 答复"
+                           "并解锁 blocking 步骤）/ revision_reason 至少其一。",
+            "tool_log": "批量记录工具使用（只记失败/重试/降级与首次成功的非常规路径，"
+                        "常规重复成功不记）。entries 1..50 条：[{tool, purpose, "
+                        "outcome: success|fail|degraded, note?, skill_digest?}]；"
+                        "可选 task_id。",
+            "task_evaluate": "取执行经验评估素材包（playbook 编译入口，夜间任务或手动"
+                             "触发）。可选 task_ids 显式指定（补评估），或 limit（默认 "
+                             "10，水位之后的未评估收口任务）；响应 watermark_moved_to。"
+                             "按素材包编译出 content_md 后 playbook_submit；无新经验不提交。",
+            "playbook_submit": "提交 playbook 落版。必填 key（work_type code 或 "
+                               "'global'）/content_md/source_task_ids（溯源任务 id，防"
+                               "幻觉路径）；夜间任务 origin=scheduled（过验证门：溯源校验/"
+                               "回声/标题/空转阻尼），交互式违规只警告。文件镜像 "
+                               "playbooks/<key>/。",
+            "playbook_rollback": "回滚 playbook 版本（零阻力，同 rollback 语义）。key 必填；"
+                                 "version 省略回上一版。",
             "help": "本帮助。",
         },
         "write_guidance": templates.WRITE_GUIDANCE,
@@ -258,6 +312,13 @@ _ACTIONS = {
     "task_recent": task_actions._action_task_recent,
     "task_get": task_actions._action_task_get,
     "todo": task_actions._action_todo,
+    "plan_set": exec_actions._action_plan_set,
+    "step_update": exec_actions._action_step_update,
+    "plan_revise": exec_actions._action_plan_revise,
+    "tool_log": exec_actions._action_tool_log,
+    "task_evaluate": playbook_actions._action_task_evaluate,
+    "playbook_submit": playbook_actions._action_playbook_submit,
+    "playbook_rollback": playbook_actions._action_playbook_rollback,
     "help": _action_help,
 }
 
@@ -272,6 +333,8 @@ def main() -> None:
     data.client > env）。
     """
     import os
+    # 升级检查（v0.4 P0）：daemon 线程后台跑，不阻塞启动；禁用 env 下内部 no-op
+    update_monitor.maybe_start_check_if_due()
     # 启动即校验 env 兜底身份，脏值清晰报错退出，不留给运行期中途炸
     try:
         sink._env_client()

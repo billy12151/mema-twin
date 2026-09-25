@@ -78,6 +78,106 @@ MATERIAL_SECTION_MARKERS = (
 MATERIAL_MARKERS = MATERIAL_TITLE_MARKERS + tuple(
     f"## {m}" for m in MATERIAL_SECTION_MARKERS)
 
+# ---- playbook 素材包（v0.4 P3，独立于 persona 编译链路）----
+
+BUDGET_PB_CHARS = 6000
+BUDGET_PB_RULES = 50
+
+PLAYBOOK_TITLE_MARKERS = ("mema-twin playbook 素材包",)
+PLAYBOOK_SECTION_MARKERS = (
+    "编译规则",
+    "现行 playbook",
+    "任务执行记录",
+    "工具使用记录",
+)
+PLAYBOOK_MARKERS = PLAYBOOK_TITLE_MARKERS + tuple(
+    f"## {m}" for m in PLAYBOOK_SECTION_MARKERS)
+
+# 工具面板行格式（tool_gap 解析依赖）：`- 工具 `name`：…`
+TOOL_PANEL_LINE_RE = r"(?m)^- 工具 `([^`]+)`"
+
+
+_PLAYBOOK_RULES = (
+    "只写本素材包记录过的真实执行经验；每个条目末尾用 `<!-- task: <task_id> -->`"
+    " 标注来源任务，写不出来源的条目不得出现（幻觉防御）。",
+    "工具条目三段式，行格式严格如下（tool_gap 依赖此格式解析）：",
+    "  - 工具 `tool_name`：<目的>；首选 <做法>；降级 <替代>；兜底 <人工/放弃>。",
+    "  绑意图不绑工具名：同一目的一行；多条真实路径并列可拆多行。",
+    "「失败→反思→对策」模式：从步骤 reflection 提炼，写成条件化规避规则，"
+    "同样标 `<!-- task: N -->`。",
+    "与现行 active playbook 冲突的新经验以新经验为准；未复现的旧条目保留。",
+    "按固定分区组织：工具面板 / 路径与顺序 / 失败规避 / owner 澄清记录"
+    "（open_questions 的高频问答沉淀）。",
+    "跨宿主路径要注明验证宿主（client）；宿主能力差异导致的成败不可归因于路径本身。",
+    f"硬预算：正文 ≤{BUDGET_PB_CHARS} 字符或 ≤{BUDGET_PB_RULES} 条（顶层列表行）；"
+    "超限必须合并或淘汰，淘汰须写明依据。简练优先，示例只留最有代表性的一个。",
+    "输出纯 Markdown 正文，不要复述本素材包。",
+)
+
+
+def compile_playbook_material(key: str, active: dict | None,
+                              tasks: list[dict], tool_usage: list[dict]) -> str:
+    """playbook 评估素材包（task_evaluate 用）。tasks 每项含 brief/outcome/
+    steps（含 reflection）/questions 时序；tool_usage 按 purpose 分组、组内按
+    client 分层（宿主能力差异是混淆变量，评审 A7）。"""
+    key_label = key if key == "global" else f"{key}"
+    parts: list[str] = []
+    parts.append(f"# mema-twin playbook 素材包：{key_label}\n\n")
+    parts.append("> 用当前会话模型把下方执行记录评估成 playbook 更新，"
+                 "再以 twin(action=\"playbook_submit\") 提交落版；"
+                 "无值得沉淀的新经验则不提交。\n")
+    parts.append("\n## 编译规则\n\n")
+    for r in _PLAYBOOK_RULES:
+        parts.append(f"- {r}\n")
+    parts.append("\n## 现行 playbook（编译参考，非执行依据）\n\n")
+    if active:
+        parts.append(f"（v{active.get('version')}；你的新稿落版后即取代它）\n\n"
+                     f"```markdown\n{active.get('content_md') or ''}\n```\n")
+    else:
+        parts.append("（无——这是首个版本 v1）\n")
+    parts.append(f"\n## 任务执行记录（{len(tasks)} 个任务）\n\n")
+    if tasks:
+        for t in tasks:
+            outcome = t.get("outcome") or "未记录"
+            parts.append(f"### 任务 #{t['id']}：{t.get('brief') or ''}"
+                         f"（outcome={outcome}）\n\n")
+            for s in (t.get("steps") or []):
+                line = f"- #{s['seq']} {s['title']} [{s['status']}]"
+                if (s.get("reflection") or "").strip():
+                    line += f"（反思：{s['reflection'].strip()}）"
+                if (s.get("reason") or "").strip():
+                    line += f"（{s['reason'].strip()}）"
+                parts.append(line + "\n")
+            for q in (t.get("questions") or []):
+                if q["status"] == "answered":
+                    parts.append(f"- 疑问（已澄清）：{q['question']} → {q['answer']}\n")
+                else:
+                    parts.append(f"- 疑问（{'blocking，' if q['blocking'] else ''}"
+                                 f"未答）：{q['question']}\n")
+    else:
+        parts.append("（无收口任务）\n")
+    parts.append(f"\n## 工具使用记录（{len(tool_usage)} 条，按目的分组、组内按宿主分层）\n\n")
+    if tool_usage:
+        by_purpose: dict[str, list[dict]] = {}
+        for u in tool_usage:
+            by_purpose.setdefault(u.get("purpose") or "(未注明目的)", []).append(u)
+        for purpose, usages in by_purpose.items():
+            parts.append(f"- 目的：{purpose}\n")
+            by_client: dict[str, list[dict]] = {}
+            for u in usages:
+                by_client.setdefault(u.get("client") or "(未知宿主)", []).append(u)
+            for client, items in by_client.items():
+                ok = sum(1 for x in items if x["outcome"] == "success")
+                parts.append(f"  - 宿主 {client}：{ok}/{len(items)} 成功"
+                             + ("；备注：" + "；".join(
+                                 f"`{x['tool']}` {x['note']}" for x in items
+                                 if (x.get("note") or "").strip())
+                                if any((x.get("note") or "").strip() for x in items) else "")
+                             + "\n")
+    else:
+        parts.append("（无工具使用记录）\n")
+    return "".join(parts)
+
 
 def compile_prompt_material(work_type: str, work_type_zh: str,
                             current: dict | None, evidence: list[dict],

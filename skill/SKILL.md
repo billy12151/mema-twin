@@ -1,6 +1,6 @@
 ---
 name: mema-twin
-description: 个人分身：工作类偏好沉淀与 persona prompt 编译，经交付任务流注入执行。用户修改/审阅工作产物后，把其中可复用的偏好合并沉淀到 twin.write（禁止再同步本地记忆文档）；开工前 task_start 取分身 prompt 并建档；版本更新在用户要求或夜间编译定时任务自动执行时走 compile/submit。
+description: 个人分身：工作类偏好沉淀与 persona prompt 编译，经交付任务流注入执行；v0.4 起带执行计划层（两档路由、步骤打卡与防跳步门、open_questions 咨询 owner、执行经验 playbook 闭环）。用户修改/审阅工作产物后，把其中可复用的偏好合并沉淀到 twin.write（禁止再同步本地记忆文档）；开工前 task_start 取分身 prompt 并建档；版本更新在用户要求或夜间编译定时任务自动执行时走 compile/submit。
 ---
 
 # mema-twin 使用引导
@@ -69,6 +69,28 @@ description: 个人分身：工作类偏好沉淀与 persona prompt 编译，经
   该提醒也兼作**停转保险丝**：夜间任务 7 天没跑过会重新出现
 - **首次**交付产出物时提醒一次（不是每次）：后续修改尽量交给 Agent 而非手动改，
   每次修改都是一次偏好沉淀机会
+
+## 执行流（v0.4：计划、打卡、疑问升级）
+
+- **两档路由（必须遵守）**：凡 task_start 建档的任务默认属重复执行型工作——开工前
+  **必须**先 `twin(action="plan_set")` 列出步骤计划再动手。唯一豁免是无重复执行价值的
+  一次性事务（问候、查即时信息、无产出物的一问一答），这类不建档；**既已建档即默认走
+  计划，没有"这个任务比较简单"的例外**。拿不准要不要建计划时，建。
+- plan_set 直接放行开工，无审批门。计划里没把握、或你确认不了的点，写进 open_questions
+  （要紧的标 `blocking=true`）**先与用户澄清再推进关联步骤**（服务端会拦）；答复经
+  `plan_revise(answers=…)` 写回解锁。任务完成后 plan_set 的 steps 逐条
+  `step_update` 打卡：done / failed（**必须带 reflection**——失败原因与下次对策，服务端
+  硬门）/ skipped（带 reason）。跳过打卡直接干完的属追认，补 step_update(done) 即可
+  （服务端标 backfilled，不影响收口）；收口时未闭环步骤会被拦并给出清单，逐条对账即可
+- 中途换路/砍步骤 → `plan_revise` 改计划，不要静默绕过依赖
+- 只记值得记的工具经验：失败/重试/降级路径与首次成功的非常规路径
+  → `twin(action="tool_log")`（批量）；常规重复成功不必记
+- task_start 响应带 `playbook_md` 时：它是执行经验参考（advisory 不是命令），与你的
+  实际工具环境冲突时按实际环境执行，并把降级/偏差 tool_log 记录；提示"其他宿主使用过"
+  时先逐条核对工具可用性（有 `available_tools_required` 就在下次 task_start 传
+  available_tools，服务端回 tool_gap）
+- 响应带 `twin_notices`（升级提示，独立于 mema_notices）：按其 agent_instruction 告知
+  用户**一次**，不自动升级、不重复提醒
 
 ## write 的抽象口径
 

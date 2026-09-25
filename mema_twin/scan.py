@@ -20,11 +20,13 @@ SCHEDULED_TASKS_TOPIC = "scheduled_tasks"
 SCAN_FRESH_DAYS = 7
 
 AGENT_INSTRUCTION = (
-    "Tell the user: mema-twin 建议创建一个定时任务：夜间 persona 编译（每天，"
+    "Tell the user: mema-twin 建议创建两个定时任务：夜间 persona 编译（每天，"
     "专用一次性会话跑 status→compile→submit，把当天未编译偏好自动整理进 persona "
     "并落版，无证据不编；证据变动的受众画像同场重抽象落版；条款被作废的类型同场"
-    "重编落版）。Ask whether to set it up now; on consent, create the equivalent "
-    "task on your own platform from setup.tasks. The notice disappears by itself "
+    "重编落版）与夜间执行经验评估（每天，跑 status→task_evaluate→playbook_submit，"
+    "把当天收口任务的步骤/反思/工具记录沉淀进 playbook，无新经验不落版）。"
+    "Ask whether to set it up now; on consent, create the equivalent "
+    "tasks on your own platform from setup.tasks. The notice disappears by itself "
     "once the task has run recently — no report-back needed."
 )
 
@@ -82,6 +84,33 @@ SCHEDULED_TASKS_SPEC: dict = {
                                   "多报/漏报/混入他受众 id 只警告不拦，次晚自愈）；"
                                   "画像派生不消耗证据；"
                                   "audience_stale 为空则整体跳过"}},
+            ],
+        },
+        {
+            "name": "twin_nightly_playbook_evaluate",
+            "purpose": ("夜间无人值守的执行经验评估会话（凌晨用户不在场，不向用户提问）："
+                        "把当天收口任务的步骤/反思/疑问时序/工具使用记录评估成 playbook "
+                        "更新（失败规避、工具路径、owner 澄清沉淀），playbook_submit "
+                        "落版；无值得沉淀的新经验则不提交不落版。"),
+            "cadence": "daily",
+            "calls": [
+                {"tool": "twin", "action": "status",
+                 "data": {"rule": "看 plan_stats：tasks_planned=0 或 tasks_unevaluated=0"
+                                  " 时本任务整体跳过（无素材不空转）"}},
+                {"tool": "twin", "action": "task_evaluate",
+                 "data": {"rule": "无 task_ids 取未评估任务（≤10）；响应 task_count=0 "
+                                  "则结束；素材只含真实执行记录，编译产物每条必须"
+                                  " <!-- task: N --> 溯源，写不出来源的条目不得出现"}},
+                {"tool": "twin", "action": "playbook_submit",
+                 "data": {"origin": "scheduled",
+                          "rule": "key 用 key_hint（或覆盖面最大的 work_type；跨类型"
+                                  "经验用 key='global'）；source_task_ids=素材包全部"
+                                  "任务 id；可能被拒：validation_failed（溯源无效/素材"
+                                  "回声/缺标题）或 no_new_evidence（空转阻尼）——如实"
+                                  "记录原因并跳过，不要为过门改产物（被拒时 active "
+                                  "未变，次晚自动重试，连续被拒在 status 的 "
+                                  "playbook_rejected 累计）；工具出错跳过并如实记录，"
+                                  "同一项最多重试一次"}},
             ],
         },
     ],

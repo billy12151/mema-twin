@@ -8,9 +8,10 @@ task_pending 退役）；task_start 经归一门（三维度未命中整笔打�
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 
-from . import db, flow, identity, normalize, store, taxonomy
+from . import db, exec_actions, flow, identity, normalize, store, taxonomy
 from .compile_actions import _read_evidence_rows
 
 
@@ -18,6 +19,26 @@ def _task_persona(conn, code: str | None) -> dict | None:
     if not code:
         return None
     return store.get_active(conn, code)
+
+
+def _coerce_available_tools(value) -> list[str] | None:
+    """task_start 的 available_tools 自报矫正（v3.2-②）：None 透传；非空字符串
+    列表收下（≤50 项、每项 ≤100 字符）；脏值打回。存任务行供 tool_gap 计算。"""
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise ValueError("available_tools 必须是字符串列表")
+    out: list[str] = []
+    for i, t in enumerate(value):
+        s = str(t).strip()
+        if not s:
+            raise ValueError(f"available_tools[{i}] 不能为空")
+        if len(s) > 100:
+            raise ValueError(f"available_tools[{i}] 过长（上限 100 字符）")
+        out.append(s)
+    if len(out) > 50:
+        raise ValueError("available_tools 上限 50 项")
+    return out
 
 
 def _coerce_task_id(tid) -> int:
@@ -216,6 +237,7 @@ def _action_task_start(data: dict) -> dict:
         persona_version=(persona or {}).get("version"),
         client=identity.effective_client(data),
         session_todos=flow.current_todos(data.get("session")),
+        available_tools=_coerce_available_tools(data.get("available_tools")),
     )
     superseded = flow.supersede_open_tasks(record["id"])
     # 增补取数放在建档/让位之后（轮2 P3-7）：慢 mema 读不再拉长并发让位竞窗
@@ -226,8 +248,15 @@ def _action_task_start(data: dict) -> dict:
         "superseded_open_tasks": superseded,
         "dimensions": dims,
         "guidance": (
-            "任务已建档。按 persona prompt 的偏好/结构/前置清单执行；材料不齐全先向"
-            "用户确认或补齐。完成后 twin(action=\"task_submit\") 交付收口（submit 即终点）。"),
+            "任务已建档。凡建档任务默认属于重复执行型工作：开工前先 "
+            "twin(action=\"plan_set\") 列出步骤计划，再逐步执行（step_update 打卡，"
+            "跳过打卡直接完成的属追认，服务端会标 backfilled，不影响收口）。"
+            "仅无重复执行价值的一次性事务（问候、查即时信息、无产出物的一问一答）"
+            "不需要建档，既已建档即默认走计划。拿不准要不要建计划时，建。"
+            "计划中有没把握、或你确认不了的点，写进 plan_set 的 open_questions"
+            "（要紧的标 blocking=true）先与用户澄清——答复经 plan_revise(answers=…)"
+            " 写回。完成后 twin(action=\"task_submit\") 交付收口"
+            "（未闭环步骤会被拦）。"),
     }
     # 受众画像注入：与 persona/增补独立，任何分支都随响应进场（audience 未归一则空）
     aud_dim = dims.get("audience") or {}
@@ -245,6 +274,13 @@ def _action_task_start(data: dict) -> dict:
     else:
         out["hint"] = ("该工作性质尚无 persona prompt；可先喂历史产出物或积累偏好后 "
                        "twin(action=\"compile\") 生成，本次按通用标准执行")
+    # playbook 注入（v0.4 P3）：本类型 → global 两级回退，连续性分级
+    pb_conn = db.connect()
+    try:
+        from . import playbook_actions
+        playbook_actions.inject_playbook(pb_conn, out, code, data)
+    finally:
+        pb_conn.close()
     return out
 
 
@@ -265,6 +301,15 @@ def _action_task_submit(data: dict) -> dict:
                           "（submitted 已是终态；交付后返工走 task_revise）"}
     if data.get("todos") is not None:
         flow.set_session_todos(data.get("session"), data.get("todos"))
+    # 收口门（v0.4 P1）：建过计划且有未闭环步骤 → 拒绝（对账引导，把墙变对账机会）
+    gate_conn = db.connect()
+    try:
+        gate = exec_actions.submit_gate(gate_conn, int(tid))
+        block_warnings = exec_actions.blocking_questions_warning(gate_conn, int(tid))
+    finally:
+        gate_conn.close()
+    if gate is not None:
+        return gate
     # submit 即快照会话 todos 进任务行（plan-mode submit_plan 同款），resume 才有得恢复；
     # 空会话传 None 保留原快照（review#5：空列表会把 COALESCE 当真值清掉 todos）
     session_todos = flow.current_todos(data.get("session"))
@@ -275,6 +320,7 @@ def _action_task_submit(data: dict) -> dict:
     updated = flow.set_status(int(tid), "submitted",
                               reason=str(data.get("note") or "") or None,
                               allowed_from=("planning",))
+    flow.mark_outcome(int(tid), "success")
     out: dict = {"ok": True, "task_id": int(tid), "status": "submitted",
                  "guidance": ("已交付收口（task_submit 即终点）。用户对交付稿的修改与意见是"
                               "偏好信号：有反馈就 twin.write 沉淀（注明来源交付物）；"
@@ -287,6 +333,9 @@ def _action_task_submit(data: dict) -> dict:
             int(tid), fresh.get("deliverable_md") or "")
     except (OSError, sqlite3.Error) as e:
         out["warnings"] = [f"交付物文件写入失败（正文已在库）: {e}"]
+    if block_warnings:
+        # blocking 未解答疑问只警告不拒（v3.3 ⑥：防 owner 口头答复未写回的误伤）
+        out.setdefault("warnings", []).extend(block_warnings)
     return out
 
 
@@ -337,6 +386,13 @@ def _action_task_resume(data: dict) -> dict:
         session_todos=flow.current_todos(data.get("session")),
     )
     flow.supersede_open_tasks(new_record["id"])
+    # 计划深拷贝（v3.3 ③）：未完结步骤/疑问带入新任务行，旧代冻结可审计
+    copy_conn = db.connect()
+    try:
+        plan_copied = exec_actions.copy_plan_to_task(copy_conn, int(tid), new_record["id"])
+        copy_conn.commit()
+    finally:
+        copy_conn.close()
     out: dict = {
         "ok": True, "resumed_task_id": int(tid), "new_task_id": new_record["id"],
         "brief": record["brief"],
@@ -345,6 +401,14 @@ def _action_task_resume(data: dict) -> dict:
         "guidance": (f"已从任务 #{tid} 续作（新任务 #{new_record['id']}）。"
                      "先核对自上次以来的变化，再继续执行并 task_submit。"),
     }
+    if plan_copied["steps"]:
+        out["plan_copied"] = plan_copied
+        out["guidance"] += (f"上一代计划已带入本代（步骤 {plan_copied['steps']} 个、"
+                            f"open 疑问 {plan_copied['questions']} 个），"
+                            "从首个未闭环步骤继续（step_update 推进）。")
+        if plan_copied["deps_dropped"]:
+            out.setdefault("warnings", []).append(
+                f"{plan_copied['deps_dropped']} 个依赖指向上一代已终结步骤，已自动解除")
     if not old_todos:
         out["warnings"] = ["原任务没有 todos——可能已全部完成"]
     aud_code = record.get("audience")
@@ -359,6 +423,21 @@ def _action_task_resume(data: dict) -> dict:
         out["hint"] = "该工作性质尚无编译版 persona，按上方已沉淀偏好执行；可 compile 生成 v1"
     else:
         out["hint"] = "该工作性质尚无 persona prompt；可先 compile 生成或按通用标准执行"
+    # playbook 注入（v0.4 P3）：available_tools 缺省沿用建档时的自报（任务行）
+    pb_data = dict(data)
+    if pb_data.get("available_tools") is None:
+        try:
+            stored = json.loads(record.get("available_tools") or "null")
+        except (ValueError, TypeError):
+            stored = None
+        if isinstance(stored, list):
+            pb_data["available_tools"] = stored
+    pb_conn = db.connect()
+    try:
+        from . import playbook_actions
+        playbook_actions.inject_playbook(pb_conn, out, resume_code, pb_data)
+    finally:
+        pb_conn.close()
     return out
 
 
@@ -405,10 +484,23 @@ def _action_task_revise(data: dict) -> dict:
     flow.set_status(int(tid), "superseded", reason=f"revised by task #{child['id']}",
                     allowed_from=(record["status"],))
     flow.supersede_open_tasks(child["id"])
-    return {"ok": True, "parent_task_id": int(tid), "task_id": child["id"],
-            "iteration": child["iteration"], "status": child["status"],
-            "guidance": (f"已生成修订版任务 #{child['id']}（第 {child['iteration']} 次修订，"
-                         "回到 planning 重走执行）。继续执行后 task_submit。")}
+    # 计划深拷贝（v3.3 ③）：修订=返工重走，未完结步骤带入子任务
+    copy_conn = db.connect()
+    try:
+        plan_copied = exec_actions.copy_plan_to_task(copy_conn, int(tid), child["id"])
+        copy_conn.commit()
+    finally:
+        copy_conn.close()
+    out: dict = {"ok": True, "parent_task_id": int(tid), "task_id": child["id"],
+                 "iteration": child["iteration"], "status": child["status"],
+                 "guidance": (f"已生成修订版任务 #{child['id']}（第 {child['iteration']} 次修订，"
+                              "回到 planning 重走执行）。继续执行后 task_submit。")}
+    if plan_copied["steps"]:
+        out["plan_copied"] = plan_copied
+        if plan_copied["deps_dropped"]:
+            out.setdefault("warnings", []).append(
+                f"{plan_copied['deps_dropped']} 个依赖指向上一代已终结步骤，已自动解除")
+    return out
 
 
 def _action_task_close(data: dict) -> dict:
@@ -416,6 +508,10 @@ def _action_task_close(data: dict) -> dict:
     if tid is None:
         return {"ok": False, "error": "invalid_input", "reason": "需要 task_id"}
     tid = _coerce_task_id(tid)
+    outcome = data.get("outcome")
+    if outcome is not None and outcome not in ("failed", "superseded"):
+        return {"ok": False, "error": "invalid_input", "field": "outcome",
+                "reason": "outcome 仅接受 failed | superseded（缺省 superseded）"}
     flow.ensure_schema()
     record = flow.get_task(int(tid))
     if not record:
@@ -423,11 +519,21 @@ def _action_task_close(data: dict) -> dict:
     if record["status"] not in flow._OPEN_STATUSES:
         return {"ok": False, "error": "invalid_input",
                 "reason": f"task {tid} 状态为 {record['status']!r}，仅进行中（planning）可关闭"}
+    conn = db.connect()
+    try:
+        closed_steps = exec_actions.close_task_steps(conn, int(tid))
+        conn.commit()
+    finally:
+        conn.close()
     flow.set_status(int(tid), "superseded",
                     reason=str(data.get("reason") or "closed") or None,
                     allowed_from=flow._OPEN_STATUSES)
-    return {"ok": True, "task_id": int(tid), "status": "superseded",
-            "guidance": "任务已显式关闭（历史保留可审计）。"}
+    flow.mark_outcome(int(tid), outcome or "superseded")
+    out: dict = {"ok": True, "task_id": int(tid), "status": "superseded",
+                 "guidance": "任务已显式关闭（历史保留可审计）。"}
+    if closed_steps:
+        out["warnings"] = [f"{closed_steps} 个未闭环步骤已按 closed 跳过"]
+    return out
 
 
 def _action_task_recent(data: dict) -> dict:

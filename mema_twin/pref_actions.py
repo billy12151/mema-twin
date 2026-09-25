@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import sqlite3
 
 from . import db, flow, identity, normalize, scan, sink, store, taxonomy, templates
 
@@ -182,6 +183,49 @@ def _action_write(data: dict) -> dict:
     return out
 
 
+def _plan_stats(conn) -> dict:
+    """执行统计面（v0.4 P2，现用现算）：口径=分母为全部任务（不剔 superseded），
+    用于趋势观察不作考核（help/status 条目同款声明）。"""
+    q = conn.execute
+    tasks_total = q("SELECT COUNT(*) AS c FROM twin_tasks").fetchone()["c"]
+    tasks_planned = q(
+        "SELECT COUNT(DISTINCT task_id) AS c FROM twin_plan_steps").fetchone()["c"]
+    steps = q(
+        "SELECT status, COUNT(*) AS c FROM twin_plan_steps GROUP BY status").fetchall()
+    by = {r["status"]: int(r["c"]) for r in steps}
+    wm = int(flow.get_meta("plan_eval_watermark") or 0)
+    unevaluated = q(
+        "SELECT COUNT(*) AS c FROM twin_tasks WHERE status IN"
+        " ('submitted','superseded') AND id > ?", (wm,)).fetchone()["c"]
+    tool = q("SELECT COUNT(*) AS c,"
+             " SUM(CASE WHEN outcome!='success' THEN 1 ELSE 0 END) AS f"
+             " FROM twin_tool_usage").fetchone()
+    playbooks: dict = {}
+    for r in q(
+            "SELECT key, version, last_used_client, last_used_at FROM twin_playbooks"
+            " WHERE status='active' ORDER BY key").fetchall():
+        playbooks[r["key"]] = {"active_version": int(r["version"]),
+                               "last_used_client": r["last_used_client"],
+                               "last_used_at": r["last_used_at"]}
+    return {
+        "tasks_total": tasks_total,
+        "tasks_planned": tasks_planned,
+        "steps_total": sum(by.values()),
+        "steps_failed": by.get("failed", 0),
+        "steps_skipped": by.get("skipped", 0),
+        "steps_backfilled": int(q(
+            "SELECT COUNT(*) AS c FROM twin_plan_steps WHERE backfilled=1"
+        ).fetchone()["c"]),
+        "open_blocking_questions": int(q(
+            "SELECT COUNT(*) AS c FROM twin_plan_questions"
+            " WHERE status='open' AND blocking=1").fetchone()["c"]),
+        "tasks_unevaluated": unevaluated,
+        "tool_usage_total": int(tool["c"] or 0),
+        "tool_usage_fail": int(tool["f"] or 0),
+        "playbooks": playbooks,
+    }
+
+
 def _action_status(data: dict) -> dict:
     conn = db.connect()
     try:
@@ -268,6 +312,15 @@ def _action_status(data: dict) -> dict:
         out["persona_stale"] = stale_list
     # 治理计数（v0.3.8：open_tasks 仅数 planning——submitted 已是终态）
     out["open_tasks"] = len(flow.open_tasks())
+    # 执行统计面（v0.4 P2）：现用现算，趋势观察用不作考核
+    try:
+        stats_conn = db.connect()
+        try:
+            out["plan_stats"] = _plan_stats(stats_conn)
+        finally:
+            stats_conn.close()
+    except sqlite3.Error:
+        pass  # 软失败：统计面缺失不影响其余 status 输出
     try:
         resp = sink.review_conflicts()
         payload = resp.get("data") or resp or {}

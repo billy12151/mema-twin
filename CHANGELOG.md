@@ -1,5 +1,61 @@
 # Changelog
 
+## [0.4.0] — 2026-09-26
+
+工业级执行能力改造（方案 mema 记忆 #1079，三轮拍板收敛 + 实施规格
+`docs/mema-twin-v0.4-exec-design-2026-09-26.md`；P0 升级提示 / R0 选码收敛 /
+P1 执行计划层 / P2 深拷贝与收口 / P3 playbook 闭环）。
+
+- **P1 执行计划层（两档路由 + 六态步骤状态机 + 三门）**：建档任务默认走计划（唯一豁免是
+  无重复执行价值的一次性事务；既已建档必须 `plan_set` 后动手，task_start guidance 强硬
+  文案 +「拿不准要不要建计划时，建」方向性默认）。`plan_set` 落 `twin_plan_steps`
+  六态步骤（pending/in_progress/done/failed/blocked/skipped；闭环=done∪skipped）与
+  `twin_plan_questions` open_questions，直接放行无审批门（用户拍板：计划写完不强制
+  人工确认）；重复调用即重排（未完结步骤 skipped(replanned) + 清 open 疑问，done 保留）。
+  `step_update` to=in_progress 过三门（顺序固定）：blocking 疑问门（open_questions
+  半硬——blocking 未解答关联步骤推进被拒，`plan_revise(answers=…)` 写回解锁；
+  task_submit 只警告不拒）→ 依赖门（依赖满足=done∪skipped，附 open_steps 清单）→
+  单一 in_progress 门（并发互斥）。pending 直跳 done/failed 自动标 `backfilled`
+  （允许补打卡，审计可见，且豁免单一门）；failed 必带 reflection（服务端硬门，
+  沿用 flow.set_status 先例的缺失报告口径）。并发防写：条件 UPDATE
+  `WHERE id AND status=frm`，rowcount=0 打回当前态。
+- **P2 收口门与深拷贝**：task_submit 建档任务（twin_plan_steps 行存在）未闭环步骤
+  整笔打回（附 open_steps 清单 + 对账引导），闭环后 outcome=success 落任务行
+  （twin_tasks 新列，迁移探表幂等 ALTER）；task_close 入参 outcome（failed|superseded，
+  脏值打回）并批量 skipped(reason=closed)。`plan_revise` 四类修订
+  （steps_remove/steps_update/steps_add/answers）单次提交固定顺序执行——remove 仅
+  pending 且不被本代未删步骤依赖（含 pending 依赖方）；steps_update 改 deps 过环检测
+  （DFS）；add 过环校验。task_resume/task_revise 深拷贝未完结步骤到新 task_id
+  （origin_step_id 溯源、depends_on 重映射、旧代已终结依赖剥除并计数 deps_dropped、
+  open 疑问拷贝 answered 不拷），旧代任务 superseded。
+- **P3 执行经验 playbook 闭环**：独立表 `twin_playbooks`（不复用 twin_prompt_versions
+  ——源是执行记录非偏好证据，构不同）。夜间任务 twin_nightly_playbook_evaluate：
+  `task_evaluate` 按 twin_meta 水位（单调推进，显式 ids 也推进）打包已闭环任务执行
+  记录（reflection/tool_log/步骤路径/跨宿主按 client 分层）出素材包（体积护栏
+  step≤50/tool≤20）→ 会话模型提炼 → `playbook_submit` 落版（origin=scheduled 过
+  验证门：溯源校验 foreign_task_ids 剔除后拒绝、G1 素材回声（含 active 自锁守卫沿袭
+  降级）、G2 无标题、空转阻尼 source_task_ids⊆active 拒；交互式违规只警告落版）；
+  `playbook_rollback` 同 persona rollback 语义。task_start/task_resume 注入 active
+  playbook（work_type→global 两级回退）——**连续性分级**（用户拍板）：playbook 记
+  last_used_client，同宿主轻注入（全文+近期验证提示），换宿主重注入（+降级链提示
+  +`available_tools_required`），下次 task_start 传 available_tools 服务端逐条比对
+  工具面板回 `tool_gap`；playbook 是 advisory，与实际环境冲突按实际执行。
+  `tool_log` 批量记工具经验（1..50，outcome ∈ success/fail/degraded/skipped）。
+  pb- 前缀进 code 保留段（validate_code_segment）防与 playbook key 混淆。
+- **P0 升级提示**：`update_monitor` daemon 线程每 24h 拉 GitHub 双通道
+  （raw.githubusercontent → contents API 兜底）比对 pyproject 版本，`twin_notices`
+  随 ok 响应携带（仅 ok；挂接全 try/except 兜底——通知故障不得影响工具可用性）；
+  update_available 同版本 7 天抑制、post_upgrade 真升级发一次（首装建基线不发）；
+  版本单源 importlib.metadata（修 0.3.8/0.3.11 drift）回落仓库 pyproject；
+  env `MEMA_TWIN_UPDATE_CHECK=0` 关闭。
+- **R0 classify_code 单点收敛**：`db.classify_code(code)` 统一 aud- 特判伪类型分派
+  （此前 ≥8 处散落判定）；compile_actions 两处替换为单函数调用。
+- **SKILL.md/README 同步**：SKILL.md 新增「执行流（v0.4）」段（两档路由、打卡与追认、
+  open_questions 咨询流、tool_log 采样规则、playbook advisory 底线、twin_notices
+  分诊）；README 设计要点/动作表/环境变量三处同步（新表、7 个新 action、
+  update env）；status 响应新增 `plan_stats` 桶。
+- 测试 247 绿（基线 197 + 新增 test_exec 25 / test_playbook 13 / test_update_monitor 12）。
+
 ## [0.3.11] — 2026-09-14
 
 - **线格式 content 单写钉死（对齐 mema 0.16.5 flip）**：工具响应显式构造 `CallToolResult`——单一
