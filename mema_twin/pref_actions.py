@@ -207,7 +207,18 @@ def _plan_stats(conn) -> dict:
         playbooks[r["key"]] = {"active_version": int(r["version"]),
                                "last_used_client": r["last_used_client"],
                                "last_used_at": r["last_used_at"]}
-    return {
+    pb_rejects = []
+    for key, raw in sorted(flow.list_meta("playbook_reject:").items()):
+        try:
+            rec = json.loads(raw)
+        except (ValueError, TypeError):
+            rec = {}
+        if not isinstance(rec, dict):
+            rec = {}
+        pb_rejects.append({"key": key[len("playbook_reject:"):],
+                           "count": rec.get("count"), "last_check": rec.get("last_check"),
+                           "last_at": rec.get("last_at")})
+    out = {
         "tasks_total": tasks_total,
         "tasks_planned": tasks_planned,
         "steps_total": sum(by.values()),
@@ -224,6 +235,9 @@ def _plan_stats(conn) -> dict:
         "tool_usage_fail": int(tool["f"] or 0),
         "playbooks": playbooks,
     }
+    if pb_rejects:
+        out["playbook_rejected"] = pb_rejects
+    return out
 
 
 def _action_status(data: dict) -> dict:
@@ -521,7 +535,8 @@ def _action_void(data: dict) -> dict:
     notes = ["作废不可逆（内容仍在 mema，需要可重写一条）；mema 本体的 retire/update "
              "按其治理流程另行处理，twin 只管证据索引。"]
     wt = row["work_type"]
-    if row["compiled_version"] is not None and wt and store.split_audience_profile(wt) is None:
+    if (row["compiled_version"] is not None and wt
+            and store.classify_code(wt) == store.CODE_KIND_WORK_TYPE):
         _mark_persona_stale(wt, n)
         out["persona_stale"] = True
         notes.append(f"{wt} 已标记 persona_stale：夜间任务将重编剔除该条款"

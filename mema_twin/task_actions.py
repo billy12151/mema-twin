@@ -43,7 +43,8 @@ def _coerce_available_tools(value) -> list[str] | None:
 
 def _coerce_task_id(tid) -> int:
     """task_id 严格矫正（轮2 P3-4）：int / 纯数字串；浮点/bool/脏串打回——
-    4.9 不再静默截断成 4。ValueError 由调度器归 invalid_input。"""
+    4.9 不再静默截断成 4。ValueError 由调度器归 invalid_input。上限 2^63-1
+    （轮2 对抗 P3：巨整数进 SQLite 绑定会抛 OverflowError 变 internal_error）。"""
     if isinstance(tid, bool) or not isinstance(tid, (int, str)):
         raise ValueError(f"task_id 需是任务号整数: {tid!r}")
     try:
@@ -52,7 +53,20 @@ def _coerce_task_id(tid) -> int:
         raise ValueError(f"invalid task_id: {tid!r}") from None
     if str(n) != str(tid).strip() and not isinstance(tid, int):
         raise ValueError(f"invalid task_id: {tid!r}")
+    if n < 0 or n > 2**63 - 1:
+        raise ValueError(f"invalid task_id: {tid!r}（需在 0..2^63-1 内）")
     return n
+
+
+_BRIEF_MAX = 2000
+
+
+def _brief_guard(value: str) -> str | None:
+    """brief 长度帽（对抗评审轮2 P2-5）：brief 进任务行并进 task_evaluate 素材包，
+    无帽会让素材包体积失控。"""
+    if len(value) > _BRIEF_MAX:
+        return f"过长（上限 {_BRIEF_MAX} 字符）"
+    return None
 
 
 def _coerce_have_version(data: dict) -> int | None:
@@ -189,6 +203,8 @@ def _action_task_start(data: dict) -> dict:
     brief = str(data.get("brief") or "").strip()
     if not brief:
         return {"ok": False, "error": "invalid_input", "field": "brief", "reason": "required"}
+    if brief_err := _brief_guard(brief):
+        return {"ok": False, "error": "invalid_input", "field": "brief", "reason": brief_err}
     wt_raw = str(data.get("work_type") or "").strip()
     if not wt_raw:
         return {"ok": False, "error": "invalid_input", "field": "work_type", "reason": "required"}
@@ -301,11 +317,15 @@ def _action_task_submit(data: dict) -> dict:
                           "（submitted 已是终态；交付后返工走 task_revise）"}
     if data.get("todos") is not None:
         flow.set_session_todos(data.get("session"), data.get("todos"))
-    # 收口门（v0.4 P1）：建过计划且有未闭环步骤 → 拒绝（对账引导，把墙变对账机会）
+    if err := _brief_guard(str(data.get("brief") or "").strip()):
+        # brief 可选覆盖 update_deliverable，超长同样打回（对抗评审轮2 P2-5）
+        return {"ok": False, "error": "invalid_input", "field": "brief", "reason": err}
+    # 收口门预检（v0.4 P1）：建过计划且有未闭环步骤 → 拒绝（对账引导，把墙变对账
+    # 机会）。此为快筛——真正的门在下方条件 UPDATE 的 NOT EXISTS 里原子复查
+    # （对抗评审轮2 P2-1：门查后他宿主 plan_set 插入未闭环步骤的竞窗）
     gate_conn = db.connect()
     try:
         gate = exec_actions.submit_gate(gate_conn, int(tid))
-        block_warnings = exec_actions.blocking_questions_warning(gate_conn, int(tid))
     finally:
         gate_conn.close()
     if gate is not None:
@@ -316,18 +336,42 @@ def _action_task_submit(data: dict) -> dict:
     flow.update_deliverable(int(tid), deliverable,
                             brief=str(data.get("brief") or "") or None,
                             todos=session_todos or None)
-    # 条件迁移（对抗 review#4）：并发 supersede 后这里 rowcount=0 → invalid_input
-    updated = flow.set_status(int(tid), "submitted",
-                              reason=str(data.get("note") or "") or None,
-                              allowed_from=("planning",))
-    flow.mark_outcome(int(tid), "success")
+    # 条件迁移 + outcome 同语句（对抗评审轮2 P2-1）：写入瞬间原子复查收口门，
+    # rowcount=0 时区分「状态已被并发迁移」与「门在窗口内失守」
+    conn = db.connect()
+    try:
+        cur = conn.execute(
+            "UPDATE twin_tasks SET status='submitted', reason=COALESCE(?, reason),"
+            " decided_at=?, outcome='success' WHERE id=? AND status='planning'"
+            " AND NOT EXISTS(SELECT 1 FROM twin_plan_steps WHERE task_id=?"
+            " AND status IN"
+            f" ({','.join('?' * len(exec_actions.STEP_OPEN_STATUSES))}))",
+            (str(data.get("note") or "").strip() or None, db.now_iso(), int(tid),
+             int(tid), *exec_actions.STEP_OPEN_STATUSES))
+        if cur.rowcount == 0:
+            row = conn.execute("SELECT status FROM twin_tasks WHERE id=?",
+                               (int(tid),)).fetchone()
+            if row is None:
+                return {"ok": False, "error": "not_found", "reason": f"task id {tid}"}
+            if row["status"] != "planning":
+                return {"ok": False, "error": "invalid_input",
+                        "reason": f"task {tid} 状态为 {row['status']!r}，不可提交"
+                                  "（submitted 已是终态；交付后返工走 task_revise）"}
+            gate = exec_actions.submit_gate(conn, int(tid))
+            return gate if gate is not None else {
+                "ok": False, "error": "invalid_input",
+                "reason": "收口门并发复查未过：存在未闭环计划步骤，请重读后逐条对账"}
+        block_warnings = exec_actions.blocking_questions_warning(conn, int(tid))
+        conn.commit()
+    finally:
+        conn.close()
     out: dict = {"ok": True, "task_id": int(tid), "status": "submitted",
                  "guidance": ("已交付收口（task_submit 即终点）。用户对交付稿的修改与意见是"
                               "偏好信号：有反馈就 twin.write 沉淀（注明来源交付物）；"
                               "需要返工走 task_revise 生成修订任务。")}
     # 落盘在状态迁移之后（评审 P2-A5）：正文已在库，文件只是审计镜像；重读库内
     # 最新防并发写错版本（review#5 同款）；OSError/sqlite 失败降级 warning 不回滚
-    fresh = flow.get_task(int(tid)) or updated
+    fresh = flow.get_task(int(tid)) or {}
     try:
         out["deliverable_path"] = flow.write_deliverable_file(
             int(tid), fresh.get("deliverable_md") or "")
@@ -409,6 +453,10 @@ def _action_task_resume(data: dict) -> dict:
         if plan_copied["deps_dropped"]:
             out.setdefault("warnings", []).append(
                 f"{plan_copied['deps_dropped']} 个依赖指向上一代已终结步骤，已自动解除")
+        if plan_copied.get("questions_dropped"):
+            out.setdefault("warnings", []).append(
+                f"{plan_copied['questions_dropped']} 个 open 疑问因关联步骤已全部闭环，"
+                "未带入新代")
     if not old_todos:
         out["warnings"] = ["原任务没有 todos——可能已全部完成"]
     aud_code = record.get("audience")
@@ -500,6 +548,10 @@ def _action_task_revise(data: dict) -> dict:
         if plan_copied["deps_dropped"]:
             out.setdefault("warnings", []).append(
                 f"{plan_copied['deps_dropped']} 个依赖指向上一代已终结步骤，已自动解除")
+        if plan_copied.get("questions_dropped"):
+            out.setdefault("warnings", []).append(
+                f"{plan_copied['questions_dropped']} 个 open 疑问因关联步骤已全部闭环，"
+                "未带入新代")
     return out
 
 
@@ -521,14 +573,26 @@ def _action_task_close(data: dict) -> dict:
                 "reason": f"task {tid} 状态为 {record['status']!r}，仅进行中（planning）可关闭"}
     conn = db.connect()
     try:
+        # 单事务（对抗评审轮2 P2-2）：先条件迁移任务状态（并发失败=整体无副作用，
+        # 不会留下已强跳的步骤），成功后再批量跳步骤，一次 commit——原先三段
+        # 分离事务在竞争失败后会让调用方误以为 close 未生效，WIP 现场不可逆丢失
+        cur = conn.execute(
+            "UPDATE twin_tasks SET status='superseded', reason=COALESCE(?, reason),"
+            " decided_at=?, outcome=? WHERE id=? AND status IN"
+            f" ({','.join('?' * len(flow._OPEN_STATUSES))})",
+            ((str(data.get("reason") or "closed").strip() or None), db.now_iso(),
+             outcome or "superseded", int(tid), *flow._OPEN_STATUSES))
+        if cur.rowcount == 0:
+            row = conn.execute("SELECT status FROM twin_tasks WHERE id=?",
+                               (int(tid),)).fetchone()
+            if row is None:
+                return {"ok": False, "error": "not_found", "reason": f"task id {tid}"}
+            return {"ok": False, "error": "invalid_input",
+                    "reason": f"task {tid} 状态为 {row['status']!r}，仅进行中（planning）可关闭"}
         closed_steps = exec_actions.close_task_steps(conn, int(tid))
         conn.commit()
     finally:
         conn.close()
-    flow.set_status(int(tid), "superseded",
-                    reason=str(data.get("reason") or "closed") or None,
-                    allowed_from=flow._OPEN_STATUSES)
-    flow.mark_outcome(int(tid), outcome or "superseded")
     out: dict = {"ok": True, "task_id": int(tid), "status": "superseded",
                  "guidance": "任务已显式关闭（历史保留可审计）。"}
     if closed_steps:

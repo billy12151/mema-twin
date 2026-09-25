@@ -20,9 +20,18 @@ def test_notice_appears_when_never_run():
 
 
 def test_notice_disappears_after_recent_scheduled_compile():
+    """v0.4 双任务口径：编译 + 评估两个键都新鲜才消提醒。"""
+    now = _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0).isoformat()
+    flow.set_meta("last_scheduled_compile_at", now)
+    flow.set_meta("last_scheduled_playbook_at", now)
+    assert scan.scan_notice() is None
+
+
+def test_notice_stays_while_playbook_task_never_ran():
+    """编译任务在转但 v0.4 第二任务（执行经验评估）从未跑过 → 继续提醒装第二个。"""
     flow.set_meta("last_scheduled_compile_at",
                   _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0).isoformat())
-    assert scan.scan_notice() is None
+    assert scan.scan_notice() is not None
 
 
 def test_notice_reappears_when_stale():

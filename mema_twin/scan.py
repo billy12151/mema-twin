@@ -130,17 +130,23 @@ def _parse_iso(ts: str | None) -> _dt.datetime | None:
 
 
 def scan_notice() -> dict | None:
-    """夜间编译停转保险丝：scheduled submit 刷的 last_scheduled_compile_at
-    7 天内跑过 → 无提醒（体系在转）；从未跑过或超窗 → 提醒安装/检查夜间任务。
-    twin_scan 退役后单键判定（last_scan_at 死键 v0.3.9 已从 twin_meta 删除）。"""
+    """夜间任务停转保险丝（v0.4 起双任务）：persona 编译（last_scheduled_compile_at）
+    与执行经验评估（last_scheduled_playbook_at）两个键都在 7 天内跑过 → 无提醒
+    （体系在转）；任一缺失/超窗 → 提醒安装/检查——v0.4 新增的第二任务停转同样
+    触发重提醒（对抗评审轮2 P3-13：原单键判定对第二任务失明）。"""
     flow.ensure_schema()
     now = _dt.datetime.now(_dt.timezone.utc)
-    last = _parse_iso(flow.get_meta("last_scheduled_compile_at"))
-    if last is not None and (now - last).days < SCAN_FRESH_DAYS:
+    fresh = 0
+    for key in ("last_scheduled_compile_at", "last_scheduled_playbook_at"):
+        last = _parse_iso(flow.get_meta(key))
+        if last is not None and (now - last).days < SCAN_FRESH_DAYS:
+            fresh += 1
+    if fresh == 2:
         return None
     return {
         "type": "twin_nightly_compile_setup",
         "agent_instruction": AGENT_INSTRUCTION,
         "setup": SCHEDULED_TASKS_SPEC,
-        "note": "提醒自消失：夜间编译（scheduled submit）7 天内跑过即不再提示",
+        "note": "提醒自消失：夜间双任务（persona 编译 + 执行经验评估）都在 7 天内"
+                "跑过即不再提示",
     }

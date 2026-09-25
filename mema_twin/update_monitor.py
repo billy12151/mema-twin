@@ -182,6 +182,19 @@ def maybe_start_check_if_due() -> bool:
         return True
 
 
+def _schedule_next_check() -> None:
+    """常驻进程（http 服务）内的周期续检：拍板口径是「daemon 线程 24h 双通道
+    比对」，单发线程只在进程启动时跑一次，常驻形态下永不复查——检查完链式
+    Timer 续期补齐。stdio 每会话新进程，等效不受影响；重复 fetch 竞争无害
+    （状态写全在 _state_lock 内）。"""
+    if _disabled():
+        return
+    timer = threading.Timer(CHECK_INTERVAL_HOURS * 3600, _run_one_check)
+    timer.daemon = True
+    timer.name = "mema-twin-update-check-timer"
+    timer.start()
+
+
 def _run_one_check() -> None:
     latest = _fetch_remote_version()
     with _state_lock:
@@ -193,6 +206,8 @@ def _run_one_check() -> None:
             state["last_checked_at"] = _now_iso()
             state.pop("last_check_failed_at", None)
         _write_state_unlocked(state)
+    if not _disabled():
+        _schedule_next_check()
 
 
 def _suppress_expired(state: dict) -> bool:
@@ -213,7 +228,8 @@ _POST_UPGRADE_INSTRUCTION = (
 
 def consume_notices() -> list[dict]:
     """出口：返回 0..2 条 notice（读侧按版本抑制键去重）。仅 ok 响应携带——
-    升级 notice 无丢失风险（抑制键存续，下次成功响应必然再出）。"""
+    non-ok 路径不 consume 无丢失；注意抑制键在生成时即落盘，ok 响应送达前
+    进程崩溃的盲窗内同版本 7 天静默（可接受：升级 notice 本就低频非关键）。"""
     if _disabled():
         return []
     cur = current_version()

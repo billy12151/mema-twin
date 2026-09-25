@@ -137,16 +137,20 @@ def test_fetch_remote_version_dual_channel(um_env, monkeypatch):
 
 
 def test_maybe_start_check_if_due(um_env, monkeypatch):
+    # mock 网络通道（对抗评审轮2 P2-6：原版注释声称 mock 实则真联网，断网必红）
+    monkeypatch.setattr(um, "_fetch_remote_version", lambda: "9.9.9")
+    monkeypatch.setattr(um, "_schedule_next_check", lambda: None)  # 测试不挂 24h Timer
     assert um.maybe_start_check_if_due() is True  # 从未检查 → due → 起线程
     # 线程在跑（mock 网络让线程快速结束前，第二次调用被启动互斥拦下）
     assert um.maybe_start_check_if_due() is False
     um._check_thread.join(timeout=5)
     state = _read_state(um_env / "update_state.json")
-    assert state.get("last_checked_at")  # 线程真的写入了状态（mock 真实网络通道）
+    assert state.get("last_checked_at")  # 线程真的写入了状态
 
 
 def test_run_one_check_failure_recorded(um_env, monkeypatch):
     monkeypatch.setattr(um, "_fetch_remote_version", lambda: None)
+    monkeypatch.setattr(um, "_schedule_next_check", lambda: None)
     um._run_one_check()
     state = _read_state(um_env / "update_state.json")
     assert state.get("last_check_failed_at")

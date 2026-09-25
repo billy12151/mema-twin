@@ -659,11 +659,13 @@ def test_task_resume_empty_persona_supplement(monkeypatch):
 
 
 def test_notice_suppressed_by_scheduled_compile():
-    """只建夜间任务（scheduled submit 刷 last_scheduled_compile_at）也消提醒。"""
-    from mema_twin import scan
+    """夜间双任务都在转（scheduled submit 刷 compile 键 + 评估任务刷 playbook 键）才消提醒。"""
+    from mema_twin import scan, flow
     assert scan.scan_notice() is not None
     server._twin_impl("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m",
                            "origin": "scheduled"})
+    assert scan.scan_notice() is not None  # v0.4 第二任务（评估）未在转，仍提醒
+    flow.set_meta("last_scheduled_playbook_at", flow.get_meta("last_scheduled_compile_at"))
     assert scan.scan_notice() is None
 
 
@@ -983,7 +985,10 @@ def test_aud_scheduled_submit_refreshes_night_signal():
     assert scan.scan_notice() is not None
     server._twin_impl("submit", {"work_type": "aud-leadership", "prompt_md": "# 画像",
                            "model": "m", "origin": "scheduled", "source_memory_ids": []})
-    assert scan.scan_notice() is None  # 受众型夜间在转也消提醒
+    # 受众型夜间在转 + 评估任务在转（v0.4 双任务口径）才消提醒
+    from mema_twin import flow
+    flow.set_meta("last_scheduled_playbook_at", flow.get_meta("last_scheduled_compile_at"))
+    assert scan.scan_notice() is None
 
 
 def test_stale_ignores_worktype_null_rows(monkeypatch):
