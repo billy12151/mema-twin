@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.4.2] — 2026-09-26
+
+升级提示版本源防陈旧（发版后实测发现）。
+
+- **current_version 取 max(installed, repo)**：可编辑安装的 dist-info 元数据是
+  安装时快照，不随 pyproject bump 更新（实测 dist-info 停在 0.3.11 而代码已
+  0.4.1）——只信 importlib.metadata 会对着自家新版本误报 update_available。
+  仓库在场时解析仓库 pyproject 与安装态取较新者；current 偏高只会抑制提示，
+  不会制造假升级。发版流程提示：bump 版本后重装一次 venv（`uv pip install -e .
+  --no-deps`）可让元数据同步，但不再强依赖。
+- 测试 268 绿（新增陈旧快照纠正/仓库缺位回退回归）。
+
 ## [0.4.1] — 2026-09-26
 
 夜间定时任务合并为单任务双支线（用户拍板；响应 v0.4.0 双任务口径引入的配置/心跳

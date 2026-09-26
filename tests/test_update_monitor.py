@@ -182,3 +182,26 @@ def test_twin_notices_and_mema_notices_coexist(um_env, monkeypatch):
     monkeypatch.setitem(server._ACTIONS, "task_recent", fake)
     ok = server._twin_impl("task_recent", {})
     assert "mema_notices" in ok and "twin_notices" in ok
+
+
+def test_current_version_prefers_newer_repo_version(um_env, monkeypatch):
+    # v0.4.2：可编辑安装的 dist-info 是安装时快照，不随 pyproject bump 更新——
+    # 只信 importlib.metadata 会谎报旧版本（实测 dist-info 停在 0.3.11）
+    pyproject = db.PROJECT_ROOT / "pyproject.toml"
+    expected = re.search(r'(?m)^version\s*=\s*"([^"]+)"', pyproject.read_text()).group(1)
+    real_version = importlib.metadata.version("mema-twin")
+    if um.compare_versions(expected, real_version) > 0:
+        assert um.current_version() == expected  # 陈旧快照被仓库版本纠正
+    # 仓库版本更旧/相等 → 保留安装态
+    monkeypatch.setattr(um, "_state_project_pyproject", lambda: _write_tmp_pyproject(um_env, "0.0.1"))
+    assert um.current_version() == real_version
+    # 仓库 pyproject 不在场 → 安装态直出
+    monkeypatch.setattr(um, "_state_project_pyproject",
+                        lambda: um_env / "no-such-pyproject.toml")
+    assert um.current_version() == real_version
+
+
+def _write_tmp_pyproject(root, version):
+    p = root / "pyproject.toml"
+    p.write_text(f'[project]\nname = "mema-twin"\nversion = "{version}"\n')
+    return p
