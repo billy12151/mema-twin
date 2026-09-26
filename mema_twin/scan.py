@@ -15,18 +15,21 @@ from . import flow
 
 SCHEDULED_TASKS_TOPIC = "scheduled_tasks"
 
-# 提醒失效窗口：夜间编译（scheduled submit 刷 last_scheduled_compile_at）
+# 提醒失效窗口：夜间任务心跳（merged 任务每晚必调 task_evaluate(origin=scheduled)
+# 刷 last_scheduled_playbook_at）
 # 在该天数内跑过即认为"定时体系在转"；超窗重新提示（停转保险丝）
 SCAN_FRESH_DAYS = 7
 
 AGENT_INSTRUCTION = (
-    "Tell the user: mema-twin 建议创建两个定时任务：夜间 persona 编译（每天，"
-    "专用一次性会话跑 status→compile→submit，把当天未编译偏好自动整理进 persona "
-    "并落版，无证据不编；证据变动的受众画像同场重抽象落版；条款被作废的类型同场"
-    "重编落版）与夜间执行经验评估（每天，跑 status→task_evaluate→playbook_submit，"
-    "把当天收口任务的步骤/反思/工具记录沉淀进 playbook，无新经验不落版）。"
+    "Tell the user: mema-twin 建议创建一个定时任务：夜间 twin 会话（每天，"
+    "专用一次性会话先跑执行经验评估支线 status→task_evaluate(origin=scheduled)"
+    "→playbook_submit（把当天收口任务的步骤/反思/工具记录沉淀进 playbook，"
+    "无新经验不落版，evaluate 调用即刷新停转保险丝心跳）再跑 persona 编译支线 "
+    "pending→compile→submit（把当天未编译偏好自动整理进 persona 并落版，"
+    "无证据不编；证据变动的受众画像同场重抽象落版；条款被作废的类型同场重编"
+    "落版），两支线各有无素材早退规则）。"
     "Ask whether to set it up now; on consent, create the equivalent "
-    "tasks on your own platform from setup.tasks. The notice disappears by itself "
+    "task on your own platform from setup.tasks. The notice disappears by itself "
     "once the task has run recently — no report-back needed."
 )
 
@@ -34,18 +37,43 @@ SCHEDULED_TASKS_SPEC: dict = {
     "tasks": [
         {
             "name": "twin_nightly_compile",
-            "purpose": ("夜间无人值守的专用一次性编译会话（凌晨用户不在场，不向用户提问）："
-                        "把各 work_type 当天未编译的偏好证据编译进 persona prompt 并 "
-                        "submit 落版（uncompiled 为 0 且无 persona_stale 的类型不编译不"
-                        "落版，避免版本号空转）；把 persona_stale 里条款被作废的类型重编"
-                        "剔除对应条款落版；再把 audience_stale 里证据数变动的受众重抽象成"
-                        "受众画像落版。"),
+            "purpose": ("夜间无人值守的专用一次性会话（凌晨用户不在场，不向用户提问），"
+                        "两个支线顺序执行、各自无素材早退：①执行经验评估——把当天收口"
+                        "任务的步骤/反思/疑问时序/工具使用记录评估成 playbook 更新"
+                        "（失败规避、工具路径、owner 澄清沉淀），playbook_submit 落版，"
+                        "无值得沉淀的新经验则不提交不落版；②persona 编译——把各 "
+                        "work_type 当天未编译的偏好证据编译进 persona prompt 并 submit "
+                        "落版（uncompiled 为 0 且无 persona_stale 的类型不编译不落版，"
+                        "避免版本号空转）；把 persona_stale 里条款被作废的类型重编剔除"
+                        "对应条款落版；再把 audience_stale 里证据数变动的受众重抽象成"
+                        "受众画像落版。评估支线放最前：它轻且快，防被最重的编译段"
+                        "吃掉会话预算后永远轮不到（水位在，漏一晚次晚自动补）。"),
             "cadence": "daily",
             "calls": [
                 {"tool": "twin", "action": "status",
                  "data": {"note": "uncompiled 是各 work_type 未编译数（只处理 >0 的类型）；"
                                   "audience_stale 是需重抽象的受众（证据数≠画像吸收数或尚无画像）；"
-                                  "persona_stale 是条款被作废待重编的类型（同样夜间重编落版）"}},
+                                  "persona_stale 是条款被作废待重编的类型（同样夜间重编落版）",
+                          "rule": "同时看 plan_stats：tasks_unevaluated=0 时评估支线整体"
+                                  "跳过（无素材不空转）；两支线都无素材则本次会话到此结束"}},
+                {"tool": "twin", "action": "task_evaluate",
+                 "data": {"origin": "scheduled",
+                          "rule": "origin=scheduled 必传——调用成功即刷新停转保险丝心跳"
+                                  "（与当晚有无新经验无关，漏传等于 7 天后误报任务停转）；"
+                                  "无 task_ids 取未评估任务（≤10）；响应 task_count=0 "
+                                  "则评估支线结束（心跳已刷）；素材只含真实执行记录，"
+                                  "编译产物每条必须 <!-- task: N --> 溯源，写不出来源"
+                                  "的条目不得出现"}},
+                {"tool": "twin", "action": "playbook_submit",
+                 "data": {"origin": "scheduled",
+                          "rule": "key 用 key_hint（或覆盖面最大的 work_type；跨类型"
+                                  "经验用 key='global'）；source_task_ids=素材包全部"
+                                  "任务 id；可能被拒：validation_failed（溯源无效/素材"
+                                  "回声/缺标题）或 no_new_evidence（空转阻尼）——如实"
+                                  "记录原因并跳过，不要为过门改产物（被拒时 active "
+                                  "未变，次晚自动重试，连续被拒在 status 的 "
+                                  "playbook_rejected 累计）；无新经验则不提交；"
+                                  "工具出错跳过并如实记录，同一项最多重试一次"}},
                 {"tool": "twin", "action": "pending",
                  "data": {"rule": "归一门待裁票据（v0.3.8）：pending 非空时取明细"
                                   "（type_kind/raw_value/hit_count=打回次数）列入收尾汇总——"
@@ -60,10 +88,10 @@ SCHEDULED_TASKS_SPEC: dict = {
                 {"tool": "twin", "action": "submit",
                  "data": {"origin": "scheduled",
                           "rule": "source ids 用素材包证据 id；origin=scheduled 必传"
-                                  "（夜间来源标记，三重用途：验证门 G1/G2 与空转阻尼仅对 "
-                                  "scheduled 生效、刷新 last_scheduled_compile_at 停转保险丝"
-                                  "——漏传等于绕过拦截且 7 天后误报体系停转）；submit 可能被拒：validation_failed"
-                                  "（素材回声/缺分区标题）或 no_new_evidence（空转阻尼）"
+                                  "（夜间来源标记，验证门 G1/G2 与空转阻尼仅对 scheduled "
+                                  "生效——漏传等于绕过拦截）；submit 可能被拒："
+                                  "validation_failed（素材回声/缺分区标题）或 "
+                                  "no_new_evidence（空转阻尼）"
                                   "——如实记录原因并跳过，不要为过门改产物（被拒时 "
                                   "active 未变、证据未消耗，次晚自动重试，连续被拒会在"
                                   " status 的 nightly_rejected 累计）；"
@@ -86,33 +114,6 @@ SCHEDULED_TASKS_SPEC: dict = {
                                   "audience_stale 为空则整体跳过"}},
             ],
         },
-        {
-            "name": "twin_nightly_playbook_evaluate",
-            "purpose": ("夜间无人值守的执行经验评估会话（凌晨用户不在场，不向用户提问）："
-                        "把当天收口任务的步骤/反思/疑问时序/工具使用记录评估成 playbook "
-                        "更新（失败规避、工具路径、owner 澄清沉淀），playbook_submit "
-                        "落版；无值得沉淀的新经验则不提交不落版。"),
-            "cadence": "daily",
-            "calls": [
-                {"tool": "twin", "action": "status",
-                 "data": {"rule": "看 plan_stats：tasks_planned=0 或 tasks_unevaluated=0"
-                                  " 时本任务整体跳过（无素材不空转）"}},
-                {"tool": "twin", "action": "task_evaluate",
-                 "data": {"rule": "无 task_ids 取未评估任务（≤10）；响应 task_count=0 "
-                                  "则结束；素材只含真实执行记录，编译产物每条必须"
-                                  " <!-- task: N --> 溯源，写不出来源的条目不得出现"}},
-                {"tool": "twin", "action": "playbook_submit",
-                 "data": {"origin": "scheduled",
-                          "rule": "key 用 key_hint（或覆盖面最大的 work_type；跨类型"
-                                  "经验用 key='global'）；source_task_ids=素材包全部"
-                                  "任务 id；可能被拒：validation_failed（溯源无效/素材"
-                                  "回声/缺标题）或 no_new_evidence（空转阻尼）——如实"
-                                  "记录原因并跳过，不要为过门改产物（被拒时 active "
-                                  "未变，次晚自动重试，连续被拒在 status 的 "
-                                  "playbook_rejected 累计）；工具出错跳过并如实记录，"
-                                  "同一项最多重试一次"}},
-            ],
-        },
     ],
 }
 
@@ -130,23 +131,20 @@ def _parse_iso(ts: str | None) -> _dt.datetime | None:
 
 
 def scan_notice() -> dict | None:
-    """夜间任务停转保险丝（v0.4 起双任务）：persona 编译（last_scheduled_compile_at）
-    与执行经验评估（last_scheduled_playbook_at）两个键都在 7 天内跑过 → 无提醒
-    （体系在转）；任一缺失/超窗 → 提醒安装/检查——v0.4 新增的第二任务停转同样
-    触发重提醒（对抗评审轮2 P3-13：原单键判定对第二任务失明）。"""
+    """夜间任务停转保险丝（v0.4.1 合并单任务后单键）：心跳键
+    last_scheduled_playbook_at 由合并任务的 task_evaluate(origin=scheduled) 每晚
+    必调刷新（与当晚有无新经验无关）——编译支线连续无素材也不会误报；老形态
+    只建 persona 编译任务、不调 task_evaluate 的宿主永远过不了保险丝，会被持续
+    引导升级成合并 spec（对抗评审轮2 P3-13 同源问题的收口）。"""
     flow.ensure_schema()
     now = _dt.datetime.now(_dt.timezone.utc)
-    fresh = 0
-    for key in ("last_scheduled_compile_at", "last_scheduled_playbook_at"):
-        last = _parse_iso(flow.get_meta(key))
-        if last is not None and (now - last).days < SCAN_FRESH_DAYS:
-            fresh += 1
-    if fresh == 2:
+    last = _parse_iso(flow.get_meta("last_scheduled_playbook_at"))
+    if last is not None and (now - last).days < SCAN_FRESH_DAYS:
         return None
     return {
         "type": "twin_nightly_compile_setup",
         "agent_instruction": AGENT_INSTRUCTION,
         "setup": SCHEDULED_TASKS_SPEC,
-        "note": "提醒自消失：夜间双任务（persona 编译 + 执行经验评估）都在 7 天内"
-                "跑过即不再提示",
+        "note": "提醒自消失：夜间任务 7 天内跑过（task_evaluate origin=scheduled "
+                "心跳）即不再提示",
     }

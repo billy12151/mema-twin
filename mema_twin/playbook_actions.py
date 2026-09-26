@@ -58,6 +58,10 @@ _TASK_TOOL_CAP = 20
 
 
 def _action_task_evaluate(data: dict) -> dict:
+    origin = data.get("origin")
+    if origin is not None and origin != "scheduled":
+        return {"ok": False, "error": "invalid_input", "field": "origin",
+                "reason": "origin 仅接受 scheduled（夜间定时任务心跳/来源标记），交互式不要传"}
     limit_raw = data.get("limit")
     limit = _EVAL_LIMIT
     if limit_raw is not None:
@@ -150,6 +154,12 @@ def _action_task_evaluate(data: dict) -> dict:
                 int(flow.get_meta(_EVAL_WATERMARK) or 0), max_id)))
     finally:
         conn.close()
+    if origin == "scheduled":
+        # 心跳（v0.4.1 合并单任务）：合并夜间任务每晚必调 task_evaluate(origin=
+        # scheduled)，调用成功即证明任务在转——与当晚有无新经验无关，是单键
+        # 停转保险丝的依据；编译支线连续无素材也不会误报
+        flow.ensure_schema()
+        flow.set_meta("last_scheduled_playbook_at", db.now_iso())
     out: dict = {"ok": True, "task_count": len(tasks), "material": material,
                  "key_hint": key_hint,
                  "note": templates.STRONG_MODEL_NOTE,

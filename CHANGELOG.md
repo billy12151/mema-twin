@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.4.1] — 2026-09-26
+
+夜间定时任务合并为单任务双支线（用户拍板；响应 v0.4.0 双任务口径引入的配置/心跳
+复杂度）。
+
+- **spec 合并**：`twin_nightly_compile` 单任务顺序执行两支线——①执行经验评估
+  （status→`task_evaluate`→`playbook_submit`）放最前（轻且快，防被最重的编译段
+  吃掉会话预算后永远轮不到；水位在，漏一晚次晚自动补）②persona 编译
+  （pending→compile→submit→画像 compile→submit）。两支线各自保留无素材早退规则。
+- **心跳与保险丝单键化**：`task_evaluate` 新增 `origin=scheduled` 入参（唯一合法
+  值），调用成功即刷 `last_scheduled_playbook_at` 心跳——与当晚有无新经验无关；
+  `scan_notice` 保险丝回退单键（编译支线连续无素材不再误报停转；老形态只建编译
+  任务的宿主永远过不了保险丝，会被持续引导升级成合并 spec）。
+- 已建 v0.4.0 双任务的宿主：把第二个任务删掉、把编译任务更新成合并 spec（或
+  直接按新 spec 重建一个）；只建了编译任务的宿主：按新 spec 更新现有任务。
+- 测试 267 绿（scan spec 单任务断言 / 保险丝单键断言 / task_evaluate 心跳与
+  origin 校验同步更新，新增心跳回归 1 条）。
+
 ## [0.4.0] — 2026-09-26
 
 工业级执行能力改造（方案 mema 记忆 #1079，三轮拍板收敛 + 实施规格

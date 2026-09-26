@@ -180,11 +180,11 @@ def _action_help(data: dict) -> dict:
     if topic == scan.SCHEDULED_TASKS_TOPIC:
         return {
             "ok": True, "topic": scan.SCHEDULED_TASKS_TOPIC,
-            "description": "twin 定时任务 spec（双任务：夜间 persona 编译 + 夜间执行经验评估）：Agent 据此在宿主平台创建等价任务。",
+            "description": "twin 定时任务 spec（单任务双支线：夜间执行经验评估 → 夜间 persona 编译）：Agent 据此在宿主平台创建等价任务。",
             "agent_instruction": scan.AGENT_INSTRUCTION,
             "setup": scan.SCHEDULED_TASKS_SPEC,
-            "note": "提醒自消失：夜间双任务都在 7 天内跑过（scheduled submit / "
-                    "playbook_submit）即不再提示。",
+            "note": "提醒自消失：夜间任务 7 天内跑过（task_evaluate origin=scheduled "
+                    "心跳）即不再提示。",
         }
     return {
         "ok": True,
