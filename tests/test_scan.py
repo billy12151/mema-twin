@@ -86,3 +86,28 @@ def test_spec_single_task():
     pending_rule = nightly["calls"][3]["data"]["rule"]
     assert "待裁票据" in pending_rule and "夜间不代裁" in pending_rule  # v0.3.8 晨报兜底
     assert "双跑" not in submit_rule  # v0.3.8：双跑句已删
+
+
+# ---- v0.4.3 提示抑制窗口（用户拍板：3 天） ----
+
+def test_notice_snoozed_three_days_after_shown():
+    """首次提示即全局盖章：窗口内所有调用（含其他宿主）静默；心跳跑过则无关抑制。"""
+    assert scan.scan_notice() is not None  # 首次提示 + 盖章
+    assert scan.scan_notice() is None      # 窗口内静默（多宿主共享同一窗口）
+    now = _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0).isoformat()
+    flow.set_meta("last_scheduled_playbook_at", now)  # 心跳跑过
+    assert scan.scan_notice() is None
+
+
+def test_notice_resumes_after_snooze_window():
+    """3 天窗口过后心跳仍未跑过 → 恢复提示并重盖；心跳新鲜则旧盖章不拦。"""
+    old = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=4)
+           ).replace(microsecond=0).isoformat()
+    flow.set_meta(scan.SCAN_NOTICE_SHOWN_KEY, old)
+    assert scan.scan_notice() is not None
+    assert scan.scan_notice() is None  # 重盖后再静默
+    # 心跳新鲜时，过期盖章也不产生提醒
+    flow.set_meta(scan.SCAN_NOTICE_SHOWN_KEY, old)
+    now = _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0).isoformat()
+    flow.set_meta("last_scheduled_playbook_at", now)
+    assert scan.scan_notice() is None
