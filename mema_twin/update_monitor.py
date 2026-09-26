@@ -89,18 +89,25 @@ def compare_versions(left: str, right: str) -> int:
 
 
 def current_version() -> str:
-    """安装态版本单源 importlib.metadata；开发态（未安装直跑源码）回落解析仓库内
-    pyproject.toml；再不行给 0.0.0（比较语义=永远「有更新」，notice 只多不少，无害）。"""
+    """版本主源 importlib.metadata；仓库在场（可编辑/源码态）时解析仓库内
+    pyproject.toml，两者取较新者——可编辑安装的 dist-info 元数据是安装时快照，
+    不随 pyproject bump 更新，只信它会谎报旧版本、对着自家新版本误报
+    update_available（v0.4.2 实测：dist-info 停在 0.3.11 而代码已是 0.4.1）。
+    取 max 的方向安全：current 偏高只会抑制提示，不会制造假升级。"""
+    installed = "0.0.0"
     try:
-        return importlib.metadata.version("mema-twin")
+        installed = importlib.metadata.version("mema-twin")
     except importlib.metadata.PackageNotFoundError:
         pass
     try:
         text = (_state_project_pyproject()).read_text(encoding="utf-8")
     except OSError:
-        return "0.0.0"
+        return installed
     m = re.search(r'(?m)^version\s*=\s*"([^"]+)"', text)
-    return m.group(1) if m else "0.0.0"
+    repo = m.group(1) if m else None
+    if repo is None:
+        return installed
+    return repo if compare_versions(repo, installed) > 0 else installed
 
 
 def _state_project_pyproject() -> Path:
