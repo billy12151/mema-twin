@@ -61,6 +61,7 @@ def test_rejected_submit_no_side_effects():
     r = server._twin_impl("submit", {"work_type": "周报", "prompt_md": "无标题稿",
                                "origin": "scheduled", "source_memory_ids": []})
     assert r["ok"] is False
+    flow.delete_meta(scan.SCAN_NOTICE_SHOWN_KEY)  # 重置 v0.4.3 抑制盖章，模拟 3 天后
     assert scan.scan_notice() is not None  # 未刷夜间在转信号
     assert flow.get_meta("persona_origin:work_report:1") is None
 

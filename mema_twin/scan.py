@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import datetime as _dt
 
-from . import flow
+from . import db, flow
 
 SCHEDULED_TASKS_TOPIC = "scheduled_tasks"
 
@@ -19,6 +19,12 @@ SCHEDULED_TASKS_TOPIC = "scheduled_tasks"
 # 刷 last_scheduled_playbook_at）
 # 在该天数内跑过即认为"定时体系在转"；超窗重新提示（停转保险丝）
 SCAN_FRESH_DAYS = 7
+
+# 提示抑制窗口（v0.4.3，用户拍板）：每次实际提示时全局盖章（twin_meta 单键），
+# 窗口内不再提示，窗口过后心跳仍未跑过则恢复提示。多宿主共接下第一个看到的
+# agent 负责向用户提问，其余宿主静默——重复询问压到 3 天最多一次
+SCAN_NOTICE_SNOOZE_DAYS = 3
+SCAN_NOTICE_SHOWN_KEY = "scan_notice_shown_at"
 
 AGENT_INSTRUCTION = (
     "Tell the user: mema-twin 建议创建一个定时任务：夜间 twin 会话（每天，"
@@ -141,10 +147,17 @@ def scan_notice() -> dict | None:
     last = _parse_iso(flow.get_meta("last_scheduled_playbook_at"))
     if last is not None and (now - last).days < SCAN_FRESH_DAYS:
         return None
+    # 提示抑制（v0.4.3）：盖章在生成时（claim 即 delivered，与 twin_notices 同款
+    # 取舍——响应送达前进程崩溃的盲窗内多静默一窗，可接受）；全局单键，多宿主
+    # 共享同一抑制窗口
+    shown = _parse_iso(flow.get_meta(SCAN_NOTICE_SHOWN_KEY))
+    if shown is not None and (now - shown).days < SCAN_NOTICE_SNOOZE_DAYS:
+        return None
+    flow.set_meta(SCAN_NOTICE_SHOWN_KEY, db.now_iso())
     return {
         "type": "twin_nightly_compile_setup",
         "agent_instruction": AGENT_INSTRUCTION,
         "setup": SCHEDULED_TASKS_SPEC,
         "note": "提醒自消失：夜间任务 7 天内跑过（task_evaluate origin=scheduled "
-                "心跳）即不再提示",
+                "心跳）即不再提示；本次提示后 3 天内不重复（3 天后仍未在转会再提醒）",
     }

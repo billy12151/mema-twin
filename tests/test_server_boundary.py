@@ -665,6 +665,7 @@ def test_notice_suppressed_by_scheduled_compile():
     assert scan.scan_notice() is not None
     server._twin_impl("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m",
                            "origin": "scheduled"})
+    flow.delete_meta(scan.SCAN_NOTICE_SHOWN_KEY)  # 重置 v0.4.3 抑制盖章，模拟 3 天后
     assert scan.scan_notice() is not None  # 老形态编译任务过不了单键保险丝
     r = server._twin_impl("task_evaluate", {"origin": "scheduled"})
     assert r["ok"]
@@ -988,6 +989,7 @@ def test_aud_scheduled_submit_refreshes_night_signal():
     server._twin_impl("submit", {"work_type": "aud-leadership", "prompt_md": "# 画像",
                            "model": "m", "origin": "scheduled", "source_memory_ids": []})
     # 受众型 scheduled submit 同样只刷 compile 键：保险丝仍亮（v0.4.1 单键口径）
+    flow.delete_meta(scan.SCAN_NOTICE_SHOWN_KEY)  # 重置抑制盖章，模拟 3 天后
     assert scan.scan_notice() is not None
     server._twin_impl("task_evaluate", {"origin": "scheduled"})  # 心跳
     assert scan.scan_notice() is None
