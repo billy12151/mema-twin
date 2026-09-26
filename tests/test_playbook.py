@@ -331,3 +331,31 @@ def test_playbook_material_total_cap(env):
     m = templates.compile_playbook_material("work_report", None, big, [])
     assert "素材包超限截断" in m
     assert len(m) < 65_000
+
+
+def test_evaluate_origin_heartbeat(env):
+    # v0.4.1 合并单任务：task_evaluate(origin=scheduled) 调用成功即刷心跳——
+    # 与当晚有无新经验无关（task_count=0 也刷）
+    r = server._twin_impl("task_evaluate", {"origin": "scheduled"})
+    assert r["ok"] and r["task_count"] == 0
+    conn = flow.db.connect()
+    try:
+        hb = flow.get_meta("last_scheduled_playbook_at")
+    finally:
+        conn.close()
+    assert hb
+    # 非法 origin 打回；交互式（无 origin）不刷心跳
+    bad = server._twin_impl("task_evaluate", {"origin": "manual"})
+    assert bad["ok"] is False and "origin" in bad["reason"]
+    conn = flow.db.connect()
+    try:
+        before = flow.get_meta("last_scheduled_playbook_at")
+    finally:
+        conn.close()
+    server._twin_impl("task_evaluate", {})
+    conn = flow.db.connect()
+    try:
+        after = flow.get_meta("last_scheduled_playbook_at")
+    finally:
+        conn.close()
+    assert after == before  # 交互式调用不动心跳

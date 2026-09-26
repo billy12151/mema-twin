@@ -659,14 +659,16 @@ def test_task_resume_empty_persona_supplement(monkeypatch):
 
 
 def test_notice_suppressed_by_scheduled_compile():
-    """夜间双任务都在转（scheduled submit 刷 compile 键 + 评估任务刷 playbook 键）才消提醒。"""
-    from mema_twin import scan, flow
+    """v0.4.1 单键保险丝：persona scheduled submit 不消提醒（心跳键未动），
+    task_evaluate(origin=scheduled) 心跳才消。"""
+    from mema_twin import scan
     assert scan.scan_notice() is not None
     server._twin_impl("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m",
                            "origin": "scheduled"})
-    assert scan.scan_notice() is not None  # v0.4 第二任务（评估）未在转，仍提醒
-    flow.set_meta("last_scheduled_playbook_at", flow.get_meta("last_scheduled_compile_at"))
-    assert scan.scan_notice() is None
+    assert scan.scan_notice() is not None  # 老形态编译任务过不了单键保险丝
+    r = server._twin_impl("task_evaluate", {"origin": "scheduled"})
+    assert r["ok"]
+    assert scan.scan_notice() is None  # 心跳刷新（与当晚有无新经验无关）
 
 
 # ---- 轮2 对抗性 review 修复的回归 ----
@@ -985,9 +987,9 @@ def test_aud_scheduled_submit_refreshes_night_signal():
     assert scan.scan_notice() is not None
     server._twin_impl("submit", {"work_type": "aud-leadership", "prompt_md": "# 画像",
                            "model": "m", "origin": "scheduled", "source_memory_ids": []})
-    # 受众型夜间在转 + 评估任务在转（v0.4 双任务口径）才消提醒
-    from mema_twin import flow
-    flow.set_meta("last_scheduled_playbook_at", flow.get_meta("last_scheduled_compile_at"))
+    # 受众型 scheduled submit 同样只刷 compile 键：保险丝仍亮（v0.4.1 单键口径）
+    assert scan.scan_notice() is not None
+    server._twin_impl("task_evaluate", {"origin": "scheduled"})  # 心跳
     assert scan.scan_notice() is None
 
 

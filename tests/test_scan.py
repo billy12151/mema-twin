@@ -19,16 +19,16 @@ def test_notice_appears_when_never_run():
     assert scan.scan_notice() is not None
 
 
-def test_notice_disappears_after_recent_scheduled_compile():
-    """v0.4 双任务口径：编译 + 评估两个键都新鲜才消提醒。"""
-    now = _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0).isoformat()
-    flow.set_meta("last_scheduled_compile_at", now)
-    flow.set_meta("last_scheduled_playbook_at", now)
+def test_notice_disappears_after_recent_heartbeat():
+    """v0.4.1 单键保险丝：心跳键（task_evaluate origin=scheduled）新鲜即消提醒。"""
+    flow.set_meta("last_scheduled_playbook_at",
+                  _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0).isoformat())
     assert scan.scan_notice() is None
 
 
 def test_notice_stays_while_playbook_task_never_ran():
-    """编译任务在转但 v0.4 第二任务（执行经验评估）从未跑过 → 继续提醒装第二个。"""
+    """老形态只建 persona 编译任务（compile 键新鲜、心跳键不存在）→ 持续提醒
+    升级成合并 spec（单编译任务不调 task_evaluate，永远过不了保险丝）。"""
     flow.set_meta("last_scheduled_compile_at",
                   _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0).isoformat())
     assert scan.scan_notice() is not None
@@ -56,27 +56,33 @@ def test_naive_timestamp_does_not_crash():
 def test_spec_single_task():
     spec = scan.SCHEDULED_TASKS_SPEC
     names = [t["name"] for t in spec["tasks"]]
-    # v0.4：编译 + 执行经验评估两任务（twin_scan 已退役；职责分离、失败互不拖累）
-    assert names == ["twin_nightly_compile", "twin_nightly_playbook_evaluate"]
+    # v0.4.1：合并单任务双支线（评估支线前置；twin_scan 已退役）
+    assert names == ["twin_nightly_compile"]
     nightly = spec["tasks"][0]
     assert nightly["cadence"] == "daily"
-    assert [c["action"] for c in nightly["calls"]] == ["status", "pending", "compile", "submit", "compile", "submit"]
-    evaluate = spec["tasks"][1]
-    assert evaluate["cadence"] == "daily"
-    assert [c["action"] for c in evaluate["calls"]] == ["status", "task_evaluate", "playbook_submit"]
+    assert [c["action"] for c in nightly["calls"]] == [
+        "status", "task_evaluate", "playbook_submit", "pending",
+        "compile", "submit", "compile", "submit"]
+    # 评估支线前置：task_evaluate 带 origin=scheduled 心跳（与有无新经验无关）
+    evaluate_call = nightly["calls"][1]
+    assert evaluate_call["data"]["origin"] == "scheduled"
+    assert "心跳" in evaluate_call["data"]["rule"]
+    assert nightly["calls"][2]["data"]["origin"] == "scheduled"
     assert "twin" in scan.AGENT_INSTRUCTION
-    assert "夜间 persona 编译" in scan.AGENT_INSTRUCTION
+    assert "创建一个定时任务" in scan.AGENT_INSTRUCTION  # 单任务口径
+    assert "task_evaluate" in scan.AGENT_INSTRUCTION
+    assert "把当天未编译偏好自动整理进 persona" in scan.AGENT_INSTRUCTION
     assert "执行经验评估" in scan.AGENT_INSTRUCTION
-    assert "每周治理扫描" not in scan.AGENT_INSTRUCTION  # 单任务口径
+    assert "每周治理扫描" not in scan.AGENT_INSTRUCTION
     # 空转阻尼与被拒语义进了 spec（宿主快照同步的对照源）
-    submit_rule = nightly["calls"][3]["data"]["rule"]
+    submit_rule = nightly["calls"][5]["data"]["rule"]
     assert "validation_failed" in submit_rule and "no_new_evidence" in submit_rule
-    pb_rule = evaluate["calls"][2]["data"]["rule"]
+    pb_rule = nightly["calls"][2]["data"]["rule"]
     assert "validation_failed" in pb_rule and "no_new_evidence" in pb_rule
-    assert evaluate["calls"][2]["data"]["origin"] == "scheduled"
+    assert nightly["calls"][2]["data"]["origin"] == "scheduled"
     assert "nightly_rejected" in submit_rule
     assert "pending_count" in submit_rule  # 汇总输出带治理计数（twin_scan 退役归置）
-    assert "保守封套" in nightly["calls"][2]["data"]["rule"]  # 夜间不做无因重组
-    pending_rule = nightly["calls"][1]["data"]["rule"]
+    assert "保守封套" in nightly["calls"][4]["data"]["rule"]  # 夜间不做无因重组
+    pending_rule = nightly["calls"][3]["data"]["rule"]
     assert "待裁票据" in pending_rule and "夜间不代裁" in pending_rule  # v0.3.8 晨报兜底
     assert "双跑" not in submit_rule  # v0.3.8：双跑句已删
