@@ -326,6 +326,9 @@ def _action_task_submit(data: dict) -> dict:
     gate_conn = db.connect()
     try:
         gate = exec_actions.submit_gate(gate_conn, int(tid))
+        # 采纳率提醒（v0.4.4 W1）：无计划交付=执行经验静默流失——advisory 警告
+        # 把流失变成可见信号；含 replanned 跳过行的任务算有计划（has_plan 行存在性）
+        no_plan = not exec_actions.has_plan(gate_conn, int(tid))
     finally:
         gate_conn.close()
     if gate is not None:
@@ -380,6 +383,11 @@ def _action_task_submit(data: dict) -> dict:
     if block_warnings:
         # blocking 未解答疑问只警告不拒（v3.3 ⑥：防 owner 口头答复未写回的误伤）
         out.setdefault("warnings", []).extend(block_warnings)
+    if no_plan:
+        out.setdefault("warnings", []).append(
+            "[经验沉淀] 本任务未建执行计划，执行经验（步骤路径/失败反思/工具记录）"
+            "不会进入 playbook 沉淀。若属重复执行型工作：下次开工先 "
+            "twin(action=\"plan_set\")；若属一次性事务：下次无需 task_start 建档。")
     return out
 
 
@@ -458,7 +466,9 @@ def _action_task_resume(data: dict) -> dict:
                 f"{plan_copied['questions_dropped']} 个 open 疑问因关联步骤已全部闭环，"
                 "未带入新代")
     if not old_todos:
-        out["warnings"] = ["原任务没有 todos——可能已全部完成"]
+        # 轮2 对抗 P3-4：与 deps_dropped/questions_dropped 警告追加式并存，
+        # 不再直接赋值覆盖（此前会吞掉刚 append 的深拷贝降级警告）
+        out.setdefault("warnings", []).append("原任务没有 todos——可能已全部完成")
     aud_code = record.get("audience")
     if aud_code:
         out.update(_audience_payload(aud_code, resume_code,

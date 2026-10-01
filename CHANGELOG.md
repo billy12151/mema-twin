@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.4.4] — 2026-10-01
+
+执行经验采纳落地（方案 docs/mema-twin-exec-experience-adoption-2026-10-01.md，
+采纳 workbuddy 建议；两轮评审，轮2 独立对抗无 P1）。
+
+- **W1 经验流失提醒**：task_submit 对未建计划的交付在 warnings 追加 advisory 提醒
+  （不拦）：执行经验不会进 playbook 沉淀——重复执行型工作下次先 plan_set、一次性
+  事务下次不建档。含 replanned 跳过行的任务算「有计划」不提醒（行存在性口径，
+  补测试钉住）。真硬门仍只留两个（reflection/收口门），两档路由判断不动。
+- **W2 采纳率观测**：plan_stats 新增 tasks_submitted / submitted_with_plan
+  （采纳率=后者÷前者，分母 0 无读数；历史 submitted 会稀释读数，看增量任务）。
+- **顺手修（轮2 对抗 P3-4 既有缺陷）**：task_resume 的「原任务没有 todos」警告
+  从直接赋值改为追加式——此前会覆盖刚写入的 deps_dropped/questions_dropped 深拷贝
+  降级警告。
+- SKILL.md 单独 docs commit 补 0.4.1–0.4.3 同步欠账（含一处事实错误修正：
+  plan_stats 整桶缺席条件是 status 内部软失败，非「无计划数据」——空库仍返回
+  全零桶）。测试 274 绿（270 + 采纳 4 条）。
+
 ## [0.4.3] — 2026-09-26
 
 定时任务提醒加 3 天抑制窗口（用户拍板，治多宿主重复询问）。
