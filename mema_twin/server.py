@@ -203,7 +203,9 @@ def _action_help(data: dict) -> dict:
                       "（persona_stale）、pending 数量（归一门待裁票据）、未编译统计、夜间被拒计数"
                       "（nightly_rejected）、open 冲突/进行中任务计数、执行计划统计（plan_stats："
                       "任务/步骤各态/backfilled/open blocking 疑问/tool_usage/playbooks/"
-                      "playbook_rejected）与定时任务安装提醒。",
+                      "playbook_rejected/采纳率 submitted_with_plan÷tasks_submitted——"
+                      "分母 0 无读数，历史 submitted 会稀释，看增量任务）"
+                      "与定时任务安装提醒。",
             "compile": "取编译素材包（旧版本 prompt 编译参考 + **全部在世证据**（全量投影，"
                        "每版从头重编）+ 已作废条款清单 + 同受众画像参考 + 编译规则"
                        "（含义稳定表达自由/变更分级/硬预算）），"

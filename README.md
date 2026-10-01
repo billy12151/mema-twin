@@ -121,7 +121,7 @@ live in twin's own SQLite with a file mirror for fallback and human review.
 | `compile` | 取编译素材包（旧版本 prompt 编译参考 + **全部在世证据**（全量投影）+ 已作废条款清单 + 编译规则（稳定律/硬预算/变更分级）），独立会话执行、做完即弃 |
 | `submit` | 提交编译产物，落版本并写镜像（返回 `supersedes`），回写证据编译标记；夜间定时任务落版传 `origin=scheduled`（过**验证门**：素材回声/缺分区标题拒绝、无新证据空转阻尼拒绝，均在 status 的 nightly_rejected 累计；证据未全覆盖与交互式违规只警告） |
 | `rollback` | 回滚 persona 版本（零阻力）：`version` 省略回上一版，传 n 回指定版；不删历史、版本号不回收 |
-| `status` | 版本概况（含体积/超预算标记）、受众画像（audience_profiles）与重抽象队列（audience_stale）、条款作废待重编（persona_stale）、未编译统计、pending 数量（归一门待裁票据）、夜间被拒计数（nightly_rejected）、open 冲突/进行中任务计数、执行计划统计（plan_stats：任务/步骤各态/backfilled/open blocking 疑问/tool_usage/playbooks/playbook_rejected）、定时任务安装提醒 |
+| `status` | 版本概况（含体积/超预算标记）、受众画像（audience_profiles）与重抽象队列（audience_stale）、条款作废待重编（persona_stale）、未编译统计、pending 数量（归一门待裁票据）、夜间被拒计数（nightly_rejected）、open 冲突/进行中任务计数、执行计划统计（plan_stats：任务/步骤各态/backfilled/open blocking 疑问/tool_usage/playbooks/playbook_rejected/采纳率 submitted_with_plan÷tasks_submitted——分母 0 无读数，历史 submitted 会稀释、看增量任务）、定时任务安装提醒 |
 | `taxonomy` | 列枚举清单（动态：含治理追加别名与自建 canonical；kind ∈ work_type/audience/purpose） |
 | `pending` / `resolve` | 归一门待裁票据的查看与治理（map=归一并进别名表 / canonicalize=立新码入列 / reject=不入体系且不得重试原值） |
 | `task_start` | 开工建档并注入 persona prompt + 未编译增补 + active playbook（连续性分级）；`have_persona_version` 申报同会话已注入版本，未变则省略重复注入；带 audience 时注入受众画像 `audience_profile_md`/雏形；audience/purpose 可选，给了值必须在清单内；可选 `available_tools`（工具名列表，服务端与 playbook 工具面板比对回 `tool_gap`） |
@@ -129,7 +129,7 @@ live in twin's own SQLite with a file mirror for fallback and human review.
 | `step_update` | 步骤状态机打卡（六态；to=in_progress 过三门：blocking 疑问→依赖→单一 in_progress）；done/failed 闭环（failed 必带 reflection；pending 直跳标 backfilled 追认） |
 | `plan_revise` | 修订单次提交：steps_remove（仅 pending 且不被本代未删步骤依赖）/ steps_update（改 deps/状态走状态机）/ steps_add / answers（open_questions 写回解锁 blocking） |
 | `tool_log` | 批量记工具经验（tool/purpose/outcome ∈ success/fail/degraded，可附 note/skill_digest），task_evaluate 素材来源 |
-| `task_submit` | 提交交付稿并收口（**submit 即终点**，v0.3.8 无评审环），落盘 `deliverables/task-N.md`；建过计划的任务收口门拦未闭环步骤；outcome 自动 success；open blocking 疑问仅警告；交付后用户反馈走 twin.write |
+| `task_submit` | 提交交付稿并收口（**submit 即终点**，v0.3.8 无评审环），落盘 `deliverables/task-N.md`；建过计划的任务收口门拦未闭环步骤；未建计划的交付附经验流失提醒（advisory：执行经验不进 playbook，重复型工作下次先 plan_set）；outcome 自动 success；open blocking 疑问仅警告；交付后用户反馈走 twin.write |
 | `task_resume` / `task_revise` / `task_close` | 续作进行中任务（仅 planning，恢复 todos + 深拷贝未完结计划到新 task_id）/ 已交付任务修订返工（仅 submitted，子任务回 planning 记 lineage + 同款深拷贝）/ 显式关闭进行中任务（outcome=failed\|superseded，未闭环步骤批量 skipped(closed)） |
 | `task_evaluate` | 打包水位后已闭环任务的执行记录（reflection/tool_log/步骤路径）出 playbook 素材包（夜间任务调用；水位单调，可显式补评估） |
 | `playbook_submit` / `playbook_rollback` | playbook 落版（origin=scheduled 过验证门：溯源/素材回声 G1/无标题 G2/空转阻尼；交互式只警告）与回滚（省略 version 回上一版） |

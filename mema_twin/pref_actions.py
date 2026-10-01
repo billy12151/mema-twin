@@ -197,6 +197,14 @@ def _plan_stats(conn) -> dict:
     unevaluated = q(
         "SELECT COUNT(*) AS c FROM twin_tasks WHERE status IN"
         " ('submitted','superseded') AND id > ?", (wm,)).fetchone()["c"]
+    # 采纳率观测（v0.4.4 W2）：交付任务里带计划的比例——分母只算 submitted
+    # （close/被让位不进），旧库历史 submitted 会稀释读数，看增量任务为主
+    tasks_submitted = q("SELECT COUNT(*) AS c FROM twin_tasks"
+                        " WHERE status='submitted'").fetchone()["c"]
+    submitted_with_plan = q(
+        "SELECT COUNT(*) AS c FROM twin_tasks t WHERE t.status='submitted'"
+        " AND EXISTS(SELECT 1 FROM twin_plan_steps WHERE task_id=t.id)"
+    ).fetchone()["c"]
     tool = q("SELECT COUNT(*) AS c,"
              " SUM(CASE WHEN outcome!='success' THEN 1 ELSE 0 END) AS f"
              " FROM twin_tool_usage").fetchone()
@@ -221,6 +229,8 @@ def _plan_stats(conn) -> dict:
     out = {
         "tasks_total": tasks_total,
         "tasks_planned": tasks_planned,
+        "tasks_submitted": tasks_submitted,
+        "submitted_with_plan": submitted_with_plan,
         "steps_total": sum(by.values()),
         "steps_failed": by.get("failed", 0),
         "steps_skipped": by.get("skipped", 0),

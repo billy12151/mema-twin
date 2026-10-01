@@ -653,3 +653,60 @@ def test_task_close_atomic_on_race(env):
     finally:
         conn.close()
     assert skipped == 0  # 状态未迁成功 → 步骤原样保留
+
+
+# ---- v0.4.4 经验采纳落地（方案 mema-twin-exec-experience-adoption-2026-10-01） ----
+
+def test_submit_no_plan_warns(env):
+    t = _mk_task()
+    r = server._twin_impl("task_submit", {"task_id": t["id"],
+                                          "deliverable_md": "# d"})
+    assert r["ok"] is True  # advisory 不拦
+    warn = [w for w in r.get("warnings", []) if "经验沉淀" in w]
+    assert warn and "plan_set" in warn[0] and "task_start" in warn[0]
+
+
+def test_submit_with_plan_no_adoption_warning(env):
+    t = _mk_task()
+    r = _plan(t["id"])
+    for sid in _step_ids(r).values():
+        server._twin_impl("step_update", {"step_id": sid, "status": "done"})
+    out = server._twin_impl("task_submit", {"task_id": t["id"],
+                                            "deliverable_md": "# d"})
+    assert out["ok"] is True
+    assert not [w for w in out.get("warnings", []) if "经验沉淀" in w]
+
+
+def test_status_plan_stats_adoption(env):
+    # 有计划闭环 submit + 无计划 submit 各一 → 采纳率 1/2
+    t1 = _mk_task()
+    r = _plan(t1["id"])
+    for sid in _step_ids(r).values():
+        server._twin_impl("step_update", {"step_id": sid, "status": "done"})
+    assert server._twin_impl("task_submit", {"task_id": t1["id"],
+                                             "deliverable_md": "# a"})["ok"]
+    t2 = _mk_task()
+    assert server._twin_impl("task_submit", {"task_id": t2["id"],
+                                             "deliverable_md": "# b"})["ok"]
+    stats = server._twin_impl("status", {})["plan_stats"]
+    assert stats["tasks_submitted"] == 2
+    assert stats["submitted_with_plan"] == 1
+
+
+def test_replanned_task_counts_as_planned(env):
+    # 拍板口径钉住：含 replanned 跳过行的任务算「有计划」——submit 无经验流失
+    # 警告、计入 submitted_with_plan（轮2 对抗 P3-3）
+    t = _mk_task()
+    r1 = _plan(t["id"])
+    ids = _step_ids(r1)
+    server._twin_impl("step_update", {"step_id": ids[1], "status": "done"})
+    r2 = server._twin_impl("plan_set", {"task_id": t["id"],
+                                        "steps": [{"title": "重建"}]})  # 旧 open 步骤 replanned
+    assert r2["ok"] and r2["replanned"]
+    server._twin_impl("step_update",
+                      {"step_id": _step_ids(r2)[1], "status": "done"})
+    out = server._twin_impl("task_submit", {"task_id": t["id"],
+                                            "deliverable_md": "# d"})
+    assert out["ok"] and not [w for w in out.get("warnings", []) if "经验沉淀" in w]
+    stats = server._twin_impl("status", {})["plan_stats"]
+    assert stats["submitted_with_plan"] == 1
