@@ -83,6 +83,12 @@ live in twin's own SQLite with a file mirror for fallback and human review.
   的证据被作废触发 `persona_stale` 夜间自动重编，受众侧经 audience_stale 计数差重抽象；
   素材包常驻「已作废条款」节防旧版参考带回作废条款。status 附 open_conflicts/open_tasks
   治理计数。
+- **同域 fallback 注入（v0.4.5，#956 F4 拍板）**：该工种尚无专属 persona 时，
+  task_start/task_resume 注入同域最成熟工种（活证据最多，tie-break 版本→code）
+  的 persona 全文垫底 + 其余同域候选各一行摘要 + 降级声明（格式结构可参考、
+  有权威来源以权威为准、内容业务规则不适用）；专属 persona 落版（含 mirror
+  降级读到）自动退出。三层注入链自洽：受众层迁口径 → 域层借格式结构 →
+  工种层专属。custom 码按 domain 判定（canonicalize 入口归一空白）。
 - **执行计划层（v0.4）**：建档任务默认走计划（两档路由：无重复执行价值的一次性事务
   才豁免建档，既已建档必须 `plan_set` 后动手）——plan_set 落 `twin_plan_steps` 六态
   步骤（pending/in_progress/done/failed/blocked/skipped；done∪skipped=闭环）与
@@ -124,7 +130,7 @@ live in twin's own SQLite with a file mirror for fallback and human review.
 | `status` | 版本概况（含体积/超预算标记）、受众画像（audience_profiles）与重抽象队列（audience_stale）、条款作废待重编（persona_stale）、未编译统计、pending 数量（归一门待裁票据）、夜间被拒计数（nightly_rejected）、open 冲突/进行中任务计数、执行计划统计（plan_stats：任务/步骤各态/backfilled/open blocking 疑问/tool_usage/playbooks/playbook_rejected/采纳率 submitted_with_plan÷tasks_submitted——分母 0 无读数，历史 submitted 会稀释、看增量任务）、定时任务安装提醒 |
 | `taxonomy` | 列枚举清单（动态：含治理追加别名与自建 canonical；kind ∈ work_type/audience/purpose） |
 | `pending` / `resolve` | 归一门待裁票据的查看与治理（map=归一并进别名表 / canonicalize=立新码入列 / reject=不入体系且不得重试原值） |
-| `task_start` | 开工建档并注入 persona prompt + 未编译增补 + active playbook（连续性分级）；`have_persona_version` 申报同会话已注入版本，未变则省略重复注入；带 audience 时注入受众画像 `audience_profile_md`/雏形；audience/purpose 可选，给了值必须在清单内；可选 `available_tools`（工具名列表，服务端与 playbook 工具面板比对回 `tool_gap`） |
+| `task_start` | 开工建档并注入 persona prompt + 未编译增补 + active playbook（连续性分级）；`have_persona_version` 申报同会话已注入版本，未变则省略重复注入；带 audience 时注入受众画像 `audience_profile_md`/雏形；audience/purpose 可选，给了值必须在清单内；可选 `available_tools`（工具名列表，服务端与 playbook 工具面板比对回 `tool_gap`）；该工种尚无专属 persona 时注入**同域 fallback**（v0.4.5：同域最成熟工种 persona 全文垫底 + 其余候选摘要 + 降级声明，专属落版自动退出） |
 | `plan_set` | 建档任务列步骤计划（v0.4 执行计划层）：steps（title/depends_on）+ open_questions（可标 blocking），直接放行开工；重复调用即重排（未完结步骤标 skipped(replanned)，done 保留） |
 | `step_update` | 步骤状态机打卡（六态；to=in_progress 过三门：blocking 疑问→依赖→单一 in_progress）；done/failed 闭环（failed 必带 reflection；pending 直跳标 backfilled 追认） |
 | `plan_revise` | 修订单次提交：steps_remove（仅 pending 且不被本代未删步骤依赖）/ steps_update（改 deps/状态走状态机）/ steps_add / answers（open_questions 写回解锁 blocking） |

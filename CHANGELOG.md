@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.4.5] — 2026-10-01
+
+F4 同域 fallback 注入（mema #956 2026-09-10 拍板，原 v0.3.9 后主项；方案
+docs/mema-twin-f4-fallback-design-2026-10-01.md 经方案对抗评审 5P2/7P3 修订 +
+实施后两轮独立评审——轮1 功能核对无 P1/P2，轮2 对抗无 P1/1P2 已修/8P3 修4记4）。
+
+- **fallback 注入**：task_start/task_resume 在本工种无专属 active persona（含
+  增补在场与纯 hint 两个子分支）时注入同域最成熟工种（活证据最多，tie-break
+  版本高者→code 字典序最大）的 persona 全文 + 其余同域候选各一行身份摘要 +
+  降级声明（垫底定位/权威来源优先/内容业务规则不适用）；硬返回无转达口子；
+  专属 persona 落版（mirror 降级读到同样算在场）自动退出。候选域归属双源
+  （twin_types 优先回落 taxonomy，老库缺行不丢候选）；aud- 伪类型不参与借出；
+  custom 码按 domain 判定不做 is_custom 过滤；donor 单快照读出（无二次读）。
+- **轮2 P2-1 修复**：canonicalize 的 domain 入口归一（strip+压平空白）+
+  读取侧同款归一——此前历史脏 domain（前后空格）会让同域匹配静默失联，
+  F4 主场景（custom 码借入借出）被一个空格击穿。
+- **轮2 P3 顺手修**：空正文 donor 跳过、病态 TEXT 版本号跳过（不再炸
+  task_start 归罪 invalid_input）、note 渲染 label_zh 压平换行+超长截断
+  （「各一行」契约）、resume 侧 help/SKILL 补声明。
+- 记账未修：专属落版竞窗内 note 一次性失真（下次调用自愈）、fallback 三段
+  查询非同快照（垫底选择轻微漂移可接受）、fallback 无版本短路（§6 明确不做，
+  resume 链重复注入 ~persona 体积，狗粮期有反馈再议）、全域 persona 全量拉取
+  读放大（真库规模无感）。
+- 测试 294 绿（274 基线 + fallback 20 条）。
+
 ## [0.4.4] — 2026-10-01
 
 执行经验采纳落地（方案 docs/mema-twin-exec-experience-adoption-2026-10-01.md，

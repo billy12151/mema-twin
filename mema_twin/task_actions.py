@@ -159,6 +159,105 @@ def _supplement_payload(code: str, persona: dict | None,
 AUDIENCE_PROTO_MAX = 5
 
 
+def _wt_domain(conn, code: str) -> str:
+    """工种域归属双源（F4，方案评审 P2-5）：twin_types 行优先（含 custom 码），
+    行缺失回落 taxonomy（老库版本新增内置码无行——is_known_work_type 同款口径）。
+    返回值归一（strip+压平空白——轮2 对抗 P2-1：历史脏 domain 不因空格失联）。"""
+    row = conn.execute(
+        "SELECT domain FROM twin_types WHERE type_kind='work_type' AND code=?",
+        (code,)).fetchone()
+    if row is not None:
+        return " ".join((row["domain"] or "").split())
+    t = taxonomy.by_code("work_type", code)
+    return (" ".join((t.domain or "").split())) if t else ""
+
+
+def _wt_label_zh(conn, code: str) -> str:
+    row = conn.execute(
+        "SELECT label_zh FROM twin_types WHERE type_kind='work_type' AND code=?",
+        (code,)).fetchone()
+    if row is not None and (row["label_zh"] or "").strip():
+        label = row["label_zh"]
+    else:
+        t = taxonomy.by_code("work_type", code)
+        label = (t.zh or code) if t else code
+    # 渲染侧 sanitize（轮2 P3-5）：note 契约是「各一行」——压平换行+截断，
+    # 治理表 label 可含任意用户裁定文本
+    flat = " ".join(label.split())
+    return flat[:64] + "…" if len(flat) > 64 else flat
+
+
+def _fallback_payload(code: str | None) -> dict:
+    """F4 同域 fallback 注入（#956 拍板）：本工种无专属 persona 时，注入同 domain
+    最成熟工种（活证据最多，tie-break：证据数→版本→code 字典序最大）的 active
+    persona 全文 + 其余候选身份摘要 + 降级声明。agent 只裁怎么用不裁要不要
+    （硬返回）；专属落版（含 mirror 降级读到）即自动退出——本函数只在
+    persona 为 None 的分支被调用。自管连接（照 _supplement_payload 先例）。"""
+    if not code:
+        return {}
+    conn = db.connect()
+    try:
+        my_domain = _wt_domain(conn, code)
+        if not my_domain:
+            return {}
+        rows = conn.execute(
+            "SELECT work_type, version, prompt_md FROM twin_prompt_versions"
+            " WHERE status='active' AND work_type NOT LIKE 'aud-%'"
+            " ORDER BY work_type, version").fetchall()
+        best: dict[str, dict] = {}  # work_type -> 最高版本行（病态双 active 去重）
+        for r in rows:
+            if store.classify_code(r["work_type"]) != store.CODE_KIND_WORK_TYPE:
+                continue
+            if not (r["prompt_md"] or "").strip():
+                continue  # 空正文 donor 无垫底价值（轮2 P3-2，仅库腐化可达）
+            try:
+                int(r["version"])  # 病态 TEXT 版本号跳过（轮2 P3-1，仅库腐化可达）
+            except (TypeError, ValueError):
+                continue
+            best[r["work_type"]] = dict(r)
+        cands = {w: r for w, r in best.items()
+                 if w != code and _wt_domain(conn, w) == my_domain}
+        if not cands:
+            return {}
+        wt_ph = ",".join("?" for _ in cands)
+        counts = {r["work_type"]: int(r["n"]) for r in conn.execute(
+            f"SELECT work_type, COUNT(*) AS n FROM twin_evidence"
+            f" WHERE status IN ('uncompiled','compiled')"
+            f" AND work_type IN ({wt_ph}) GROUP BY work_type",
+            tuple(cands)).fetchall()}
+        donor_w = max(cands,
+                      key=lambda w: (counts.get(w, 0), int(cands[w]["version"]), w))
+        donor = cands[donor_w]
+        donor_n = counts.get(donor_w, 0)
+        others = sorted((w for w in cands if w != donor_w),
+                        key=lambda w: (-counts.get(w, 0), -int(cands[w]["version"]), w))
+        note = (
+            f"以下为同域工种「{_wt_label_zh(conn, donor_w)}（{donor_w}）」的 persona"
+            f" v{donor['version']}，作为本工种尚无专属规则时的垫底参考"
+            f"（活证据 {donor_n} 条，同域最成熟）。\n"
+            "此参考仅为本工种无专属规则时的垫底：格式与结构层可参考；若本任务存在"
+            "更权威格式来源（用户提供的模板/公司官方规范/行业惯例），以权威来源为准，"
+            "本参考降级为风格与详略参考；内容与业务规则不适用。\n"
+            "优先级：本类型的增补/画像口径 > 此参考的格式结构。")
+        if others:
+            lines = "\n".join(
+                f"- {_wt_label_zh(conn, w)}（{w}）v{cands[w]['version']}"
+                f"，活证据 {counts.get(w, 0)} 条" for w in others)
+            note += (f"\n同域其他可参考（各一行）：\n{lines}\n按任务语义判断哪个更相关，可 "
+                     f'twin(action="get", data={{"work_type": "<该工种 code>"}}) '
+                     "取其全文。本工种攒够证据后会有专属 persona，届时此垫底自动退出。")
+        else:
+            note += "\n本工种攒够证据后会有专属 persona，届时此垫底自动退出。"
+        return {
+            "fallback_persona_md": donor["prompt_md"] or "",
+            "fallback_from": {"work_type": donor_w, "version": int(donor["version"]),
+                              "evidence_count": donor_n},
+            "fallback_persona_note": note,
+        }
+    finally:
+        conn.close()
+
+
 def _audience_payload(audience: str | None, exclude_work_type: str | None,
                       client: str | None = None) -> dict:
     """受众画像注入（v0.3.6）：画像全文优先，未编出时雏形垫底；受众未归一或
@@ -287,9 +386,12 @@ def _action_task_start(data: dict) -> dict:
         out.update(supplement)
         out["hint"] = ("该工作性质尚无编译版 persona，本次按上方已沉淀偏好执行；"
                        "积累后可 twin(action=\"compile\") 生成 v1")
+        # F4 同域 fallback（#956 拍板）：无专属 persona 时垫底参考注入（硬返回）
+        out.update(_fallback_payload(code))
     else:
         out["hint"] = ("该工作性质尚无 persona prompt；可先喂历史产出物或积累偏好后 "
                        "twin(action=\"compile\") 生成，本次按通用标准执行")
+        out.update(_fallback_payload(code))
     # playbook 注入（v0.4 P3）：本类型 → global 两级回退，连续性分级
     pb_conn = db.connect()
     try:
@@ -479,8 +581,10 @@ def _action_task_resume(data: dict) -> dict:
     elif supplement:
         out.update(supplement)
         out["hint"] = "该工作性质尚无编译版 persona，按上方已沉淀偏好执行；可 compile 生成 v1"
+        out.update(_fallback_payload(resume_code))
     else:
         out["hint"] = "该工作性质尚无 persona prompt；可先 compile 生成或按通用标准执行"
+        out.update(_fallback_payload(resume_code))
     # playbook 注入（v0.4 P3）：available_tools 缺省沿用建档时的自报（任务行）
     pb_data = dict(data)
     if pb_data.get("available_tools") is None:

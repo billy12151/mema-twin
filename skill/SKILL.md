@@ -45,6 +45,11 @@ description: 个人分身：工作类偏好沉淀与 persona prompt 编译，经
     环境冲突时按实际环境执行，并把降级/偏差用 tool_log 记录；提示"其他宿主使用过"时
     先逐条核对工具可用性（有 `available_tools_required` 就在下次 task_start 传
     `available_tools`，服务端逐条比对工具面板回 `tool_gap`）
+- 响应带 `fallback_persona_md`（v0.4.5 同域 fallback）：本工种尚无专属 persona，
+  给的是同域最成熟工种的 persona 当垫底——**格式与结构层可参考**；有更权威的
+  格式来源（用户模板/公司规范/行业惯例）以权威为准，此参考降级为风格详略参考；
+  **内容与业务规则不适用**。同域其他候选在 note 里，按任务语义判断更相关可
+  `twin(action="get", data={"work_type": "<该工种 code>"})` 取全文（`fallback_from` 标注 donor 工种/版本/活证据数）
 - 建档后走计划流（凡建档任务默认走计划）：`plan_set` 建步骤 → 执行中 `step_update`
   打卡 → 计划有变 `plan_revise`；会话级 todo 用 `twin(action="todo")` 整体替换读写。
   详见下节「执行流」
@@ -63,7 +68,8 @@ description: 个人分身：工作类偏好沉淀与 persona prompt 编译，经
   todos、不重注入 persona，需要时重新 task_start；子任务回 planning 重走并记 lineage：
   parent_task_id + iteration 递增，未完结步骤深拷贝到新 task_id
 - 中断/隔日继续 → `twin(action="task_resume", data={"task_id": ...})`
-  （仅进行中 planning 的任务，自动恢复 todos 并再注入分身，同样带 persona_supplement）；
+  （仅进行中 planning 的任务，自动恢复 todos 并再注入分身，同样带 persona_supplement；
+  无专属 persona 时同域 fallback 同 task_start）；
   不再做的进行中任务用 `twin(action="task_close")` 显式关闭（关闭前先经用户确认，
   不要自行清理）；可选 `outcome` ∈ failed|superseded（**缺省 superseded**）——
   失败必须显式标 failed，否则结果列与未完成任务无法区分；关闭时未闭环步骤自动按 closed 跳过
