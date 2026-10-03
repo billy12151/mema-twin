@@ -271,6 +271,9 @@ def add_canonical(conn: sqlite3.Connection, kind: str, code: str, zh: str,
     zh = (zh or "").strip()
     if not zh:
         raise ValueError("canonicalize 需要 code 与 zh")
+    # domain 归一（轮2 对抗 P2-1）：strip+压平内部空白——F4 同域匹配按精确相等，
+    # 前导空格/换行会让该工种与其域静默失联（借入借出双双失明），无任何告警
+    domain = " ".join((domain or "").split())
     if taxonomy.by_code(kind, code) or any(r["code"] == code for r in custom_types(conn, kind)):
         raise ValueError(f"code 已存在: {kind}/{code}")
     conn.execute(

@@ -234,6 +234,10 @@ def _action_help(data: dict) -> dict:
             "task_start": "开工建档（流程注入点）。必填 brief/work_type（audience/purpose 可选，"
                           "但给了值必须在清单内——未命中整笔打回，须问用户裁定后重试）；"
                           "返回该工作性质的 persona prompt 与前置清单，进行中任务自动让位。"
+                          "该工种尚无专属 persona 时注入同域 fallback（#956 拍板）：同域"
+                          "最成熟工种（活证据最多）persona 全文垫底 + 其余同域候选摘要 +"
+                          " 降级声明（格式结构可参考、有权威来源以权威为准、内容业务规则"
+                          "不适用），专属落版自动退出。"
                           "可选 have_persona_version：同一会话此前注入过同 work_type 且版本号仍在场时申报，"
                           "版本未变则不再重复注入全文，变了则重注入并附变更说明。"
                           "响应另带 persona_supplement：该 work_type 未编译偏好增补"
@@ -244,7 +248,8 @@ def _action_help(data: dict) -> dict:
                            "可带 todos/session/note。交付后用户反馈走 twin.write 沉淀。",
             "task_resume": "续作进行中任务（仅 planning，可中断可继续）。task_id；恢复 todos、"
                            "新建 planning 任务并再注入 persona"
-                           "（含未编译增补 persona_supplement，同 task_start）。"
+                           "（含未编译增补 persona_supplement 与无专属 persona 时的"
+                           " 同域 fallback，同 task_start）。"
                            "have_persona_version 申报口径同 task_start；"
                            "已交付（submitted）的返工走 task_revise。",
             "task_revise": "已交付任务修订返工（仅 submitted）。task_id + brief/deliverable_md/"
