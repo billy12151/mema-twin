@@ -1,5 +1,49 @@
 # Changelog
 
+## [0.4.6] — 2026-10-21
+
+「agent 困在流程」事故的修复与观测补齐（internal-dev #1384；事故定性：宿主
+agent 行为空转，twin 无锁死 bug，但防跳步围栏的硬报错客观上延长空转）。
+
+- **step_update 同状态重复打卡幂等化**：迁移表新增恒等迁移（in_progress→in_progress、
+  done→done）标 `idempotent`，在写库前短路返回 `ok + no_op`——同状态重复打卡从
+  「不允许从 X 迁到 X」的硬报错改为「已是 X，本次无变更」+ 继续执行指引。不改库、
+  不动 decided_at（挂墙计时基线不被打卡刷新）、不触三门（门只拦推进新步骤）。
+  `consecutive_noop` 给出连续无变更次数，≥3 时 guidance 明示空转与三个出口
+  （红队 P1-3：单 `no_op` 布尔会让按 ok 判成败的宿主把空转识别为成功）。
+- **plan_revise 零实变不再谎报「已修订」**：steps_update 全是恒等迁移时走
+  `no_changes` 分支（v0.4.0 只为「仅 revision_reason」建过该分支）——此前会回
+  「计划已修订，被阻塞的步骤现在可推进」的成功假信号，正是事故同款模式。
+- **挂墙 advisory（stall_advisory 独立键）**：某步骤 in_progress 超过阈值
+  （`MEMA_TWIN_STALL_MINUTES`，默认 30 分钟）无推进时，后续 ok 响应附出口指引。
+  挂独立键而非 warnings——warnings 是真故障通道（落盘失败/步骤跳过/降级提醒），
+  混入会让宿主分诊失灵。同 (task_id, step_id) 有 30 分钟冷却窗（进程内 dict +
+  twin_meta 键双兜底），不每轮刷。措辞按「先自救再放弃」排序，task_close 降为
+  最后手段并带前提；独立开关 `MEMA_TWIN_STALL_ADVISORY`（与审计解耦）。
+- **action 级审计日志（twin_audit 表）**：每次 twin 调用落一行
+  （action/ok/error/ms/client/task_id/step_id，**不记正文**），环形保留近 2 万行
+  （行数帽 + 字节帽双投影）。回应事故调查的观测盲区：此前 HTTP 200 分不清业务
+  成败、服务端不留调用记录，事后只能靠 DB 状态推断。`status` 的
+  `plan_stats.audit` 给 total/failed/unreachable/last_24h/top_actions——
+  `unreachable` 单列，mema 离线期的失败不混进「空转失败率」。client 取连接头
+  （http 模式权威身份），仅读 data.client 在多宿主部署下恒为 null。
+- **首版实现被两轮独立对抗评审推翻并重写**：审计原用 twin_meta 单列 JSON 环形
+  缓冲，评审实测三重问题——满环时每次调用全量 json.loads+dumps 重写 2.8MB blob
+  （62~156ms/次，`help` 从 0.3ms 变 61ms）、写放大 ~112KB/次、跨进程读-改-写
+  最坏丢 48%、脏 JSON 一次 append 静默抹掉 299 行真实记录、注释称「<2MB」实测
+  4.52MB。换独立表 + 环形 DELETE 后单行 INSERT ~0.1ms（19x），sqlite 事务自带
+  跨进程串行，读-改-写从根上消失。旧 JSON 缓冲一次性灌入新表再删键（幂等，
+  损坏则弃键不静默重置掩盖证据）。环形 DELETE 用 id 阈值删（走主键索引）而非
+  NOT IN 子查询（全表扫 + bloom filter，复审实测同场景 6.93ms vs 0.005ms），
+  且仅超帽时才删——实测每次调用记账成本：未满环 ~1.9ms、满环 20000 行
+  ~2.0ms（对比 JSON 首版满环 62~156ms）。
+- 记账未修：恒等迁移绕过三门（done→done 也绕过 blocking 疑问门——done 步骤本
+  不该再被拦，可接受）；`consecutive_noop` 为进程内计数、服务重启清零（精确账
+  在 twin_audit 表按 action=step_update 查）；advisory 无按步骤性质的分层阈值
+  （长任务如编译 persona 会误触发，靠「正常推进请忽略」措辞兜底）；审计行无
+  保留期限（环形帽即事实期限）。
+- 测试 327 绿（316 基线 + 33 新，其中 11 条为评审发现的回归）。
+
 ## [0.4.5] — 2026-10-01
 
 F4 同域 fallback 注入（mema #956 2026-09-10 拍板，原 v0.3.9 后主项；方案

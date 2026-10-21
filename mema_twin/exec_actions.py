@@ -30,6 +30,10 @@ _PURPOSE_MAX = 500
 
 # 迁移合法性表：key=(from, to)。backfill=True 的迁移自动标追认；reason_required /
 # reflection_required 为对应字段必填的迁移。未列出的组合一律打回。
+# idempotent=True 为同状态重复打卡（v0.4.6）：幂等放行+「继续执行」指引，不
+# 改库、不报错——打转中的模型反复传同一状态时，硬报错只是额外刺激（2026-10-21
+# 「agent 困在流程」案例：步骤 159 已是 in_progress，agent 空转轮里再次打卡被
+# 打回「不允许从 in_progress 迁到 in_progress」）。
 _TRANSITIONS: dict[tuple[str, str], dict] = {}
 for _to in ("in_progress", "done", "failed", "blocked", "skipped"):
     _TRANSITIONS[("pending", _to)] = {"backfill": _to in ("done", "failed")}
@@ -39,8 +43,10 @@ _TRANSITIONS[("in_progress", "done")] = {}
 _TRANSITIONS[("in_progress", "failed")] = {"reflection_required": True}
 _TRANSITIONS[("in_progress", "blocked")] = {"reason_required": True}
 _TRANSITIONS[("in_progress", "skipped")] = {"reason_required": True}
+_TRANSITIONS[("in_progress", "in_progress")] = {"idempotent": True}
 _TRANSITIONS[("done", "pending")] = {"reason_required": True}  # 撤销完成（审计）
 _TRANSITIONS[("done", "skipped")] = {"reason_required": True}
+_TRANSITIONS[("done", "done")] = {"idempotent": True}
 _TRANSITIONS[("failed", "in_progress")] = {}  # 原步骤重试
 _TRANSITIONS[("failed", "done")] = {}
 _TRANSITIONS[("failed", "blocked")] = {"reason_required": True}
@@ -173,6 +179,42 @@ def _gate_single_in_progress(conn, task_id: int, exclude_step_id: int) -> dict |
 
 # ---- 迁移执行（step_update 与 plan_revise.steps_update 共用）----
 
+# 幂等打卡连续计数（v0.4.6，红队 P1-3）：key=(step_id, status)。进程内记忆、
+# 服务重启清零；真实迁移（非幂等）发生时同 step 的全部计数清零——状态变了
+# 「连续重复」的语义就断了。容量帽防脏 step_id 灌爆内存（观测件自缚原则）。
+_noop_counts: dict[tuple[int, str], int] = {}
+_NOOP_COUNTS_MAX = 4096
+
+
+def _bump_noop(step_id: int, to: str) -> int:
+    key = (int(step_id), to)
+    if len(_noop_counts) >= _NOOP_COUNTS_MAX and key not in _noop_counts:
+        _noop_counts.clear()  # 粗放驱逐：观测计数不值得为精确性付内存
+    n = _noop_counts.get(key, 0) + 1
+    _noop_counts[key] = n
+    return n
+
+
+def _clear_noop(step_id: int) -> None:
+    for key in [k for k in _noop_counts if k[0] == int(step_id)]:
+        del _noop_counts[key]
+
+
+def _noop_guidance(step_id: int, to: str, n: int) -> str:
+    """幂等打卡指引。n≥3 时改为空转警告（红队 P1-3：宿主按 ok 判成败，
+    连续三次无变更必须显式告知「你已在空转」并指向出口）。"""
+    if n >= 3:
+        return (f"步骤 #{step_id} 保持 {to!r}，这已是连续第 {n} 次无变更打卡"
+                f"——检测到空转：请停止重复打卡。若卡住：step_update(failed, "
+                f"reflection=…) 记录原因与对策，或 plan_revise 改计划，"
+                f"或 task_close 放弃整个任务。若正在正常推进则直接继续执行。")
+    if to == "in_progress":
+        return (f"步骤 #{step_id} 已是 in_progress，本次打卡无变更。"
+                f"直接继续执行该步骤；完成后 step_update(done)。")
+    return (f"步骤 #{step_id} 已是 {to!r}，本次打卡无变更。"
+            f"推进下一步，或全部闭环后 task_submit 收口。")
+
+
 def _apply_step_transition(conn, step: dict, to: str, reason: str | None,
                            reflection: str | None) -> dict:
     """校验并执行单步迁移。成功返回分支信息 dict（含 guidance），失败抛 ValueError
@@ -196,6 +238,19 @@ def _apply_step_transition(conn, step: dict, to: str, reason: str | None,
     if len(reflection or "") > _REFLECTION_MAX:
         raise ValueError(f"reflection 过长（上限 {_REFLECTION_MAX} 字符）")
     task_id = int(step["task_id"])
+    if rule.get("idempotent"):
+        # 同状态重复打卡（v0.4.6）：幂等成功，不写库、不动 decided_at、不触三门。
+        # 返回与正常迁移同形的分支信息，调用方无需分支；ok=True 由 _action_
+        # step_update 统一包。计为 no-op（ok=True + status 不变 + guidance 说明）。
+        # consecutive_noop（红队 P1-3）：单 no_op 布尔会让按 ok 判成败的宿主
+        # 把空转识别为成功——此处给出机器可读的连续次数，宿主可据此自警
+        # （≥3 即空转信号：停止打卡，走 guidance 里的出口）。计数按
+        # (step_id, status) 进程内记忆，服务重启清零（粗筛够用，精确账在
+        # twin_audit 表里按 action=step_update 查）。
+        n = _bump_noop(int(step["id"]), to)
+        return {"step_id": int(step["id"]), "task_id": task_id, "status": to,
+                "no_op": True, "consecutive_noop": n,
+                "guidance": _noop_guidance(int(step["id"]), to, n)}
     if to == "in_progress":
         gate = (_gate_blocking_questions(conn, task_id, int(step["id"]))
                 or _gate_dependencies(conn, step)
@@ -229,6 +284,7 @@ def _apply_step_transition(conn, step: dict, to: str, reason: str | None,
             "reason": (f"步骤 #{step['id']} 推进失败：并发窗口内另一步骤已进入"
                        " in_progress，请重读后重试")}
         raise _GateReject(gate)
+    _clear_noop(int(step["id"]))  # 真实状态变化：连续重复的语义断了，计数清零
     out: dict = {"step_id": int(step["id"]), "task_id": task_id, "status": to,
                  "backfilled": bool(rule.get("backfill"))}
     if to == "failed":
@@ -743,6 +799,16 @@ def _action_plan_revise(data: dict) -> dict:
         out["note"] = ("本次仅提交 revision_reason，未产生任何步骤/疑问变更。"
                        "修订说明需伴随 steps_add/steps_update/steps_remove/answers"
                        " 之一才会实际生效。")
+        out["guidance"] = "计划未变更。"
+        return out
+    if all(u.get("no_op") for u in updated) and not (removed or added or answered):
+        # steps_update 全是恒等迁移（v0.4.6）：agent 反复提交同一状态时走这条。
+        # 此前会回「计划已修订」的成功假信号——正是 2026-10-21 事故的同款
+        # 模式（评审 P2-1：收到"已推进"信号 → 继续空转）。如实告知零实变。
+        out["no_changes"] = True
+        out["note"] = ("本次 steps_update 提交的状态均已是当前态（无变更），"
+                       "未产生任何实际修订。真实的状态变化或 steps_add/"
+                       "steps_remove/answers 之一才会让修订生效。")
         out["guidance"] = "计划未变更。"
         return out
     out["guidance"] = ("计划已修订。被阻塞的步骤现在可推进；全部闭环后 task_submit 收口。")
