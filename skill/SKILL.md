@@ -5,7 +5,7 @@ description: 个人分身：工作类偏好沉淀与 persona prompt 编译，经
 
 # mema-twin 使用引导
 
-> 对齐服务端 **v0.4.5**。动作全集与入参以 `twin(action="help")` 为准；下文的「实测口径」
+> 对齐服务端 **v0.4.6**。动作全集与入参以 `twin(action="help")` 为准；下文的「实测口径」
 > 是 help 未覆盖或与实测不符处的补充。
 
 ## 分流规则（先判这个，再选工具）
@@ -164,6 +164,14 @@ description: 个人分身：工作类偏好沉淀与 persona prompt 编译，经
   pending 直跳 done/failed 自动标 backfilled（追认合法）。**三门**（顺序固定）：
   blocking 疑问未解答 → 依赖未闭环 → 已有单一 in_progress 时推进会被拒；
   跳过打卡直接干完的属追认，补 step_update(done) 即可，不影响收口
+  - **同状态重复打卡幂等**（v0.4.6）：对已是 in_progress 的步骤再传 in_progress
+    返回 `ok + no_op + consecutive_noop`（不报错、不改库、不刷新计时）。**看到
+    `no_op` 说明你没有推进**——连续第 3 次起 guidance 会明示空转并给出口，
+    此时停止打卡，改走：① 重试/换路径，失败就 `step_update(failed, reflection=…)`；
+    ② 计划要改 `plan_revise`；③ 任务无价值 `task_close`
+  - 响应可能带 **`stall_advisory`**（独立键，**不是** warnings）：该步骤 in_progress
+    超过 30 分钟无推进时的出口指引（同一步骤 30 分钟内只提示一次）。正常推进中的
+    长步骤（编译 persona、写长 PRD）会误触发——忽略即可；确已卡住再按指引走
 - `plan_revise`：仅 planning 且已建计划，四类修订 steps_add / steps_update
   （可改 title/description/depends_on/status）/ steps_remove（仅未开工且未被依赖可删）/
   answers / revision_reason **至少其一**。中途换路/砍步骤走这里，不要静默绕过依赖

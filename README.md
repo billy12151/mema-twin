@@ -201,6 +201,9 @@ uv venv && uv pip install -e ".[test]"
 | `MEMA_TWIN_CLIENT_ID` | `zcode` | 宿主客户端默认身份（zcode/kimi/...）。http 模式下连接头 `X-Mema-Client` 是权威身份（`data.client` 只能与头一致或省略，不一致打回，堵跨宿主冒充）；stdio 无头时 `data.client` > 本 env。agent_id 与 mema 侧偏好存储桶均写死为 `mema-twin`（子 agent 范式）——按 agent_id 一次查出所有经 twin 落库的偏好，配合 `twin:*` 标签双保险 |
 | `MEMA_TWIN_UPDATE_CHECK` | 开启 | `0`/`false`/`off` 关闭版本更新检查（daemon 线程，24h 一次，失败静默） |
 | `MEMA_TWIN_UPDATE_STATE_PATH` | `~/.local/share/mema-twin/update_state.json` | 更新检查状态文件（抑制窗口/升级基线） |
+| `MEMA_TWIN_AUDIT` | 开启 | `0`/`false`/`off` 关闭 action 级审计日志（v0.4.6：每次调用落 `twin_audit` 表一行——action/ok/error/耗时/client/task_id/step_id，不记正文；环形保留近 2 万行）。观测件：写失败静默不击穿工具响应；`status` 的 `plan_stats.audit` 给计数/失败率/top 动作 |
+| `MEMA_TWIN_STALL_MINUTES` | `30` | 挂墙 advisory 阈值（分钟）：某步骤 in_progress 超过该时长无推进，后续 ok 响应附出口指引（`stall_advisory` 独立键，不占 warnings） |
+| `MEMA_TWIN_STALL_ADVISORY` | 开启 | `0`/`false`/`off` 单独关闭挂墙 advisory（与审计开关解耦：可只留 advisory 或只留审计） |
 
 ## 多 Agent 共接（http 模式）
 

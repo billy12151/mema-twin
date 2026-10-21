@@ -247,7 +247,24 @@ def _plan_stats(conn) -> dict:
     }
     if pb_rejects:
         out["playbook_rejected"] = pb_rejects
+    # 审计面（v0.4.6）：调用计数与失败率——观测「agent 困在流程」类循环的直接
+    # 指标（step_update/plan_* 高频 + ok 率低即空转信号）。环形缓冲近 2 万条，
+    # 计数是近期窗口非全史。审计关闭（MEMA_TWIN_AUDIT=0）时返回 {"enabled": False}。
+    stats = _audit_stats()
+    if stats:
+        out["audit"] = stats
     return out
+
+
+def _audit_stats() -> dict:
+    """审计日志摘要（v0.4.6）：现用现算（SQL 聚合，不全量解析 JSON）。
+    unreachable 单列：mema 服务离线期间的失败不该混进「agent 空转失败率」
+    （评审 P2-6）。"""
+    from . import audit
+    stats = audit.stats()
+    if stats.get("enabled"):
+        stats["last_24h"] = audit.recent_24h()
+    return stats
 
 
 def _action_status(data: dict) -> dict:

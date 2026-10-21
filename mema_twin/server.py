@@ -11,12 +11,13 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 
 import anyio.to_thread
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, TextContent
 
-from . import identity, playbook_actions, pref_actions, scan, sink, task_actions
+from . import audit, identity, playbook_actions, pref_actions, scan, sink, task_actions
 from . import templates, update_monitor
 from . import compile_actions, exec_actions
 
@@ -85,8 +86,10 @@ def _twin_impl(action: str, data: dict | None = None) -> dict:
     data = data or {}
     handler = _ACTIONS.get(action)
     if handler is None:
+        audit.record(action, False, "unknown_action", 0, data, None)
         return {"ok": False, "error": "invalid_input",
                 "reason": f"unknown action {action!r}", "actions": sorted(_ACTIONS)}
+    started = time.perf_counter()
     try:
         # 入口统一注入请求头身份并校验宿主身份：脏/重复头、脏或不一致 data.client
         # 无论动作立即打回（fail-fast，也避免 handler 先落票据再炸留幽灵行）
@@ -103,16 +106,88 @@ def _twin_impl(action: str, data: dict | None = None) -> dict:
             result["mema_notices"] = notices
             result["mema_notices_guidance"] = _notices_guidance(notices)
         _attach_twin_notices(result)
+        _attach_stall_guidance(result, data)
+        _record_audit(action, result, started, data)
         return result
     except sink.SinkError as e:
-        return {"ok": False, "error": "mema_unreachable", "reason": str(e)}
+        return _audited(action, "mema_unreachable", str(e), started, data)
     except ValueError as e:
-        return {"ok": False, "error": "invalid_input", "reason": str(e)}
+        return _audited(action, "invalid_input", str(e), started, data)
     except (TypeError, AttributeError, KeyError, OverflowError,
             sqlite3.Error, OSError) as e:
         # 兜底边界（review#2）：畸形参数/存储异常绝不击穿 MCP 工具面
-        return {"ok": False, "error": "internal_error",
-                "reason": f"{type(e).__name__}: {e}"}
+        return _audited(action, "internal_error",
+                        f"{type(e).__name__}: {e}", started, data)
+
+
+def _record_audit(action: str, result, started: float, data: dict) -> None:
+    """成功/业务失败分支记账（ok 与否按 result 判定）。try 包裹：观测件
+    任何异常都不许影响已定型的工具响应。client 取连接身份（http 头权威），
+    仅读 data.client 在多宿主模式下恒为 null（评审 P2-3）。"""
+    try:
+        audit.record(action, _ok_of(result), _error_of(result),
+                     _elapsed_ms(started), data, _audit_client(data))
+    except Exception:  # noqa: BLE001 —— 观测旁路
+        pass
+
+
+def _audit_client(data: dict) -> str | None:
+    """审计归属的宿主身份：http 连接头优先（权威），回落 data.client。"""
+    try:
+        return identity.client_header() or identity.effective_client(data)
+    except Exception:  # noqa: BLE001 —— 身份读取失败不影响记账（记 null）
+        return None
+
+
+def _ok_of(result) -> bool:
+    return bool(isinstance(result, dict) and result.get("ok"))
+
+
+def _error_of(result) -> str | None:
+    if isinstance(result, dict) and not result.get("ok"):
+        return str(result.get("error") or "unknown_error")[:64]
+    return None
+
+
+def _audited(action: str, error: str, reason: str,
+             started: float, data: dict) -> dict:
+    """错误分支统一记账+返回（reason 完整返回给调用方，审计里只存 error 码）。
+    记账包 try：审计异常绝不把已定型的错误响应升级成 internal_error
+    （audit.record 自身已吞异常，这里是双保险——测试会 patch 掉它）。"""
+    try:
+        audit.record(action, False, error, _elapsed_ms(started), data,
+                     _audit_client(data))
+    except Exception:  # noqa: BLE001 —— 观测旁路，不击穿工具响应
+        pass
+    return {"ok": False, "error": error, "reason": reason}
+
+
+def _elapsed_ms(started: float) -> int:
+    return max(0, round((time.perf_counter() - started) * 1000))
+
+
+def _attach_stall_guidance(result: dict, data: dict) -> None:
+    """挂墙 advisory（v0.4.6）：仅 ok 响应附；只对带 task_id（或只有 step_id，
+    反查其所属任务）且该任务有 in_progress 超长步骤时出口指引一句（advisory
+    不拦）。step_id 反查是必须的：事故里的空转动作正是 step_update，入参没有
+    task_id——不反查则指路牌挂不到最需要的那面墙（复审 P2-1）。挂独立
+    stall_advisory 键而非 warnings——warnings 是真故障通道（交付物落盘
+    失败/步骤被跳过/降级提醒），观测提示混进去会让宿主分诊失灵（红队
+    P2-1）。本函数任何故障不击穿已成功的工具响应。"""
+    if not isinstance(result, dict) or not result.get("ok"):
+        return
+    try:
+        g = audit.stall_guidance(_task_id_of(data), data.get("step_id"))
+    except Exception:  # noqa: BLE001 —— advisory 旁路
+        return
+    if g:
+        result["stall_advisory"] = g
+
+
+def _task_id_of(data: dict):
+    """从入参取 task_id 观测键（脏值原样透给 audit.stall_guidance 的
+    int() 兜底，不在入口二次校验——动作自身有 _coerce_task_id 门）。"""
+    return data.get("task_id")
 
 
 def _notices_guidance(notices: list[dict]) -> str:
@@ -205,7 +280,8 @@ def _action_help(data: dict) -> dict:
                       "任务/步骤各态/backfilled/open blocking 疑问/tool_usage/playbooks/"
                       "playbook_rejected/采纳率 submitted_with_plan÷tasks_submitted——"
                       "分母 0 无读数，历史 submitted 会稀释，看增量任务）"
-                      "与定时任务安装提醒。",
+                      "与调用审计统计（audit：总调用/失败/近 24h/top 动作，环形缓冲近 2 万条，"
+                      "MEMA_TWIN_AUDIT=0 关闭）与定时任务安装提醒。",
             "compile": "取编译素材包（旧版本 prompt 编译参考 + **全部在世证据**（全量投影，"
                        "每版从头重编）+ 已作废条款清单 + 同受众画像参考 + 编译规则"
                        "（含义稳定表达自由/变更分级/硬预算）），"
@@ -275,7 +351,14 @@ def _action_help(data: dict) -> dict:
                            "failed/blocked/skipped）；skipped/blocked 必填 reason；"
                            "failed 必填 reflection（服务端硬门）；pending 直跳 done/failed"
                            " 自动标 backfilled（追认合法）。三门：blocking 疑问未解答、"
-                           "依赖未闭环、已有单一 in_progress 时推进会被拒。",
+                           "依赖未闭环、已有单一 in_progress 时推进会被拒。"
+                           "同状态重复打卡幂等（in_progress→in_progress 等恒等迁移返回 "
+                           "ok + no_op 与继续执行指引，不报错不改库）。"
+                           "某步骤 in_progress 超时无推进时，其他 ok 响应会附出口指引"
+                           "（advisory：failed+reflection / plan_revise / task_close 三选一，"
+                           "阈值 MEMA_TWIN_STALL_MINUTES 分钟，默认 30；step_update 只传 "
+                           "step_id 时按 step_id 反查任务，同样送达；同一步骤 30 分钟内"
+                           "只提示一次）。",
             "plan_revise": "修订计划（仅 planning 且已建计划）。steps_add / "
                            "steps_update（可改 title/description/depends_on/status，"
                            "状态迁移同 step_update 规则）/ steps_remove（仅未开工且未被"
