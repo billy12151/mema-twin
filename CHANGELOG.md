@@ -1,5 +1,20 @@
 # Changelog
 
+## [Unreleased]
+
+- **SKILL.md 按消费者拆分 + 去重精简**（docs）：skill 从 279 行/24.5KB 收到
+  两个文件——`skill/SKILL.md`（交互工作流：查证协议、分流、路由、执行门）+
+  `skill-governance/SKILL.md`（夜间治理/编译会话专用：两支线流程、
+  origin=scheduled 口径、硬预算自检、冲突裁定、验证门被拒处置、晨报汇总不代裁）。
+  拆分理由：夜间会话 80% 内容是交互死重；夜间 skill 被唯一消费者整份读，
+  无「触点不读文件」风险。三轮精简的共同原则：同一事实只留一处权威表述
+  （write 抽象口径并入分流、status 判空合一、建档默认走计划三处合一）；
+  help 已覆盖的入参与基础语义一律委托 `twin(action="help")`，只留路由、执行门
+  与 help 未列的实测口径（task_evaluate 的 origin、available_tools、aud- 前缀
+  无需 audience、X-Mema-Client、status 判空三形态等）；夜间执行细节以
+  `scan.py` SCHEDULED_TASKS_SPEC 为单一真源。Makefile install-skill 同步分发
+  两个 skill 到三宿主。语义核对：路由/信号 38 项、独有事实 69 项零丢失。
+
 ## [0.4.6] — 2026-10-21
 
 「agent 困在流程」事故的修复与观测补齐（internal-dev #1384；事故定性：宿主
