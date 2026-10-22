@@ -175,7 +175,8 @@ MCP 客户端配置（Claude Desktop / Cursor / 通用 stdio 均可）：
 }
 ```
 
-装好 skill 引导：仓库根 `make install-skill` 把 `skill/SKILL.md` 分发到三宿主技能目录
+装好 skill 引导：仓库根 `make install-skill` 把 `skill/SKILL.md`（交互工作流）与
+`skill-governance/SKILL.md`（夜间治理/编译会话专用）分发到三宿主技能目录
 （zcode / jingleAI / workbuddy，cp 保留源文件），Agent 才知道何时调 `twin.write` / `task_start`。
 
 ## 开发（本地源码）
