@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- **Bearer 前缀可选**（2026-10-25 owner 拍板）：宿主 MCP 配置的 Authorization
+  头与 `MEMA_TWIN_MEMA_TOKEN` env 均可直接写裸 token——twin 自动补
+  `Bearer ` 前缀（协议面不变：网关硬性要求前缀；`Bearer` 无体仍打回）。
 - **多租户形态（MEMA_TWIN_USERS_DIR，C 同目录同居）**：twin 与鉴权网关同机
   服务多用户——宿主各自在 MCP 配置带 Authorization 头，twin 原样透传（写谁的
   库由网关按 token 裁决，服务器零凭证落盘）；租户经网关 /whoami 解析（不缓存，

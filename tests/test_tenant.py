@@ -421,3 +421,45 @@ def test_authorizer_denies_writable_schema(users_dir):
         conn.close()
     finally:
         tenant.reset_tenant()
+
+
+# ---- Bearer 前缀可选（2026-10-25 owner 拍板：配置面不要求写前缀）----
+
+
+def test_normalize_adds_bearer_to_bare_token():
+    assert server._normalize_auth_header("tok123") == "Bearer tok123"
+
+
+def test_normalize_keeps_existing_bearer_prefix():
+    assert server._normalize_auth_header("Bearer tok123") == "Bearer tok123"
+    assert server._normalize_auth_header("bearer tok123") == "bearer tok123"
+
+
+def test_normalize_rejects_empty_bearer_body():
+    with pytest.raises(ValueError, match="无 token 体"):
+        server._normalize_auth_header("Bearer ")
+
+
+def test_env_token_header_accepts_bare_token(monkeypatch):
+    """env 兜底同款：裸值自动补前缀，带前缀原样。"""
+    monkeypatch.setenv("MEMA_TWIN_MEMA_TOKEN", "bare-tok-1")
+    assert sink._env_token_header() == "Bearer bare-tok-1"
+    monkeypatch.setenv("MEMA_TWIN_MEMA_TOKEN", "Bearer prefixed-tok")
+    assert sink._env_token_header() == "Bearer prefixed-tok"
+
+
+def test_bare_request_token_reaches_mema_with_prefix(users_dir, monkeypatch):
+    """端到端：宿主配置写裸 token → 入口补前缀 → 透传给网关的已是 Bearer 形态。"""
+    seen = {}
+    monkeypatch.setattr(server, "_request_auth_token",
+                        lambda: server._normalize_auth_header("bare-req-tok"))
+    monkeypatch.setattr(tenant, "resolve", lambda t: "u1")
+
+    def fake_call(name, arguments, client=None, timeout=30):
+        seen["token"] = sink._request_token.get()
+        return {"ok": True, "data": {"id": 1}}
+    monkeypatch.setattr(sink, "_call", fake_call)
+    r = server._twin_impl("write", {"content": "c", "work_type": "周报",
+                                    "audience": "高层", "purpose": "同步"})
+    assert r["ok"], r
+    assert seen["token"] == "Bearer bare-req-tok"

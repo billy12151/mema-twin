@@ -103,7 +103,9 @@ def _env_client() -> str:
 # token 是给鉴权端点（Bearer）的凭证，不是身份——校验只挡明显脏值
 # （空白/换行会直接搞坏 Authorization 头），格式由鉴权方判。
 # 空串/未设 = 不发头（本地无鉴权 mema 形态），不是错误。
-_TOKEN_RE = re.compile(r"^[A-Za-z0-9._~+/=-]{1,4096}$")
+# 字符集放行「Bearer + 单个空格 + token」这一种形态（2026-10-25 前缀可选：
+# 配置面写裸 token 或带前缀都合法，env 路径同款归一）。
+_TOKEN_RE = re.compile(r"^(?:[Bb]earer )?[A-Za-z0-9._~+/=-]{1,4096}$")
 
 
 def _env_token() -> str:
@@ -119,6 +121,17 @@ def _env_token() -> str:
     return value
 
 
+def _env_token_header() -> str:
+    """env token → Authorization 头值。2026-10-25 owner 拍板：配置面不要求
+    Bearer 前缀——裸 token 自动补齐（协议面不变：网关硬性要求前缀）。"""
+    value = _env_token()
+    if not value:
+        return ""
+    if value.lower().startswith("bearer "):
+        return value
+    return f"Bearer {value}"
+
+
 def _headers(client: str | None = None) -> dict[str, str]:
     headers = {
         "Content-Type": "application/json",
@@ -128,11 +141,11 @@ def _headers(client: str | None = None) -> dict[str, str]:
     }
     req_token = _request_token.get()
     if req_token:
-        headers["Authorization"] = req_token  # 原样转发（含调用方 Bearer 前缀）
+        headers["Authorization"] = req_token  # 原样转发（入口已归一化）
     else:
-        env_token = _env_token()
-        if env_token:
-            headers["Authorization"] = f"Bearer {env_token}"
+        env_header = _env_token_header()
+        if env_header:
+            headers["Authorization"] = env_header
     return headers
 
 

@@ -275,11 +275,29 @@ def _request_client() -> str | None:
         raise ValueError(f"X-Mema-Client 头非法：{e}") from None
 
 
+def _normalize_auth_header(text: str) -> str:
+    """Authorization 头规范化（2026-10-25 owner 拍板：配置面不要求写 Bearer
+    前缀——MCP 客户端配置里直接填裸 token，减少一步「不知道要加前缀」的坑）。
+
+    语义（与 mema core `_bearer_token` 兼容）：
+    - 已有 ``Bearer `` 前缀（任意大小写）→ 原样保留；
+    - 无前缀 → 补成 ``Bearer <text>``（网关 `_bearer_token` 硬性要求前缀，
+      这里补齐 = 配置面自由，协议面不变）；
+    - 前缀在但无体 → 打回（而不是静默当无 token）。
+    """
+    if text.lower().startswith("bearer "):
+        rest = text[7:].strip()
+        if not rest:
+            raise ValueError("Authorization 头非法（Bearer 前缀无 token 体）")
+        return text
+    return f"Bearer {text}"
+
+
 def _request_auth_token() -> str | None:
     """http 请求的 Authorization 头（多租户透传凭证，与 _request_client 同款
-    取头方式）：恰好一个、strip 后非空才返回；值原样透传给 mema（含调用方
-    的 Bearer 前缀，不重构）。stdio/无活跃请求 → None。脏值打回 ValueError
-    且**绝不回显值**（token 进报错/日志即泄露）。"""
+    取头方式）：恰好一个、strip 后非空才返回；经 _normalize_auth_header 归一
+    （裸 token 自动补 Bearer 前缀，已有前缀原样）。stdio/无活跃请求 → None。
+    脏值打回 ValueError 且**绝不回显值**（token 进报错/日志即泄露）。"""
     get_context = getattr(mcp, "get_context", None)
     if not callable(get_context):
         return None
@@ -308,7 +326,7 @@ def _request_auth_token() -> str | None:
         return None
     if any(ord(ch) < 0x20 or ch == "\x7f" for ch in text):
         raise ValueError("Authorization 头非法（含控制字符）")
-    return text
+    return _normalize_auth_header(text)
 
 
 def _action_help(data: dict) -> dict:

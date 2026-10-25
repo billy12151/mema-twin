@@ -198,7 +198,7 @@ uv venv && uv pip install -e ".[test]"
 | `MEMA_TWIN_DELIVERABLES_DIR` | `<项目>/deliverables` | 交付物文件目录 |
 | `MEMA_TWIN_MEMA_URL` | `http://127.0.0.1:8000/mcp` | mema HTTP MCP 端点；远端/经网关部署时指向对应 `/mcp` 端点 |
 | `MEMA_TWIN_MEMA_TOKEN` | 未设 | 鉴权端点的 Bearer token（单用户形态兜底；由该 mema 部署的管理员签发）。非空时请求带 `Authorization: Bearer`。**多租户形态（设了 `MEMA_TWIN_USERS_DIR`）下禁用**——token 必须随请求透传 |
-| `MEMA_TWIN_USERS_DIR` | 未设 | 多租户形态开关：指向鉴权网关的 users 目录。设置后 twin 进入多租户形态——账本/镜像按租户落 `users/<uid>/twin.sqlite3` 与 `users/<uid>/twin-files/`，宿主各自在 MCP 配置带 `Authorization: Bearer` 头（**必须带 `Bearer ` 前缀**，twin 原样透传，写谁的库由网关裁决）；与 `MEMA_TWIN_MEMA_TOKEN`/`MEMA_TWIN_DB_PATH`/三个镜像目录 env 互斥，仅支持 http 传输 |
+| `MEMA_TWIN_USERS_DIR` | 未设 | 多租户形态开关：指向鉴权网关的 users 目录。设置后 twin 进入多租户形态——账本/镜像按租户落 `users/<uid>/twin.sqlite3` 与 `users/<uid>/twin-files/`，宿主各自在 MCP 配置带 `Authorization` 头（**裸 token 即可，`Bearer ` 前缀可省略**——twin 自动补齐；写谁的库由网关裁决）；与 `MEMA_TWIN_MEMA_TOKEN`/`MEMA_TWIN_DB_PATH`/三个镜像目录 env 互斥，仅支持 http 传输 |
 | `MEMA_TWIN_TRANSPORT` | `stdio` | `stdio`（默认，单机零运维）或 `http`（多 Agent 共接，mema 同款形态） |
 | `MEMA_TWIN_HTTP_HOST` / `MEMA_TWIN_HTTP_PORT` | `127.0.0.1` / `8765` | http 模式监听地址；端点 `/mcp`，无状态直调（免 initialize） |
 | `MEMA_TWIN_CLIENT_ID` | `zcode` | 宿主客户端默认身份（zcode/kimi/...）。http 模式下连接头 `X-Mema-Client` 是权威身份（`data.client` 只能与头一致或省略，不一致打回，堵跨宿主冒充）；stdio 无头时 `data.client` > 本 env。agent_id 与 mema 侧偏好存储桶均写死为 `mema-twin`（子 agent 范式）——按 agent_id 一次查出所有经 twin 落库的偏好，配合 `twin:*` 标签双保险 |
@@ -237,8 +237,9 @@ mema 部署在远端（带鉴权网关）且要服务多个用户时：twin 与�
 `MEMA_TWIN_MEMA_URL` 指向网关 loopback `/mcp`，`MEMA_TWIN_USERS_DIR` 指向
 网关 users 目录，即进入多租户形态：
 
-- 宿主 Agent 的 MCP 配置携带**自己的** `Authorization: Bearer` 头，twin 原
-  样透传——偏好写谁的库由网关按 token 裁决，twin 全程不落盘任何凭证；
+- 宿主 Agent 的 MCP 配置携带**自己的** `Authorization` 头（**裸 token 即可，
+  `Bearer ` 前缀可省略**，twin 自动补齐），twin 透传给网关——偏好写谁的库由
+  网关按 token 裁决，twin 全程不落盘任何凭证；
 - 租户身份经网关 `/whoami` 解析（token → user_id），twin 账本与文件镜像按
   租户落 `users/<uid>/twin.sqlite3` 与 `users/<uid>/twin-files/`——与该用户
   memory.sqlite3 同目录、同备份单元，core 的库迁移对 twin 文件零接触；
