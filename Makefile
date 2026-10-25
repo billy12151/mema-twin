@@ -1,4 +1,4 @@
-JINGLEAI_ACCOUNT ?= dev-user
+JINGLEAI_ACCOUNT ?= $(shell whoami)
 
 SKILL_HOSTS := $(HOME)/.zcode/skills/mema-twin \
                 $(HOME)/.jingleAI/accounts/$(JINGLEAI_ACCOUNT)/skills/mema-twin \

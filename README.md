@@ -196,7 +196,8 @@ uv venv && uv pip install -e ".[test]"
 | `MEMA_TWIN_PROMPTS_DIR` | `<项目>/prompts` | prompt 文件镜像目录 |
 | `MEMA_TWIN_PLAYBOOKS_DIR` | `<项目>/playbooks` | playbook 文件镜像目录 |
 | `MEMA_TWIN_DELIVERABLES_DIR` | `<项目>/deliverables` | 交付物文件目录 |
-| `MEMA_TWIN_MEMA_URL` | `http://127.0.0.1:8000/mcp` | mema HTTP MCP 端点 |
+| `MEMA_TWIN_MEMA_URL` | `http://127.0.0.1:8000/mcp` | mema HTTP MCP 端点；远端/经网关部署时指向对应 `/mcp` 端点 |
+| `MEMA_TWIN_MEMA_TOKEN` | 未设 | 鉴权端点的 Bearer token（由该 mema 部署的管理员签发）。非空时请求带 `Authorization: Bearer`；未设/空 = 不发头（本地无鉴权 mema 形态不变）。缺失/无效时 mema 回 401，sink 报文明指此变量 |
 | `MEMA_TWIN_TRANSPORT` | `stdio` | `stdio`（默认，单机零运维）或 `http`（多 Agent 共接，mema 同款形态） |
 | `MEMA_TWIN_HTTP_HOST` / `MEMA_TWIN_HTTP_PORT` | `127.0.0.1` / `8765` | http 模式监听地址；端点 `/mcp`，无状态直调（免 initialize） |
 | `MEMA_TWIN_CLIENT_ID` | `zcode` | 宿主客户端默认身份（zcode/kimi/...）。http 模式下连接头 `X-Mema-Client` 是权威身份（`data.client` 只能与头一致或省略，不一致打回，堵跨宿主冒充）；stdio 无头时 `data.client` > 本 env。agent_id 与 mema 侧偏好存储桶均写死为 `mema-twin`（子 agent 范式）——按 agent_id 一次查出所有经 twin 落库的偏好，配合 `twin:*` 标签双保险 |
@@ -228,6 +229,15 @@ MEMA_TWIN_TRANSPORT=http .venv/bin/mema-twin   # 监听 127.0.0.1:8765/mcp
 一律打回，不会静默记错归属；http 绑定仅允许 loopback（X-Mema-* 头不是鉴权，
 对外暴露等于开放身份伪造）。会话 todo / 任务流按 `session` 参数隔离。stdio 模式
 不受影响，仍是单机默认。
+
+## 远端部署（sidecar 形态）
+
+mema 部署在远端且端点带鉴权时：twin 与 mema 同机部署，`MEMA_TWIN_MEMA_URL`
+指向其 loopback `/mcp` 端点，`MEMA_TWIN_MEMA_TOKEN` 携带签发的 Bearer token，
+偏好写入即落该 mema 部署的目标库——与该部署的其他 mema 客户端同一个库。twin
+自有元数据仍落 `twin.sqlite3`（schema 不同、生命周期不同，不合文件）。公网
+不暴露 twin（loopback 硬门不变），宿主 Agent 经 SSH 隧道接入。systemd 模板见
+`deploy/mema-twin.service`（`<...>` 占位符按部署填值）。
 
 ## 开发
 

@@ -1,0 +1,57 @@
+# mema-twin.service — systemd unit 模板（远端/自托管 sidecar 形态）。
+#
+# 使用：复制到 /etc/systemd/system/mema-twin.service，替换下面 4 个 <...>
+# 占位符，然后 `systemctl daemon-reload && systemctl enable --now mema-twin`：
+#   <venv>          venv 安装路径（ExecStart 用其 bin/mema-twin）
+#   <user>          运行账号（专用非特权账号，勿 root）
+#   <twin-base>     twin 数据根目录（twin.sqlite3 / prompts/ 等落这里）
+#   <secrets-file>  存 MEMA_TWIN_MEMA_TOKEN 的环境文件路径（chmod 600）
+#
+# 形态：偏好本体经 MEMA_TWIN_MEMA_URL 写 mema（默认本地 core 的 8000 端口；
+# mema 端点带鉴权时改为该端点，并在 <secrets-file> 配 token）；宿主 Agent 经
+# SSH 隧道接 127.0.0.1:8765/mcp。
+#
+# 安全边界（不变量）：
+# - MEMA_TWIN_HTTP_HOST 必须 loopback——X-Mema-Client 不是鉴权，对外暴露
+#   等于开放身份伪造（twin 启动自检强制，mema core 同款策略）。
+# - token 明文只进 <secrets-file>（unit 文件通常 world-readable，勿写这里）。
+#   确定启用鉴权端点后，建议去掉 EnvironmentFile 的 "-" 前缀：env 文件缺失
+#   直接启动失败，好过运行期才发现 401。
+# - UMask=0077：twin.sqlite3 与 prompts/ 镜像含个人画像，0600。
+
+[Unit]
+Description=mema-twin (personal work twin MCP server)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+ExecStart=<venv>/bin/mema-twin
+User=<user>
+WorkingDirectory=<twin-base>
+
+UMask=0077
+
+Environment=MEMA_TWIN_TRANSPORT=http
+Environment=MEMA_TWIN_HTTP_HOST=127.0.0.1
+Environment=MEMA_TWIN_HTTP_PORT=8765
+
+# mema 端点：本地 core 默认 8000；远端/经鉴权网关时改为对应 /mcp 端点
+Environment=MEMA_TWIN_MEMA_URL=http://127.0.0.1:8000/mcp
+EnvironmentFile=-<secrets-file>
+
+# twin 自有数据（元数据/镜像），与 mema 库分文件——设计如此，不是遗漏
+Environment=MEMA_TWIN_DB_PATH=<twin-base>/twin.sqlite3
+Environment=MEMA_TWIN_PROMPTS_DIR=<twin-base>/prompts
+Environment=MEMA_TWIN_PLAYBOOKS_DIR=<twin-base>/playbooks
+Environment=MEMA_TWIN_DELIVERABLES_DIR=<twin-base>/deliverables
+
+# 无外网的部署可放开下一行，关闭版本更新检查
+#Environment=MEMA_TWIN_UPDATE_CHECK=0
+
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

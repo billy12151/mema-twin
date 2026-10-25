@@ -1,7 +1,7 @@
 """v0.4.6 三条改动（「agent 困在流程」调查落地的修复）：step_update 同状态
 重复打卡幂等化、in_progress 挂墙 advisory、action 级审计日志。
 
-对应 internal-dev #1384：2026-10-21 案例定性为宿主 agent 行为空转，twin 无
+对应 issue #1384：2026-10-21 案例定性为宿主 agent 行为空转，twin 无
 锁死 bug，但防跳步围栏的硬报错客观上延长空转。三条改动都不新增硬门、不改变
 既有迁移合法性（除恒等迁移由打回改幂等），全部 advisory/观测向。
 """
