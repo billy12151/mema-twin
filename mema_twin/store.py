@@ -6,7 +6,7 @@ import os
 import sqlite3
 from pathlib import Path
 
-from . import db, taxonomy
+from . import db, taxonomy, tenant
 
 # 受众画像伪类型前缀（v0.3.6）：aud-{audience_code} 存于 twin_prompt_versions，
 # 复用版本/rollback/镜像全套；画像派生自该受众的全部证据，不消耗证据。
@@ -45,6 +45,8 @@ def _is_known_audience(conn: sqlite3.Connection, audience_code: str) -> bool:
 
 
 def prompts_dir() -> Path:
+    if tenant.users_dir_mode():
+        return tenant.mirror_root() / "prompts"
     return Path(os.environ.get("MEMA_TWIN_PROMPTS_DIR") or db.PROJECT_ROOT / "prompts")
 
 

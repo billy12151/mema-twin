@@ -20,6 +20,7 @@ from mcp.types import CallToolResult, TextContent
 from . import audit, identity, playbook_actions, pref_actions, scan, sink, task_actions
 from . import templates, update_monitor
 from . import compile_actions, exec_actions
+from . import tenant
 
 mcp = FastMCP("mema-twin", stateless_http=True)  # http 模式免 initialize 直调（mema 同款）
 
@@ -98,6 +99,25 @@ def _twin_impl(action: str, data: dict | None = None) -> dict:
         # mema notice 透传（v0.3.7）：入口清零、出口统一附带——任何触达 mema 的
         # 动作（内部 read/find 也会 claim notice，先到先得）都可能在响应带出
         sink.reset_notices()
+        # 多租户（2026-10-25）：入口清零 tenant/token contextvar（对齐 notices
+        # 的 reset 模式），USERS_DIR 形态解析租户并硬拒矩阵（除 help 外缺头/
+        # 坏 token 一律打回）；token 透传优先级=请求头 > env 兜底（default
+        # 形态）。解析（含 whoami 同步 HTTP）在本线程内——不回事件循环。
+        tenant.reset_tenant()
+        sink.reset_request_token()
+        token = _request_auth_token()
+        if tenant.users_dir_mode() and action != "help":
+            if not token:
+                return _audited(action, "unauthorized",
+                                "多租户形态需要 Authorization: Bearer 头（宿主 MCP 配置"
+                                "携带自己的 mema token）", started, data)
+            try:
+                tenant.set_tenant(tenant.resolve(token))
+            except sink.SinkAuthError as e:
+                return _audited(action, "unauthorized", str(e), started, data)
+            except sink.SinkUnavailableError as e:
+                return _audited(action, "tenant_unavailable", str(e), started, data)
+        sink.set_request_token(token)
         result = handler(data)
         notices = sink.collect_notices()
         # 非 ok 的 dict 响应同样附带（评审轮1 P3-4）：notice 被 claim 即 delivered
@@ -111,6 +131,11 @@ def _twin_impl(action: str, data: dict | None = None) -> dict:
         return result
     except sink.SinkError as e:
         return _audited(action, "mema_unreachable", str(e), started, data)
+    except tenant.TenantError as e:
+        # 多租户形态的结构化拒绝（互斥 env/目录缺失/租户未设）——不接住会
+        # 裸逃逸出工具面（对抗轮2 P1：裸 RuntimeError + 服务器绝对路径直打
+        # 客户端）。审计在无租户时静默跳过（_audited 自吞），属已知观测面。
+        return _audited(action, "tenant_unavailable", str(e), started, data)
     except ValueError as e:
         return _audited(action, "invalid_input", str(e), started, data)
     except (TypeError, AttributeError, KeyError, OverflowError,
@@ -248,6 +273,42 @@ def _request_client() -> str | None:
         return identity.validate_client_value(str(value))
     except ValueError as e:
         raise ValueError(f"X-Mema-Client 头非法：{e}") from None
+
+
+def _request_auth_token() -> str | None:
+    """http 请求的 Authorization 头（多租户透传凭证，与 _request_client 同款
+    取头方式）：恰好一个、strip 后非空才返回；值原样透传给 mema（含调用方
+    的 Bearer 前缀，不重构）。stdio/无活跃请求 → None。脏值打回 ValueError
+    且**绝不回显值**（token 进报错/日志即泄露）。"""
+    get_context = getattr(mcp, "get_context", None)
+    if not callable(get_context):
+        return None
+    try:
+        request = get_context().request_context.request
+        headers = getattr(request, "headers", None)
+    except (AttributeError, LookupError, TypeError, ValueError):
+        return None
+    if headers is None:
+        return None
+    getlist = getattr(headers, "getlist", None)
+    if callable(getlist):
+        values = list(getlist("Authorization"))
+        if len(values) > 1:
+            raise ValueError("Authorization 头必须恰好一个（收到多个）")
+    value = headers.get("authorization")
+    if value is None:
+        for key, candidate in headers.items():
+            if str(key).casefold() == "authorization":
+                value = candidate
+                break
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if any(ord(ch) < 0x20 or ch == "\x7f" for ch in text):
+        raise ValueError("Authorization 头非法（含控制字符）")
+    return text
 
 
 def _action_help(data: dict) -> dict:
@@ -426,6 +487,30 @@ def main() -> None:
     data.client > env）。
     """
     import os
+    # 多租户形态启动校验（对抗评审 v4 P1-2/P1-3/P2）：仅 http（stdio 无请求头
+    # 无法解析租户）；token/镜像/DB env 全互斥（解析点还会再强制——这里是快
+    # 失败）；目录须像网关 users/（数字子目录），防指错到别的副本安静建库。
+    if tenant.users_dir_mode():
+        transport_probe = (os.environ.get("MEMA_TWIN_TRANSPORT") or "stdio").strip().lower()
+        if transport_probe in ("stdio", ""):
+            raise SystemExit(
+                "启动失败：MEMA_TWIN_USERS_DIR 多租户形态仅支持 http 传输"
+                "（stdio 无请求头，租户无法解析）")
+        for env in tenant.EXCLUSIVE_ENVS:
+            if (os.environ.get(env) or "").strip():
+                raise SystemExit(
+                    f"启动失败：{env} 与 MEMA_TWIN_USERS_DIR 互斥"
+                    "（多租户形态 token 随请求透传、路径按租户收口）")
+        from pathlib import Path as _Path
+        users_root = _Path(os.environ[tenant.USERS_DIR_ENV])
+        if not users_root.is_dir():
+            raise SystemExit(f"启动失败：MEMA_TWIN_USERS_DIR={users_root} 不存在")
+        bad = sorted(c.name for c in users_root.iterdir()
+                     if c.is_dir() and not c.name.isdigit())
+        if bad:
+            raise SystemExit(
+                "启动失败：MEMA_TWIN_USERS_DIR 不像网关 users 目录"
+                f"（含非数字子目录：{bad[:3]}）")
     # 升级检查（v0.4 P0）：daemon 线程后台跑，不阻塞启动；禁用 env 下内部 no-op
     update_monitor.maybe_start_check_if_due()
     # 启动即校验 env 兜底身份与 token，脏值清晰报错退出，不留给运行期中途炸

@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+- **多租户形态（MEMA_TWIN_USERS_DIR，C 同目录同居）**：twin 与鉴权网关同机
+  服务多用户——宿主各自在 MCP 配置带 Authorization 头，twin 原样透传（写谁的
+  库由网关按 token 裁决，服务器零凭证落盘）；租户经网关 /whoami 解析（不缓存，
+  吊销即时生效），账本/镜像按租户落 `users/<uid>/twin.sqlite3` 与
+  `users/<uid>/twin-files/`——与该用户 memory.sqlite3 同目录同备份单元，core
+  的库迁移机制对 twin 文件零接触。防御纵深（两轮方案对抗评审 + 两轮实施
+  review 全部采纳）：USERS_DIR 形态缺头/坏 token 除 help 外全拒（unauthorized /
+  tenant_unavailable 两态错误面）；租户 contextvar 未设时 db.connect() 即抛
+  （fail-closed 覆盖 audit/normalize 等全部直连点）；SQLite authorizer 引擎
+  强制 twin_* 命名空间（白名单外含 ATTACH 一律 DENY；writable_schema PRAGMA
+  引擎层封死——直写 sqlite_master 的唯一使能开关；CREATE TABLE 的内部
+  sqlite_master INSERT 经探针确认不可拆分保留）；进程内会话 todo 桶/文件镜像/
+  stall 冷却键全部带租户维度（P0：todo 桶原实现同 session 名跨租户互见互覆）；
+  playbook 镜像路径用 canonical 解析段而非原始 key + 路径字符别名归一拒绝
+  （P0：alias 链携带 `../` 实测跨租户写镜像）；USERS_DIR 与静态 token/镜像/DB
+  env 互斥（启动校验 + 解析点双重强制）、stdio 传输在多租户形态启动即拒；
+  TenantError 落结构化错误不裸逃逸；twin 不代建 users/<uid>/ 目录（由网关
+  /whoami 预建 store 时产生）。default 单用户形态行为零变化。测试 369 绿
+  （340 基线 + 29 新）。
 - **鉴权端点支持（MEMA_TWIN_MEMA_TOKEN）**：sink 新增 `Authorization: Bearer`
   头——env 非空才发，未设/空 = 不发头（本地无鉴权 mema 形态零变化）。与
   `MEMA_TWIN_MEMA_URL` 指向带鉴权的 mema 端点组合，偏好写入落到该端点背后的

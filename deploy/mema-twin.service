@@ -41,7 +41,15 @@ Environment=MEMA_TWIN_HTTP_PORT=8765
 Environment=MEMA_TWIN_MEMA_URL=http://127.0.0.1:8000/mcp
 EnvironmentFile=-<secrets-file>
 
-# twin 自有数据（元数据/镜像），与 mema 库分文件——设计如此，不是遗漏
+# 多租户形态（服务网关的多个用户）：指向网关 users 目录——账本/镜像按租户
+# 落 users/<uid>/，token 随请求透传（静态 token env 与镜像/DB env 均不可设，
+# 且仅支持 http 传输）。单用户自托管不设此行。运行账号需对该目录有写权
+#（网关部署中通常即网关服务账号）。
+#Environment=MEMA_TWIN_USERS_DIR=<gateway-users-dir>
+
+# twin 自有数据（元数据/镜像），与 mema 库分文件——设计如此，不是遗漏。
+# ⚠️ 多租户形态（设置 MEMA_TWIN_USERS_DIR）下以下四行必须整段删除或注释
+#（与之互斥，启动会 fail-fast 拒绝）；单用户自托管保留即可。
 Environment=MEMA_TWIN_DB_PATH=<twin-base>/twin.sqlite3
 Environment=MEMA_TWIN_PROMPTS_DIR=<twin-base>/prompts
 Environment=MEMA_TWIN_PLAYBOOKS_DIR=<twin-base>/playbooks

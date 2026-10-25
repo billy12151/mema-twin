@@ -17,7 +17,7 @@ import os
 import sqlite3
 from pathlib import Path
 
-from . import db, sink
+from . import db, sink, tenant
 
 # 状态机（v0.3.8 三态）：planning → submitted（终态，交付即收口）；superseded =
 # 被新任务让位/修订/关闭（历史保留）。存量行的 approved/rejected/pending 仅作
@@ -156,11 +156,19 @@ _todos_by_session: dict[str, list[dict]] = {}
 
 
 def _todos_for(session_key: str | None) -> list[dict]:
-    return _todos_by_session.get(session_key or _DEFAULT_SESSION, [])
+    return _todos_by_session.get(_tenant_session_key(session_key), [])
 
 
 def _set_todos(session_key: str | None, todos: list[dict]) -> None:
-    _todos_by_session[session_key or _DEFAULT_SESSION] = todos
+    _todos_by_session[_tenant_session_key(session_key)] = todos
+
+
+def _tenant_session_key(session_key: str | None) -> str:
+    """进程内 todo 桶的键（对抗评审 v4 P0：多租户同 session 名/默认桶互撞
+    = 跨租户工作清单互见互覆）。租户前缀取 contextvar；default 形态恒
+    None → 前缀空串，键与历史版本完全一致。"""
+    t = tenant.current_tenant() or ""
+    return f"{t}:{session_key or _DEFAULT_SESSION}"
 
 
 def normalize_todos(todos) -> list[dict]:
@@ -393,9 +401,14 @@ def recent_tasks(limit: int = 10) -> list[dict]:
 # ---- 交付物文件（approve 时落盘，审计工件，plan-mode 的 plan_file 同款）----
 
 def deliverables_dir() -> Path:
-    root = Path(os.environ.get("MEMA_TWIN_PROMPTS_DIR")
-                or db.PROJECT_ROOT / "prompts").parent
-    d = Path(os.environ.get("MEMA_TWIN_DELIVERABLES_DIR") or root / "deliverables")
+    if tenant.users_dir_mode():
+        # 多租户：task_id 各租户库各自从 1 起自增，镜像必须按租户收口
+        #（对抗评审 v4 P0-2：全局目录下 task-1.md 互相覆盖 = 交付稿串户）。
+        d = tenant.mirror_root() / "deliverables"
+    else:
+        root = Path(os.environ.get("MEMA_TWIN_PROMPTS_DIR")
+                    or db.PROJECT_ROOT / "prompts").parent
+        d = Path(os.environ.get("MEMA_TWIN_DELIVERABLES_DIR") or root / "deliverables")
     d.mkdir(parents=True, exist_ok=True)
     return d
 

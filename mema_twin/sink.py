@@ -22,6 +22,35 @@ class SinkError(RuntimeError):
     pass
 
 
+class SinkAuthError(SinkError):
+    """鉴权被拒（HTTP 401/403）：token 无效/缺失/吊销。调用方据此与
+    「网关半可用」「网络不可达」分开映射（多租户入口的三态错误面）。"""
+
+
+class SinkUnavailableError(SinkError):
+    """对端在但答不上来（5xx/响应形态异常）：不是网络问题也不是鉴权问题。"""
+
+
+# ---- 请求级 token 透传（多租户，2026-10-25）----
+#
+# 宿主 MCP 配置携带各自的 Authorization 头，server 入口读出后经
+# contextvar 传入线程（anyio to_thread 传播），_headers 原样转发——
+# 写谁的库由网关按 token 裁决，twin 全程不落盘不落日志。
+# 优先级：请求头（原样，含 Bearer 前缀）> MEMA_TWIN_MEMA_TOKEN env
+#（拼 Bearer，本地指向鉴权网关的单机形态兜底）> 不发头（本地无鉴权）。
+# 线程内副本随线程消亡；入口仍显式清零（对齐 reset_notices 模式）。
+_request_token: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "mema_request_token", default=None)
+
+
+def set_request_token(value: str | None) -> None:
+    _request_token.set(value)
+
+
+def reset_request_token() -> None:
+    _request_token.set(None)
+
+
 # ---- mema notice 透传（v0.3.7）----
 #
 # mema 的 notice 投递是"每个成功 memory 响应 claim 一条、claim 即 delivered、
@@ -97,9 +126,13 @@ def _headers(client: str | None = None) -> dict[str, str]:
         "X-Mema-Client": client or _env_client(),
         "X-Mema-Agent-Id": _AGENT_ID,
     }
-    token = _env_token()
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
+    req_token = _request_token.get()
+    if req_token:
+        headers["Authorization"] = req_token  # 原样转发（含调用方 Bearer 前缀）
+    else:
+        env_token = _env_token()
+        if env_token:
+            headers["Authorization"] = f"Bearer {env_token}"
     return headers
 
 
@@ -169,6 +202,51 @@ def _call_and_drain(name: str, arguments: dict, client: str | None = None,
     resp = _call(name, arguments, client=client, timeout=timeout)
     _drain_notices(resp)
     return resp
+
+
+def whoami_url() -> str:
+    """网关身份端点：由 MCP 端点推导（…/mcp → …/whoami）。twin 必须与网关
+    同机 loopback 直连（/whoami 不在公网 nginx 的 /mcp location 内）。"""
+    base = _base_url().rstrip("/")
+    if base.endswith("/mcp"):
+        base = base[: -len("/mcp")]
+    return f"{base}/whoami"
+
+
+def whoami(token: str, timeout: int = 10) -> dict:
+    """网关身份解析（多租户）：GET /whoami + token 原样透传 → {user_id,name}。
+
+    三态错误面（P2 分诊）：401/403 → SinkAuthError（token 被拒）；5xx/响应
+    形态异常 → SinkUnavailableError；网络不可达 → SinkError。报文永不回显
+    token（值只进请求头，不进任何异常/日志）。"""
+    req = urllib.request.Request(
+        whoami_url(), method="GET",
+        headers={"Accept": "application/json", "Authorization": token})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read(4096).decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try:
+            detail = e.read(2048).decode("utf-8", "replace")[:200]
+        except Exception:
+            pass
+        if e.code in (401, 403):
+            raise SinkAuthError(
+                f"网关拒绝该 token（HTTP {e.code}）——无效或已吊销，"
+                "检查宿主 MCP 配置的 Authorization 头") from e
+        raise SinkUnavailableError(
+            f"whoami HTTP {e.code}（{whoami_url()}）: {detail or e.reason}") from e
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        raise SinkError(f"mema 网关不可达（{whoami_url()}）: {e}") from e
+    try:
+        parsed = json.loads(body)
+    except json.JSONDecodeError as e:
+        raise SinkUnavailableError(f"whoami 响应非 JSON: {body[:120]!r}") from e
+    if not (isinstance(parsed, dict) and parsed.get("ok")
+            and isinstance(parsed.get("user_id"), int)):
+        raise SinkUnavailableError(f"whoami 响应形态异常: {str(parsed)[:120]}")
+    return parsed
 
 
 def remember(content: str, subject: str, tags: list[str], workspace: str,

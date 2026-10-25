@@ -3,9 +3,16 @@
 偏好记忆本体不在这里——存 mema（经 HTTP MCP 读写）；twin 只管类型归一、
 待裁长尾、编译产物和证据指针索引（twin_evidence 只存 mema 记忆 id 与维度
 标签，不存正文；设计文档 mema-avatar-design-2026-09-02.md D2/D3 + 实施方案 M1.3）。
+
+多租户（2026-10-25，C 同目录同居形态）：USERS_DIR 形态下账本按租户落在
+网关 users/<uid>/twin.sqlite3（与该用户 memory.sqlite3 同目录、同备份单元，
+core 迁移机制对 twin 文件零接触）；路径解析单点在 tenant 模块，本文件只经
+``tenant.db_path()`` 取路径。authorizer 把「twin 只碰 twin_* 表」钉成引擎
+强制（含封死 ATTACH 旁路），default 自有库形态同样生效。
 """
 from __future__ import annotations
 
+import contextvars
 import datetime as _dt
 import json
 import os
@@ -13,7 +20,7 @@ import re
 import sqlite3
 from pathlib import Path
 
-from . import taxonomy
+from . import taxonomy, tenant
 
 _CODE_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
@@ -76,6 +83,11 @@ CREATE INDEX IF NOT EXISTS idx_twin_evidence_lookup
 
 
 def db_path() -> Path:
+    """账本路径单点（多租户双态）：USERS_DIR 形态 → tenant.db_path()
+    （fail-closed：租户未解析/目录不存在即抛错，绝不代建）；default 形态 →
+    MEMA_TWIN_DB_PATH 或项目根 twin.sqlite3（历史行为）。"""
+    if tenant.users_dir_mode():
+        return tenant.db_path()
     return Path(os.environ.get("MEMA_TWIN_DB_PATH") or PROJECT_ROOT / "twin.sqlite3")
 
 
@@ -102,19 +114,63 @@ def validate_code_segment(value: str) -> str:
 _wal_ready: set[str] = set()
 
 
+# ---- authorizer：twin_* 命名空间引擎强制（2026-10-25 多租户 P1）----
+#
+# 白名单之外一律 DENY，重点封死 ATTACH/DETACH（经 twin 连接挂载网关
+# users/ 下邻居文件——如别人的 memory.sqlite3——的旁路）。表名判定：
+# 多数动作 arg1=表名；ALTER_TABLE / 建删索引触发器是 arg2=表名
+# （arg1 是索引/触发器/库名）。sqlite_ 内部表只读放行（AUTOINCREMENT
+# 的 sqlite_sequence 也要用）。
+_AUTH_ARG1_TABLE = frozenset({
+    sqlite3.SQLITE_READ, sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE,
+    sqlite3.SQLITE_DELETE, sqlite3.SQLITE_CREATE_TABLE, sqlite3.SQLITE_DROP_TABLE,
+    sqlite3.SQLITE_ANALYZE, sqlite3.SQLITE_CREATE_VIEW, sqlite3.SQLITE_DROP_VIEW,
+})
+_AUTH_ARG2_TABLE = frozenset({
+    sqlite3.SQLITE_ALTER_TABLE, sqlite3.SQLITE_CREATE_INDEX,
+    sqlite3.SQLITE_DROP_INDEX, sqlite3.SQLITE_CREATE_TRIGGER,
+    sqlite3.SQLITE_DROP_TRIGGER,
+})
+
+
+def _authorize(action: int, arg1, arg2, _db_name, _trigger) -> int:
+    if action in (sqlite3.SQLITE_ATTACH, sqlite3.SQLITE_DETACH):
+        return sqlite3.SQLITE_DENY
+    if action == sqlite3.SQLITE_PRAGMA and str(arg1 or "").lower() == "writable_schema":
+        # 直写 sqlite_master 的唯一使能开关，引擎层封死（对抗轮2 P2）。
+        # 注：CREATE TABLE 本身会对 sqlite_master 发 SQLITE_INSERT（探针
+        # 实测），所以「sqlite_ 表只写读」在 authorizer 层不可实现——封
+        # PRAGMA 是等价且不砖化建表的收口。
+        return sqlite3.SQLITE_DENY
+    if action in _AUTH_ARG1_TABLE:
+        name = str(arg1 or "")
+    elif action in _AUTH_ARG2_TABLE:
+        name = str(arg2 or "")
+    else:
+        return sqlite3.SQLITE_OK  # 事务/函数/PRAGMA 等无表语义动作
+    if name.startswith("twin_") or name.startswith("sqlite_"):
+        return sqlite3.SQLITE_OK
+    return sqlite3.SQLITE_DENY
+
+
 def connect() -> sqlite3.Connection:
     path = db_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
+    if not tenant.users_dir_mode():
+        # mkdir 仅限 default 自有库形态——USERS_DIR 形态的目录归属网关，
+        # tenant_root() 已验存在；此处再 mkdir 会在竞窗内代建 users/<uid>/
+        #（轮1 P3：违背「不代建」不变量）。
+        path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
+    conn.set_authorizer(_authorize)
     conn.execute("PRAGMA busy_timeout=5000")
     key = str(path)
     if key not in _wal_ready:
         try:
             conn.execute("PRAGMA journal_mode=WAL")
+            _wal_ready.add(key)  # 成功才记账（原实现无条件 add：首连 BUSY 后本进程永不重试）
         except sqlite3.OperationalError:
             pass  # 与并发写锁冲突：WAL 多数情况已就位，下次连接再补
-        _wal_ready.add(key)
     conn.executescript(_SCHEMA)
     _seed_types(conn)
     _migrate(conn, key)
@@ -246,6 +302,10 @@ def append_alias(conn: sqlite3.Connection, kind: str, code: str, alias: str) -> 
     a = alias.strip()
     if not a:
         return json.loads((_ensure_type_row(conn, kind, code))["aliases"] or "[]")
+    if "/" in a or "\\" in a or ".." in a:
+        # 路径字符别名会经 playbook 镜像路径拼接外逃（对抗轮2 P0-1）——
+        # 这类 raw 值不该被归一进体系，resolve 应走 reject 而非 map
+        raise ValueError(f"别名含路径字符，拒绝归一：{a!r}（请改用 reject）")
     # 对抗 review#7：同一别名不允许挂到第二个 canonical——否则归一结果由行序决定，
     # 用户后一次治理会静默推翻前一次
     for row in conn.execute(

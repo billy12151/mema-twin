@@ -25,7 +25,7 @@ import json
 import os
 import sqlite3
 
-from . import db
+from . import db, tenant
 
 # 行数帽（环形 DELETE 保留最近 N 行）：观测价值在近期窗口
 _MAX_ROWS = 20000
@@ -372,7 +372,8 @@ def stall_guidance(task_id, step_id=None) -> str | None:
         if not stale:
             return None
         r = stale[0]
-        key = f"{_ADVISORY_KEY_PREFIX}{tid}:{int(r['id'])}"
+        key = (f"{tenant.current_tenant() or ''}"
+               f"{_ADVISORY_KEY_PREFIX}{tid}:{int(r['id'])}")
         if not _cooldown_ok(key, r["decided_at"]):
             return None
         extra = ""

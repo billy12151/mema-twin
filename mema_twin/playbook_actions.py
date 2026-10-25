@@ -9,10 +9,33 @@ playbook 是独立键空间（twin_playbooks 表，key = work_type code 或 'glo
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
+from pathlib import Path
 
-from . import db, exec_actions, flow, identity, store, templates
+from . import db, exec_actions, flow, identity, store, templates, tenant
+
+
+def _playbook_mirror_dir(conn: sqlite3.Connection, key: str) -> Path:
+    """playbook 镜像目录：**路径段用 canonical 解析结果，绝不用原始 key**。
+
+    key 可经 alias 链携带 ``../``（对抗轮2 P0-1 实测：resolve(map) 把路径
+    型 raw 收进别名后，mirror 路径拼接外逃到其他租户的 twin-files）——DB 键
+    保留原值向后兼容，路径只认解析出的 canonical。global 是唯一非 work_type
+    键。解析失败（别名已被治理移除等）响亮拒绝，不落到镜像根。"""
+    if tenant.users_dir_mode():
+        root = tenant.mirror_root() / "playbooks"
+    else:
+        root = Path(os.environ.get("MEMA_TWIN_PLAYBOOKS_DIR")
+                    or Path(os.environ.get("MEMA_TWIN_PROMPTS_DIR")
+                            or db.PROJECT_ROOT / "prompts").parent / "playbooks")
+    if key == "global":
+        return root / "global"
+    seg = store.resolve_work_type_code(conn, key) or ""
+    if not seg or "/" in seg or "\\" in seg or ".." in seg:
+        raise ValueError(f"playbook key 无法解析为安全路径段：{key!r}")
+    return root / seg
 
 
 def _pb_echo_marker(text: str) -> str | None:
@@ -206,9 +229,7 @@ def create_playbook_version(conn, key: str, content_md: str,
                 raise
             continue
     conn.commit()
-    root = Path(os.environ.get("MEMA_TWIN_PROMPTS_DIR")
-                or db.PROJECT_ROOT / "prompts").parent
-    d = Path(os.environ.get("MEMA_TWIN_PLAYBOOKS_DIR") or root / "playbooks") / key
+    d = _playbook_mirror_dir(conn, key)
     for f in (f"v{version}.md", "active.md"):
         try:
             d.mkdir(parents=True, exist_ok=True)
@@ -463,10 +484,7 @@ def _action_playbook_rollback(data: dict) -> dict:
         warnings: list[str] = []
         import os
         from pathlib import Path
-        root = Path(os.environ.get("MEMA_TWIN_PROMPTS_DIR")
-                    or db.PROJECT_ROOT / "prompts").parent
-        d = Path(os.environ.get("MEMA_TWIN_PLAYBOOKS_DIR")
-                 or root / "playbooks") / key
+        d = _playbook_mirror_dir(conn, key)
         try:
             d.mkdir(parents=True, exist_ok=True)
             tmp = d / "active.md.tmp"
