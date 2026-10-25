@@ -428,9 +428,10 @@ def main() -> None:
     import os
     # 升级检查（v0.4 P0）：daemon 线程后台跑，不阻塞启动；禁用 env 下内部 no-op
     update_monitor.maybe_start_check_if_due()
-    # 启动即校验 env 兜底身份，脏值清晰报错退出，不留给运行期中途炸
+    # 启动即校验 env 兜底身份与 token，脏值清晰报错退出，不留给运行期中途炸
     try:
         sink._env_client()
+        sink._env_token()
     except ValueError as e:
         raise SystemExit(f"启动失败：{e}")
     transport = (os.environ.get("MEMA_TWIN_TRANSPORT") or "stdio").strip().lower()

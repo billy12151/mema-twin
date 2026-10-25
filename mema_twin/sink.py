@@ -3,6 +3,10 @@
 实测（2026-09-02，mema 0.15.2）：端点无状态，tools/call 可不先 initialize；
 必须带 X-Mema-Client / X-Mema-Agent-Id 身份头，否则 invalid_mema_identity。
 响应为 SSE 帧（event: message / data: {...}），此处只解析 data 行。
+
+鉴权端点形态（2026-10-25）：mema 端点带 Bearer 鉴权时（如部署在鉴权网关后，
+无 token 即 401），MEMA_TWIN_MEMA_TOKEN 非空随请求带 Authorization: Bearer；
+本地 loopback mema 无鉴权，不设即不发——两个形态同一代码路径。
 """
 from __future__ import annotations
 
@@ -67,13 +71,36 @@ def _env_client() -> str:
     return value
 
 
+# token 是给鉴权端点（Bearer）的凭证，不是身份——校验只挡明显脏值
+# （空白/换行会直接搞坏 Authorization 头），格式由鉴权方判。
+# 空串/未设 = 不发头（本地无鉴权 mema 形态），不是错误。
+_TOKEN_RE = re.compile(r"^[A-Za-z0-9._~+/=-]{1,4096}$")
+
+
+def _env_token() -> str:
+    value = (os.environ.get("MEMA_TWIN_MEMA_TOKEN") or "").strip()
+    if not value:
+        return ""
+    if not _TOKEN_RE.fullmatch(value):
+        # 不回显任何片段：脏 token 往往是真 token 带了粘贴换行/空格，
+        # 前缀随报错进日志/journalctl 就是实质泄露（对抗评审轮2 P1）
+        raise ValueError(
+            f"MEMA_TWIN_MEMA_TOKEN env 非法（仅允许 token 常用字符集、"
+            f"长度 1-4096；当前值长度 {len(value)}）")
+    return value
+
+
 def _headers(client: str | None = None) -> dict[str, str]:
-    return {
+    headers = {
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
         "X-Mema-Client": client or _env_client(),
         "X-Mema-Agent-Id": _AGENT_ID,
     }
+    token = _env_token()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
 
 
 def _parse_sse(body: str) -> dict:
@@ -99,6 +126,21 @@ def _call(name: str, arguments: dict, client: str | None = None,
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             body = resp.read().decode("utf-8")
+    except urllib.error.HTTPError as e:
+        # HTTPError 是 URLError 子类，必须先于「不可达」分支捕获——被拒
+        # （401 token 错/403 tool 拦/421 host 门）≠ 不可达，云端部署首故障
+        # 就是 token 缺失，误报"不可达"会把排查引向网络层。
+        detail = ""
+        try:
+            detail = e.read(2048).decode("utf-8", "replace")[:200]
+        except Exception:
+            pass
+        hint = ""
+        if e.code == 401:
+            hint = "（token 缺失或无效：鉴权端点形态需 MEMA_TWIN_MEMA_TOKEN）"
+        elif e.code == 421:
+            hint = "（host 门：检查 MEMA_TWIN_MEMA_URL 指向的端点）"
+        raise SinkError(f"mema HTTP {e.code}{hint}（{_base_url()}）: {detail or e.reason}") from e
     except (urllib.error.URLError, TimeoutError, OSError) as e:
         # URLError 不覆盖读 body 途中超时/连接重置（review#4）
         raise SinkError(f"mema HTTP MCP 不可达（{_base_url()}）: {e}") from e

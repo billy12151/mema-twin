@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+- **鉴权端点支持（MEMA_TWIN_MEMA_TOKEN）**：sink 新增 `Authorization: Bearer`
+  头——env 非空才发，未设/空 = 不发头（本地无鉴权 mema 形态零变化）。与
+  `MEMA_TWIN_MEMA_URL` 指向带鉴权的 mema 端点组合，偏好写入落到该端点背后的
+  目标库；twin 自有元数据仍落独立 twin.sqlite3（schema 不同、生命周期不同，
+  设计如此不合文件）。token env 校验对齐 MEMA_TWIN_CLIENT_ID 同款纪律（含
+  空白/换行/注入形态就地打回，启动即校验）；token 明文走 EnvironmentFile
+  不进 unit 文件。
+- **sink HTTP 错误面拆分**：HTTPError（此前被 URLError 父类分支吞掉）单独
+  捕获——401/421 是「被拒」不是「不可达」，401 报文明指 MEMA_TWIN_MEMA_TOKEN、
+  421 指 host 门，响应 detail 透出 200 字符。鉴权端点部署首故障是 token 缺失，
+  旧报文「不可达」会把排查错误地引向网络层。
+- **部署件**：`deploy/mema-twin.service` systemd 模板（loopback 硬门 /
+  UMask=0077 / `<...>` 占位符，自托管可用）。
+- 测试 340 绿（332 基线 + 8 新：token 头/不发头/身份头共存/脏值打回/启动校验/
+  401 与 421 报文语义/真连不上仍报不可达）。
 - **SKILL.md 按消费者拆分 + 去重精简**（docs）：skill 从 279 行/24.5KB 收到
   两个文件——`skill/SKILL.md`（交互工作流：查证协议、分流、路由、执行门）+
   `skill-governance/SKILL.md`（夜间治理/编译会话专用：两支线流程、
@@ -17,7 +32,7 @@
 
 ## [0.4.6] — 2026-10-21
 
-「agent 困在流程」事故的修复与观测补齐（internal-dev #1384；事故定性：宿主
+「agent 困在流程」事故的修复与观测补齐（issue #1384；事故定性：宿主
 agent 行为空转，twin 无锁死 bug，但防跳步围栏的硬报错客观上延长空转）。
 
 - **step_update 同状态重复打卡幂等化**：迁移表新增恒等迁移（in_progress→in_progress、
