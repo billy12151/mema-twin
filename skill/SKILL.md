@@ -5,7 +5,7 @@ description: 个人分身：工作类偏好沉淀与 persona prompt 编译，经
 
 # mema-twin 使用引导
 
-> 对齐服务端 **v0.4.6**。动作全集、入参与基础语义以 `twin(action="help")` 为准——**调用动作前先查一次 help**（会话内一次即可），本文件不复述入参。下文只写三样：何时用哪个动作的路由、执行门、help 未覆盖或与实测不符的口径。
+> 对齐服务端 **v0.4.7**。动作全集、入参与基础语义以 `twin(action="help")` 为准——**调用动作前先查一次 help**（会话内一次即可），本文件不复述入参。下文只写三样：何时用哪个动作的路由、执行门、help 未覆盖或与实测不符的口径。
 > **夜间治理/编译会话不需要本 skill**：twin_nightly_compile 两支线与 compile/submit 编译口径在 `mema-twin-governance` skill（唯一真源），本文件只留指向它的路由。
 
 ## 查证协议（任何动作之前，先于分流；2026-10-22 立）
@@ -48,7 +48,7 @@ description: 个人分身：工作类偏好沉淀与 persona prompt 编译，经
 - 建档后走计划流（详见「执行流」）：`plan_set` 建步骤 → `step_update` 打卡 → 计划有变 `plan_revise`；会话级 todo 用 `twin(action="todo")` 读写
 - 走了非常规工具路径（失败/重试/降级、首次打通的新路子）→ `twin(action="tool_log")`（口径见「执行流」）
 - 查任务 → `twin(action="task_recent")` / `twin(action="task_get")`；**两者都回 `deliverable_md` 全文**，token 敏感时把 limit 压到 1–3
-- 交付稿完成 → `twin(action="task_submit")` 即收口（submit 是终点，无评审环；交付稿落盘 `deliverables/task-<id>.md` 留档）。**收口门**：建档任务的未闭环步骤会被整笔打回（附 open_steps 清单），逐条对账打卡后再交；用户看过稿子后的修改意见按**合并沉淀**口径走 twin.write
+- 交付稿完成 → `twin(action="task_submit")` 即收口（submit 是终点，无评审环；交付稿落盘 `deliverables/task-<id>.md` 留档）。**收口门**：建档任务的未闭环步骤会被整笔打回（附 open_steps 清单），逐条对账打卡后再交；**一次往返收口**（v0.4.7）：task_submit 直接带 `steps`（同 step_update 批量结构，须属本任务）先补打卡再收口——被拒时响应带 `steps_applied`（打卡已落库、幂等），按 open_steps 补齐直接重交即可，无需重新打卡；用户看过稿子后的修改意见按**合并沉淀**口径走 twin.write
 - 要返工改稿 → `twin(action="task_revise")`（仅 submitted；brief/deliverable_md/revision_reason 至少其一）。revise 不恢复 todos、不重注入 persona，需要时重新 task_start；子任务回 planning 重走并记 lineage：parent_task_id + iteration 递增，未完结步骤深拷贝到新 task_id
 - 中断/隔日继续 → `twin(action="task_resume")`（仅进行中 planning，自动恢复 todos 并再注入分身，同样带 persona_supplement 与同域 fallback）；不再做的进行中任务用 `twin(action="task_close")` 显式关闭（**关闭前先经用户确认**，不要自行清理）；失败必须显式标 `outcome=failed`（缺省 superseded），否则结果列与未完成任务无法区分
 - **同会话重复注入省 token**：同一会话再次 task_start/task_resume 同 work_type，且上文注入返回的 persona_version 仍在场（未被上下文压缩）→ 传 `have_persona_version=<上文版本号>`，版本未变则不再重复注入全文；上文不可见就**不要传**（服务端会照常全文注入，宁可重复不可缺席）
@@ -72,7 +72,7 @@ description: 个人分身：工作类偏好沉淀与 persona prompt 编译，经
 
 ## 三字段选码（归一门：清单硬约束，未命中必问用户）
 
-- write / task_start 之前**必须**手上有枚举清单：同一会话首次先 `twin(action="taxonomy")`（kind=work_type|audience|purpose）查清单，从清单里选最贴的 canonical code（或其别名/中文名）作为三字段的值——不要凭记忆造说法；已查过的清单会话内直接复用（清单动态：用户裁定后新码/新别名立即生效，届时重查对应 kind）
+- write / task_start 之前**必须**手上有枚举清单：同一会话首次先 `twin(action="taxonomy")`（kind=work_type|audience|purpose，**可传数组或 `"all"` 一次取全**——多类形状判别式=响应有无 `kinds` 键）查清单，从清单里选最贴的 canonical code（或其别名/中文名）作为三字段的值——不要凭记忆造说法；已查过的清单会话内直接复用（清单动态：用户裁定后新码/新别名立即生效，届时重查对应 kind）。**选码/归一用完整版**（完整别名面只在完整响应里）；会话内重复拉取省 token 用 `compact=true`（code/zh/aliases 前 5）
 - 清单里确实没有合适项时，给**你认为最合适的原始值**：写入会被**整笔打回**（错误里附完整清单与 pending 票据）——此时**必须问用户**二选一：① 归一到已有值 → resolve(map)（原值进别名表，同一说法终身只问这一次）；② 创建新值 → resolve(canonicalize)（新码即刻进清单）。用户说"不在意"→ 选最贴近的已有值；用户说"这条不写"→ resolve(reject) 并放弃本次（**reject 后不得再拿原值重试**）。裁定完成后用原值重试 write/task_start 即命中；resolve 报"已裁定不可重复裁定"说明他方已裁定，直接重试写入即可
 - 不要硬凑近义枚举、也不要给"其他"——枚举里没有 other，杂项不配当分类
 - 白天裁定入口：`twin(action="pending")` 列待裁票据（夜间任务晨报只汇总，**不代裁**，留你在场时裁）
@@ -82,10 +82,10 @@ description: 个人分身：工作类偏好沉淀与 persona prompt 编译，经
 建档任务默认走计划——计划通道与 persona 注入是并列的，别只做了 task_start 就动手。各动作 schema 与基础门见 help，此节只补 help 没有的口径。
 
 - **两档路由（必须遵守）**：凡 task_start 建档的任务默认属重复执行型工作——开工前**必须**先 `twin(action="plan_set")` 列出步骤计划再动手。唯一豁免是无重复执行价值的一次性事务（问候、查即时信息、无产出物的一问一答），这类不建档；**既已建档即默认走计划，没有"这个任务比较简单"的例外**。拿不准要不要建计划时，建。
-- `plan_set`：没把握、或你确认不了的点写进 open_questions，**要紧的标 blocking 先与用户澄清再推进关联步骤**（服务端会拦），答复经 `plan_revise(answers=…)` 写回解锁
-- `step_update`：**三门**（顺序固定）：blocking 疑问未解答 → 依赖未闭环 → 已有单一 in_progress 时推进会被拒。跳过打卡直接干完的属追认，补 step_update(done) 即可，不影响收口
+- `plan_set`：没把握、或你确认不了的点写进 open_questions，**要紧的标 blocking 先与用户澄清再推进关联步骤**（服务端会拦），答复经 `plan_revise(answers=…)` 写回解锁。task_start 后紧接建计划时 **task_id 可省略**——恰一个 planning 任务时自动回退（响应 `task_id_resolved`+`resolved_brief` 回显被解析任务，核对 brief 再用返回的 task_id）；被拒附清单时显式传 task_id
+- `step_update`：**三门**（顺序固定）：blocking 疑问未解答 → 依赖未闭环 → 已有单一 in_progress 时推进会被拒。跳过打卡直接干完的属追认，补 step_update(done) 即可，不影响收口。**批量**（v0.4.7）：`steps=[{step_id,status,reason?,reflection?}]`（1..50）+ 顶层 `task_id` 必填（跨任务拒），一次往返打多步卡；单事务任一条被拒整笔回滚（`failed_index` 标位），`applied`/`noop` 分列
   - **同状态重复打卡幂等**（v0.4.6）：返回 `ok + no_op + consecutive_noop`（不报错、不改库、不刷新计时）。**看到 `no_op` 说明你没有推进**——连续第 3 次起 guidance 会明示空转并给出口，此时停止打卡，改走：① 重试/换路径，失败就 `step_update(failed, reflection=…)`；② 计划要改 `plan_revise`；③ 任务无价值 `task_close`
   - 响应可能带 **`stall_advisory`**（独立键，**不是** warnings）：该步骤 in_progress 超过 30 分钟无推进时的出口指引（同一步骤 30 分钟内只提示一次）。正常推进中的长步骤（编译 persona、写长 PRD）会误触发——忽略即可；确已卡住再按指引走
 - `plan_revise`：中途换路/砍步骤走这里，不要静默绕过依赖
-- `tool_log`：**只记失败/重试/降级与首次成功的非常规路径**，常规重复成功不记。note 记法：工具超时换备用成功（outcome=degraded，记换成了什么）/ 报错重试后通过（outcome=success，记首次失败原因）/ 彻底失败换路径（outcome=fail，记改走了什么）
+- `tool_log`：**只记失败/重试/降级与首次成功的非常规路径**，常规重复成功不记。入参是 `entries` 数组（1..50 条，每条 `{tool, purpose, outcome: success|fail|degraded, note?, skill_digest?}`，可选 task_id）——不要按单条字段平铺传。note 记法：工具超时换备用成功（outcome=degraded，记换成了什么）/ 报错重试后通过（outcome=success，记首次失败原因）/ 彻底失败换路径（outcome=fail，记改走了什么）
 - task_submit 对未建计划的交付回一条**经验流失提醒**（advisory 不拦）：执行经验不会进 playbook 沉淀——重复执行型工作下次开工先 plan_set，一次性事务下次不必建档；收到该提醒即说明这次漏走了计划流

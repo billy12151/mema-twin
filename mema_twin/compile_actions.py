@@ -93,6 +93,34 @@ def _compile_audience_profiles(conn, code: str, client: str | None = None) -> li
     return out
 
 
+def _conflict_warning(client: str | None = None) -> dict | None:
+    """0.18.3 策展面（owner 拍板 2026-11-01 Q7=A「twin 冲突马上提示」）：编译
+    素材含未裁决冲突时警示——带着矛盾证据编译=把矛盾固化进 persona。走
+    sink.review_conflicts（与 status.open_conflicts 同通道同口径：status=='open'
+    且 workspace_canonical==本桶），不直开 memory.sqlite3（C 形态不变量：twin
+    只经 mema 接口读它，直开绕过 authorizer 且耦合内部表结构）；软失败返回
+    None——缺警示不阻断编译，console 侧另有常驻警示区兜底。"""
+    try:
+        resp = sink.review_conflicts(client=client)
+    except (sink.SinkError, AttributeError, TypeError, ValueError):
+        return None
+    payload = (resp.get("data") or resp or {}) if isinstance(resp, dict) else {}
+    conf = payload.get("conflicts")
+    if not isinstance(conf, list):
+        return None
+    bucket = _bucket()
+    mine = [c for c in conf if isinstance(c, dict)
+            and c.get("status") == "open"
+            and c.get("workspace_canonical") == bucket]
+    if not mine:
+        return None
+    keep = ("id", "memory_ids", "reason", "created_at", "status")
+    items = [{k: c[k] for k in keep if k in c} for c in mine[:10]]
+    return {"pending": len(mine), "items": items,
+            "hint": "存在未解决的偏好冲突，persona 编译素材包含矛盾证据；"
+                    "请先在 mema Console 处理（保留哪条/作废哪条），否则编译产物将自相矛盾"}
+
+
 def _action_compile(data: dict) -> dict:
     wt = str(data.get("work_type") or "").strip()
     if not wt:
@@ -113,6 +141,9 @@ def _action_compile(data: dict) -> dict:
         t = taxonomy.by_code("work_type", code)
         active = store.get_active(conn, code)
         client = identity.effective_client(data)
+        # 冲突警示在逐条证据 read **之前**打（v0.4.7）：mema 挂死时先 10s 软失败
+        # 拿到警示判定，而不是 N×30s 读超时之后——对夜间编译预算更友好
+        conflict_warning = _conflict_warning(client)
         if aud is not None:
             # 受众画像素材（AR-2）：该受众全部证据（不分 compiled），逐条 read
             rows = db.audience_evidence(conn, aud)
@@ -137,6 +168,14 @@ def _action_compile(data: dict) -> dict:
         aud or code, title_zh, active, evidence,
         audience_profiles=audience_profiles, audience_mode=aud is not None,
         voided=voided)
+    # 0.18.3 策展面：警示段插素材头部+结构化字段（conflict_warning 已在证据
+    # read 之前算好），由编译会话转告用户（console 亦有常驻警示区）
+    if conflict_warning is not None:
+        material = (
+            f"> ⚠️ **{conflict_warning['pending']} 条 twin 偏好冲突未解决**（详见 conflict_warning 字段）——"
+            f"素材中的矛盾证据尚未经用户裁决，编译产物可能与既有 persona 自相矛盾。\n\n" + material
+        )
+
     out: dict = {"ok": True, "work_type": code,
                  "current_version": (active or {}).get("version"),
                  "evidence_count": len(evidence), "material": material,
@@ -148,6 +187,8 @@ def _action_compile(data: dict) -> dict:
                          "twin(action=\"submit\", data={work_type, prompt_md, source_memory_ids, model})"}
     if skipped:
         out["skipped_evidence"] = skipped
+    if conflict_warning is not None:
+        out["conflict_warning"] = conflict_warning
     return out
 
 

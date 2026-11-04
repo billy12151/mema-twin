@@ -422,6 +422,36 @@ def _action_task_submit(data: dict) -> dict:
     if err := _brief_guard(str(data.get("brief") or "").strip()):
         # brief 可选覆盖 update_deliverable，超长同样打回（对抗评审轮2 P2-5）
         return {"ok": False, "error": "invalid_input", "field": "brief", "reason": err}
+    # 附带补打卡（v0.4.7）：steps 在独立事务先落库——位于全部廉价校验之后、gate
+    # 预检之前；与收口非同一事务（既有 task_submit 本就跨多连接）。steps 落库后
+    # 的一切拒绝路径都带 steps_applied + 重试引导（打卡幂等，修正后直接重交）。
+    steps_applied: int | None = None
+    steps_in = data.get("steps")
+    if steps_in is not None:
+        parsed, serr = exec_actions.parse_step_entries(steps_in)
+        if serr is not None:
+            return serr
+        flow.ensure_schema()
+        sconn = db.connect()
+        try:
+            outcome, serr = exec_actions.apply_step_entries(
+                sconn, parsed, expect_task_id=int(tid))
+            if serr is not None:
+                return serr  # 未落库：任务与步骤均不动，无漂移
+            steps_applied = int(outcome[1])
+            sconn.commit()
+        finally:
+            sconn.close()
+
+    def _with_steps(payload: dict) -> dict:
+        if steps_applied is None:
+            return payload
+        payload = dict(payload)
+        payload["steps_applied"] = steps_applied
+        payload.setdefault("hint", "所附 steps 已落库（打卡幂等）——按 open_steps 清单"
+                                   "补齐/修正后直接重试 task_submit，无需重新打卡"
+                                   "（若计划已被重建，按新清单重新对账）")
+        return payload
     # 收口门预检（v0.4 P1）：建过计划且有未闭环步骤 → 拒绝（对账引导，把墙变对账
     # 机会）。此为快筛——真正的门在下方条件 UPDATE 的 NOT EXISTS 里原子复查
     # （对抗评审轮2 P2-1：门查后他宿主 plan_set 插入未闭环步骤的竞窗）
@@ -434,7 +464,7 @@ def _action_task_submit(data: dict) -> dict:
     finally:
         gate_conn.close()
     if gate is not None:
-        return gate
+        return _with_steps(gate)
     # submit 即快照会话 todos 进任务行（plan-mode submit_plan 同款），resume 才有得恢复；
     # 空会话传 None 保留原快照（review#5：空列表会把 COALESCE 当真值清掉 todos）
     session_todos = flow.current_todos(data.get("session"))
@@ -457,15 +487,16 @@ def _action_task_submit(data: dict) -> dict:
             row = conn.execute("SELECT status FROM twin_tasks WHERE id=?",
                                (int(tid),)).fetchone()
             if row is None:
-                return {"ok": False, "error": "not_found", "reason": f"task id {tid}"}
+                return _with_steps({"ok": False, "error": "not_found",
+                                    "reason": f"task id {tid}"})
             if row["status"] != "planning":
-                return {"ok": False, "error": "invalid_input",
-                        "reason": f"task {tid} 状态为 {row['status']!r}，不可提交"
-                                  "（submitted 已是终态；交付后返工走 task_revise）"}
+                return _with_steps({"ok": False, "error": "invalid_input",
+                                    "reason": f"task {tid} 状态为 {row['status']!r}，不可提交"
+                                              "（submitted 已是终态；交付后返工走 task_revise）"})
             gate = exec_actions.submit_gate(conn, int(tid))
-            return gate if gate is not None else {
+            return _with_steps(gate) if gate is not None else _with_steps({
                 "ok": False, "error": "invalid_input",
-                "reason": "收口门并发复查未过：存在未闭环计划步骤，请重读后逐条对账"}
+                "reason": "收口门并发复查未过：存在未闭环计划步骤，请重读后逐条对账"})
         block_warnings = exec_actions.blocking_questions_warning(conn, int(tid))
         conn.commit()
     finally:
@@ -474,6 +505,9 @@ def _action_task_submit(data: dict) -> dict:
                  "guidance": ("已交付收口（task_submit 即终点）。用户对交付稿的修改与意见是"
                               "偏好信号：有反馈就 twin.write 沉淀（注明来源交付物）；"
                               "需要返工走 task_revise 生成修订任务。")}
+    if steps_applied is not None:
+        # 无 steps 时键缺席（缺位断言锁住，防「加键容易删键难」）
+        out["steps_applied"] = steps_applied
     # 落盘在状态迁移之后（评审 P2-A5）：正文已在库，文件只是审计镜像；重读库内
     # 最新防并发写错版本（review#5 同款）；OSError/sqlite 失败降级 warning 不回滚
     fresh = flow.get_task(int(tid)) or {}

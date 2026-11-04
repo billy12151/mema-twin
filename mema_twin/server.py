@@ -379,7 +379,12 @@ def _action_help(data: dict) -> dict:
             "get": "取某 work_type 的 persona prompt（DB 优先，文件镜像降级）。参数 work_type；"
                    "可选 version 取指定历史版本全文；"
                    "work_type 传 aud-{受众} 可读受众画像。",
-            "taxonomy": "列枚举清单（动态：含治理追加别名与自建 canonical）。参数 kind ∈ work_type|audience|purpose。",
+            "taxonomy": "列枚举清单（动态：含治理追加别名与自建 canonical）。参数 kind ∈ "
+                        "work_type|audience|purpose，或数组一次取多类、'all' 取全部"
+                        "（判别式=响应有无 kinds 键；多类形状顶层 count_total，条目附 "
+                        "kind 字段；数组传单元素也走多类形状）。compact=true 精简投影"
+                        "（code/zh/aliases 前 5——省 token 拉取用；选码/归一请用完整版，"
+                        "完整别名面只在非 compact 响应里）。",
             "pending": "列归一门待裁票据（打回的长尾值，含打回次数）。参数 status（默认 pending）。",
             "resolve": "治理待裁值。pending_id + decision ∈ map(带 code)|canonicalize(带 new_type{code,zh,en,domain})|reject"
                        "（reject=不入体系并放弃本次写入，不得拿原值重试）。",
@@ -400,7 +405,10 @@ def _action_help(data: dict) -> dict:
                           "client 字段同 write（http 共接时头已带则无需传）。",
             "task_submit": "提交交付稿并收口（submit 即终点，v0.3.8 无评审环）：落盘"
                            "deliverables/task-N.md 审计文件。必填 task_id/deliverable_md；"
-                           "可带 todos/session/note。交付后用户反馈走 twin.write 沉淀。",
+                           "可带 todos/session/note；可带 steps（v0.4.7，同 step_update "
+                           "批量结构且须属本任务）：先补打卡再收口一次往返——steps 已落库"
+                           "后被拒时响应带 steps_applied，修正后直接重试，无需重新打卡。"
+                           "交付后用户反馈走 twin.write 沉淀。",
             "task_resume": "续作进行中任务（仅 planning，可中断可继续）。task_id；恢复 todos、"
                            "新建 planning 任务并再注入 persona"
                            "（含未编译增补 persona_supplement 与无专属 persona 时的"
@@ -419,14 +427,17 @@ def _action_help(data: dict) -> dict:
             "task_get": "取单个任务全量。task_id。",
             "todo": "会话 todo 读写（plan-mode 同款语义：整体替换，至多一条 in_progress）。传 todos 替换，不传读取。",
             "plan_set": "建执行计划（开工第一件事；凡建档任务默认走计划，拿不准时建）。"
-                        "必填 task_id/steps（[{title, description?, depends_on?}]，"
+                        "必填 steps（[{title, description?, depends_on?}]，"
+                        "task_id 可省略：全局恰一个 planning 任务时自动回退"
+                        "（响应 task_id_resolved 与 resolved_brief 回显被解析任务，供核对），"
+                        "0 个或多个 planning 任务时打回并附清单；"
                         "depends_on 引用 1-based 序号，不许自引用/成环）；"
                         "可选 open_questions（[{question, step_ids?, blocking?}]，"
                         "blocking 缺省 false）——没把握、确认不了的点列在这里，要紧的"
                         "标 blocking，先与用户澄清，答复经 plan_revise(answers=…) 写回。"
                         "响应即可开工，无审批门。重复调用=重建计划（旧未完结步骤按 "
                         "replanned 跳过，done 历史保留）。",
-            "step_update": "步骤打卡。step_id/status（六态：pending/in_progress/done/"
+            "step_update": "步骤打卡。单条：step_id/status（六态：pending/in_progress/done/"
                            "failed/blocked/skipped）；skipped/blocked 必填 reason；"
                            "failed 必填 reflection（服务端硬门）；pending 直跳 done/failed"
                            " 自动标 backfilled（追认合法）。三门：blocking 疑问未解答、"
@@ -437,7 +448,11 @@ def _action_help(data: dict) -> dict:
                            "（advisory：failed+reflection / plan_revise / task_close 三选一，"
                            "阈值 MEMA_TWIN_STALL_MINUTES 分钟，默认 30；step_update 只传 "
                            "step_id 时按 step_id 反查任务，同样送达；同一步骤 30 分钟内"
-                           "只提示一次）。",
+                           "只提示一次）。"
+                           "批量（v0.4.7）：steps=[{step_id,status,reason?,reflection?}]"
+                           "（1..50 条）+ 顶层 task_id 必填（批内跨任务拒；单事务，"
+                           "任一条被拒整笔回滚，错误带 failed_index；applied=实际变更数、"
+                           "noop=幂等数分列）——与顶层 step_id/status 互斥。",
             "plan_revise": "修订计划（仅 planning 且已建计划）。steps_add / "
                            "steps_update（可改 title/description/depends_on/status，"
                            "状态迁移同 step_update 规则）/ steps_remove（仅未开工且未被"

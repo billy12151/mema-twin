@@ -437,27 +437,77 @@ def _coerce_version_field(data: dict):
 
 def _action_taxonomy(data: dict) -> dict:
     """动态清单（v0.3.8 B3）：twin_types 实时读（治理追加别名/自建 canonical
-    立刻可见），内置枚举兜底合并——与归一匹配侧同源。"""
-    kind = str(data.get("kind") or "work_type")
-    if kind not in taxonomy.KINDS:
+    立刻可见），内置枚举兜底合并——与归一匹配侧同源。
+    v0.4.7：kind 可传数组一次取多类或 'all' 取全部（判别式=响应有无 kinds 键，
+    数组传 1 个元素也走 kinds 形状）；compact=true 精简投影（code/zh/aliases 前 5，
+    砍 domain/en/is_custom——归一引导靠 aliases，完整版仍是唯一全量面）。"""
+    kind_raw = data.get("kind")
+    compact = data.get("compact") is True  # 严格布尔："false" 字符串不当作 true
+    multi = False
+    if isinstance(kind_raw, list):
+        kinds = [str(k).strip() for k in kind_raw if str(k).strip()]
+        multi = True
+    elif kind_raw is None or (isinstance(kind_raw, str) and not kind_raw.strip()):
+        kinds = ["work_type"]
+    else:
+        k = str(kind_raw).strip()
+        if k == "all":
+            kinds = list(taxonomy.KINDS)
+            multi = True
+        else:
+            kinds = [k]
+    bad = [k for k in kinds if k not in taxonomy.KINDS]
+    if bad or not kinds:
         return {"ok": False, "error": "invalid_input", "field": "kind",
-                "reason": f"expected one of {taxonomy.KINDS}"}
-    conn = db.connect()
-    try:
-        rows = db.type_rows(conn, kind)
-    finally:
-        conn.close()
-    merged: dict = {}
-    for r in rows:
-        merged[r["code"]] = {"code": r["code"], "zh": r["label_zh"], "en": r["label_en"],
-                             "domain": r["domain"], "aliases": r["aliases"],
-                             "is_custom": bool(r["is_custom"])}
-    for t in taxonomy.all_types(kind):
-        merged.setdefault(t.code, {"code": t.code, "zh": t.zh, "en": t.en,
-                                   "domain": t.domain, "aliases": list(t.aliases),
-                                   "is_custom": False})
-    items = list(merged.values())
-    return {"ok": True, "kind": kind, "count": len(items), "types": items}
+                "reason": f"expected one of {taxonomy.KINDS}（或数组/'all'），收到 {bad or kind_raw!r}"}
+    seen: set = set()
+    kinds = [k for k in kinds if not (k in seen or seen.add(k))]
+
+    def _load(kind: str) -> list[dict]:
+        conn = db.connect()
+        try:
+            rows = db.type_rows(conn, kind)
+        finally:
+            conn.close()
+        merged: dict = {}
+        for r in rows:
+            merged[r["code"]] = {"code": r["code"], "zh": r["label_zh"], "en": r["label_en"],
+                                 "domain": r["domain"], "aliases": r["aliases"],
+                                 "is_custom": bool(r["is_custom"])}
+        for t in taxonomy.all_types(kind):
+            merged.setdefault(t.code, {"code": t.code, "zh": t.zh, "en": t.en,
+                                       "domain": t.domain, "aliases": list(t.aliases),
+                                       "is_custom": False})
+        items = list(merged.values())
+        if compact:
+            out_items = []
+            for it in items:
+                raw = it.get("aliases")
+                if isinstance(raw, str):
+                    try:
+                        import json as _json
+                        raw = _json.loads(raw)
+                    except ValueError:
+                        raw = []
+                aliases = list(raw)[:5] if isinstance(raw, list) else []
+                out_items.append({"code": it["code"], "zh": it["zh"],
+                                  "aliases": aliases})
+            return out_items
+        return items
+
+    if not multi:
+        # 单 kind：形状与历史版本逐键一致（既有断言钉死）
+        items = _load(kinds[0])
+        return {"ok": True, "kind": kinds[0], "count": len(items), "types": items}
+    kinds_out: dict = {}
+    total = 0
+    for k in kinds:
+        items = _load(k)
+        for it in items:
+            it["kind"] = k  # 防客户端拍平三类后错配（code 仅 kind 内唯一）
+        kinds_out[k] = {"count": len(items), "types": items}
+        total += len(items)
+    return {"ok": True, "kinds": kinds_out, "count_total": total}
 
 
 def _action_pending(data: dict) -> dict:

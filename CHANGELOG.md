@@ -2,6 +2,36 @@
 
 ## [Unreleased]
 
+- **v0.4.7 往返次数优化**（来源：宿主会话复盘 18min/27 次往返归因，方案
+  `~/ZCodeProject/docs/twin-v047-roundtrip-optimization-plan.md` v1.1，两轮方案
+  对抗评审 + 两轮实施 review 全部吸收）：
+  - **plan_set task_id 缺省回退**：恰一个 planning 任务时自动回退并回显
+    `task_id_resolved`+`resolved_brief`（供 agent 核对防劫持陈尸任务）；0 或
+    >1（瞬态并发残留）拒绝并附 id+brief 清单。task_submit/plan_revise 不做
+    回退（关键写路径显式优于隐式）。
+  - **step_update 批量**：`steps=[{step_id,status,reason?,reflection?}]`
+    （1..50）+ 顶层 task_id 必填（跨任务拒；server 边界 stall_advisory/audit
+    挂载依赖它）；单事务任一条被拒整笔回滚（`failed_index`），失败原子性强
+    于逐条；`applied`/`noop` 分列；回滚同步恢复进程内 no_op 计数快照（防重试
+    consecutive_noop 虚高）；批量 step_id 采用 _coerce_task_id 同款严格口径。
+    **审计口径变化**：批量一次调用落一行审计（task_id 在、step_id 空），
+    step 维度的精确账改由响应 results 承载——按任务维度归因不变。
+  - **task_submit 附带 steps**：先补打卡再收口一次往返；与收口非同一事务，
+    steps 落库后的一切拒绝路径带 `steps_applied` + 重试引导（打卡幂等，补齐
+    open_steps 直接重交）。
+  - **taxonomy kind 数组/`'all'`/compact**：多类形状=响应含 `kinds` 键（顶层
+    `count_total`，条目附 `kind` 防拍平错配；数组传单元素也走多类形状）；
+    `compact=true` 精简投影（code/zh/aliases 前 5——归一引导保留，完整别名
+    面仍只在完整响应）。单 kind 形状逐键不变。
+  - **compile 冲突警示（0.18.3 策展面 twin 侧，owner 拍板 2026-11-01 Q7=A）**：
+    素材含未裁决冲突时插警示头 + `conflict_warning` 字段（键投影 ≤10 条）。
+    实现走 `sink.review_conflicts`（与 status.open_conflicts 同通道同口径），
+    **不直开 memory.sqlite3**（C 形态不变量）；调用点在逐条证据 read 之前
+    （mema 挂死先 10s 软失败）；软失败不阻断编译。**口径变化**：冲突桶过滤
+    只认当前 bucket（不再含 'mema-twin-dev'），与 status 计数一致。
+  - help 文案四处同步；skill 文档同步（plan_set 缺省/批量打卡/task_submit
+    steps/taxonomy 数组与 compact/tool_log entries 结构）。
+  - 测试 397 绿（374 基线 + 23 新增）。
 - **Bearer 前缀可选**（2026-10-25 owner 拍板）：宿主 MCP 配置的 Authorization
   头与 `MEMA_TWIN_MEMA_TOKEN` env 均可直接写裸 token——twin 自动补
   `Bearer ` 前缀（协议面不变：网关硬性要求前缀；`Bearer` 无体仍打回）。

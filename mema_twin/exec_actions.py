@@ -377,10 +377,33 @@ def _coerce_task_id(data: dict) -> int:
 # ---- action: plan_set ----
 
 def _action_plan_set(data: dict) -> dict:
-    try:
-        task_id = _coerce_task_id(data)
-    except ValueError as e:
-        return {"ok": False, "error": "invalid_input", "reason": str(e)}
+    resolved_brief: str | None = None
+    if data.get("task_id") is None:
+        # 缺省回退（v0.4.7）：全局恰一个 planning 任务时自动用它；0 或 >1 拒绝并附
+        # 清单。supersede_open_tasks 稳态收敛 ≤1，但 insert/supersede 两事务间歇崩溃
+        # 或多宿主并发互让的瞬态可 0 或 >1——回退只认确定性状态，不对瞬态赌。
+        flow.ensure_schema()
+        pconn = db.connect()
+        try:
+            rows = pconn.execute(
+                "SELECT id, brief FROM twin_tasks WHERE status='planning' ORDER BY id"
+            ).fetchall()
+        finally:
+            pconn.close()
+        if len(rows) != 1:
+            listing = "；".join(f"#{r['id']} {(r['brief'] or '')[:40]}" for r in rows[:5])
+            return {"ok": False, "error": "invalid_input", "field": "task_id",
+                    "reason": ("task_id 缺省但当前没有 planning 任务——先 task_start 建档"
+                               if not rows else
+                               f"task_id 缺省但当前有 {len(rows)} 个 planning 任务"
+                               f"（{listing}）——瞬态并发残留，显式传 task_id 指定")}
+        task_id = int(rows[0]["id"])
+        resolved_brief = str(rows[0]["brief"] or "")
+    else:
+        try:
+            task_id = _coerce_task_id(data)
+        except ValueError as e:
+            return {"ok": False, "error": "invalid_input", "reason": str(e)}
     steps_in = data.get("steps")
     if not isinstance(steps_in, list) or not steps_in:
         return {"ok": False, "error": "invalid_input", "field": "steps",
@@ -525,12 +548,183 @@ def _action_plan_set(data: dict) -> dict:
                         if replanned else ""))}
     if replanned:
         out["replanned_steps"] = replanned
+    if resolved_brief is not None:
+        # 回退路径回显被解析任务的 brief 供 agent 自查（防静默劫持语义无关的
+        # 陈尸任务）；非回退路径键缺席（键缺席即否，对齐 status 判空口径）
+        out["task_id_resolved"] = True
+        out["resolved_brief"] = resolved_brief
     return out
 
 
 # ---- action: step_update ----
 
+# ---- 批量打卡内核（v0.4.7：step_update 批量与 task_submit.steps 共用） ----
+
+_STEP_BATCH_MAX = 50
+
+
+def _noop_snapshot(step_ids) -> dict:
+    ids = {int(i) for i in step_ids}
+    return {k: v for k, v in _noop_counts.items() if k[0] in ids}
+
+
+def _noop_restore(snap: dict, step_ids) -> None:
+    """批内任一条被拒整笔回滚时恢复进程内 no_op 计数——DB 可回滚、内存不可：
+    不恢复则重试同一批时 consecutive_noop 凭空膨胀（破坏既有计数语义）。"""
+    ids = {int(i) for i in step_ids}
+    for k in [k for k in _noop_counts if k[0] in ids]:
+        del _noop_counts[k]
+    _noop_counts.update(snap)
+
+
+def parse_step_entries(entries) -> tuple:
+    """批量打卡入参矫正：[{step_id, status, reason?, reflection?}]，1..50 条。
+    返回 (parsed, None) 或 (None, error)。reason/reflection 的类型/长度由
+    _apply_step_transition 统一校验（与单条同款）。"""
+    if not isinstance(entries, list) or not entries:
+        return None, {"ok": False, "error": "invalid_input", "field": "steps",
+                      "reason": f"required（1..{_STEP_BATCH_MAX} 条）"}
+    if len(entries) > _STEP_BATCH_MAX:
+        return None, {"ok": False, "error": "invalid_input", "field": "steps",
+                      "reason": f"单次最多 {_STEP_BATCH_MAX} 条（拆批传入）"}
+    parsed: list[dict] = []
+    for i, e in enumerate(entries):
+        if not isinstance(e, dict):
+            return None, {"ok": False, "error": "invalid_input",
+                          "field": f"steps[{i}]", "reason": "必须是对象"}
+        sid = e.get("step_id")
+        if isinstance(sid, bool) or not isinstance(sid, (int, str)):
+            return None, {"ok": False, "error": "invalid_input",
+                          "field": f"steps[{i}].step_id",
+                          "reason": f"invalid step_id: {sid!r}"}
+        try:
+            step_id = int(sid)
+        except ValueError:
+            return None, {"ok": False, "error": "invalid_input",
+                          "field": f"steps[{i}].step_id",
+                          "reason": f"invalid step_id: {sid!r}"}
+        # 严格口径对齐 _coerce_task_id（"012"/"+12"/Unicode 数字打回）——新面
+        # 用紧口径；单条历史形式维持原样不另改行为
+        if str(step_id) != str(sid).strip() and not isinstance(sid, int):
+            return None, {"ok": False, "error": "invalid_input",
+                          "field": f"steps[{i}].step_id",
+                          "reason": f"invalid step_id: {sid!r}"}
+        if step_id < 0 or step_id > 2**63 - 1:  # 巨整数进 SQLite 绑定会抛 OverflowError
+            return None, {"ok": False, "error": "invalid_input",
+                          "field": f"steps[{i}].step_id",
+                          "reason": f"invalid step_id: {sid!r}"}
+        status = str(e.get("status") or "").strip()
+        if not status:
+            return None, {"ok": False, "error": "invalid_input",
+                          "field": f"steps[{i}].status", "reason": "required"}
+        parsed.append({"step_id": step_id, "status": status,
+                       "reason": e.get("reason"), "reflection": e.get("reflection")})
+    return parsed, None
+
+
+def apply_step_entries(conn, entries, expect_task_id: int) -> tuple:
+    """单事务逐条迁移（三门/no_op/幂等与逐次调用同语义，批内状态演进可见）。
+    任一条被拒 → conn.rollback() + 恢复 no_op 快照，返回 (None, error)——
+    整笔原子（失败原子性强于逐条：逐条第 k 条被拒不回滚前 k-1 条）。
+    成功不 commit（事务边界归调用方），返回 ((results, applied, noop), None)；
+    applied=实际状态变更条数、noop=幂等 no_op 条数（分列防「applied=N 但零变更」）。
+    expect_task_id：批内所有 step 必属该任务（跨任务拒）。"""
+    results: list[dict] = []
+    applied = noop = 0
+    all_ids = [e["step_id"] for e in entries]
+    snap = _noop_snapshot(all_ids)
+
+    def _abort(payload: dict, idx: int) -> tuple:
+        conn.rollback()
+        _noop_restore(snap, all_ids)
+        payload = dict(payload)
+        payload["failed_index"] = idx
+        return None, payload
+
+    for i, e in enumerate(entries):
+        try:
+            row = conn.execute("SELECT * FROM twin_plan_steps WHERE id=?",
+                               (e["step_id"],)).fetchone()
+            if row is None:
+                return _abort({"ok": False, "error": "not_found",
+                               "field": f"steps[{i}].step_id",
+                               "reason": f"step id {e['step_id']}"}, i)
+            step = _step_dict(row)
+            if int(step["task_id"]) != int(expect_task_id):
+                return _abort({"ok": False, "error": "invalid_input",
+                               "field": f"steps[{i}].step_id",
+                               "reason": f"步骤 {e['step_id']} 属于任务 {step['task_id']}，"
+                                         f"与目标任务 {expect_task_id} 不符"
+                                         "（批量打卡不允许跨任务）"}, i)
+            guard = _task_planning_guard(conn, int(step["task_id"]))
+            if guard:
+                return _abort(guard, i)
+            # falsy 非 None（False/0/[]）归 None——与单条形式 str(x or "") 的
+            # 归空口径等价，防 "False"/"0" 落库
+            reason = e["reason"]
+            reflection = e["reflection"]
+            try:
+                branch = _apply_step_transition(
+                    conn, step, e["status"],
+                    str(reason) if reason else None,
+                    str(reflection) if reflection else None)
+            except _GateReject as ge:
+                return _abort(ge.payload, i)
+            except ValueError as ve:
+                return _abort({"ok": False, "error": "invalid_input",
+                               "field": f"steps[{i}]", "reason": str(ve)}, i)
+            results.append(branch)
+            if branch.get("no_op"):
+                noop += 1
+            else:
+                applied += 1
+        except BaseException:
+            # sqlite BUSY/锁超时等未归类异常：DB 由连接回收隐式回滚，进程内
+            # no_op 计数必须显式恢复（否则重试同批 consecutive_noop 虚高）
+            conn.rollback()
+            _noop_restore(snap, all_ids)
+            raise
+    return (results, applied, noop), None
+
+
 def _action_step_update(data: dict) -> dict:
+    steps_in = data.get("steps")
+    if steps_in is not None:
+        # 批量形式（v0.4.7）：必须带顶层 task_id——server 边界的 stall_advisory/
+        # audit 挂载与批内跨任务校验都依赖它；与旧单条形式互斥。
+        if data.get("step_id") is not None:
+            return {"ok": False, "error": "invalid_input", "field": "steps",
+                    "reason": "与顶层 step_id 互斥（批量时 status/reason 写在每条 entry）"}
+        if str(data.get("status") or "").strip():
+            return {"ok": False, "error": "invalid_input", "field": "steps",
+                    "reason": "与顶层 status 互斥（status 写在每条 entry）"}
+        if data.get("reason") is not None or data.get("reflection") is not None:
+            return {"ok": False, "error": "invalid_input", "field": "steps",
+                    "reason": "与顶层 reason/reflection 互斥（写在每条 entry；"
+                              "顶层传入会被静默丢弃，故直接拒绝）"}
+        if data.get("task_id") is None:
+            return {"ok": False, "error": "invalid_input", "field": "task_id",
+                    "reason": "批量打卡必须显式带 task_id"}
+        try:
+            task_id = _coerce_task_id(data)
+        except ValueError as e:
+            return {"ok": False, "error": "invalid_input",
+                    "reason": f"批量打卡 task_id 非法：{e}"}
+        parsed, err = parse_step_entries(steps_in)
+        if err is not None:
+            return err
+        flow.ensure_schema()
+        conn = db.connect()
+        try:
+            outcome, err = apply_step_entries(conn, parsed, expect_task_id=task_id)
+            if err is not None:
+                return err
+            results, applied, noop = outcome
+            conn.commit()
+        finally:
+            conn.close()
+        return {"ok": True, "task_id": task_id, "applied": applied,
+                "noop": noop, "results": results}
     sid = data.get("step_id")
     if isinstance(sid, bool) or not isinstance(sid, (int, str)):
         return {"ok": False, "error": "invalid_input",

@@ -20,6 +20,8 @@ def _isolated_twin_db(tmp_path, monkeypatch):
     monkeypatch.setenv("MEMA_TWIN_DB_PATH", str(tmp_path / "twin.sqlite3"))
     monkeypatch.setenv("MEMA_TWIN_PROMPTS_DIR", str(tmp_path / "prompts"))
     monkeypatch.setenv("MEMA_TWIN_DELIVERABLES_DIR", str(tmp_path / "deliverables"))
+    from mema_twin import exec_actions as _ea
+    _ea._noop_counts.clear()  # 进程级计数跨用例串扰（每用例 step id 从 1 重来）
     flow._schema_ready.clear()
     audit._audit_ready.clear()
     audit._advisory_cooldown.clear()
