@@ -377,8 +377,10 @@ def _action_help(data: dict) -> dict:
                         "version 省略回上一版本、传 n 回指定版本；不删历史（retired 可再激活），"
                         "版本号不回收（下次 submit 继续 MAX+1）。",
             "get": "取某 work_type 的 persona prompt（DB 优先，文件镜像降级）。参数 work_type；"
-                   "可选 version 取指定历史版本全文；"
-                   "work_type 传 aud-{受众} 可读受众画像。",
+                   "可选 version 取指定历史版本全文（不带未编译增补）；"
+                   "work_type 传 aud-{受众} 可读受众画像（不带增补）。"
+                   "读 active 时响应附 persona_supplement（未编译增补，与 prompt 冲突"
+                   "以增补为准；软失败不阻断全文）——上下文被压缩/跨会话取回分身时用它。",
             "taxonomy": "列枚举清单（动态：含治理追加别名与自建 canonical）。参数 kind ∈ "
                         "work_type|audience|purpose，或数组一次取多类、'all' 取全部"
                         "（判别式=响应有无 kinds 键；多类形状顶层 count_total，条目附 "
@@ -417,7 +419,10 @@ def _action_help(data: dict) -> dict:
                            "已交付（submitted）的返工走 task_revise。",
             "task_revise": "已交付任务修订返工（仅 submitted）。task_id + brief/deliverable_md/"
                            "revision_reason 至少其一；子任务回 planning 重走执行并记 lineage"
-                           "（不恢复 todos、不重注入 persona，需要时重新 task_start）；"
+                           "（不恢复 todos；v0.4.8 起 persona/未编译增补/受众画像/playbook"
+                           " 按 task_resume 同款注入）。have_persona_version 仅当同一会话"
+                           "上文已注入该版本全文时才申报——从任务行抄号申报会短路掉全文注入"
+                           "（跨会话返工不传即自动全文重注入）。"
                            "修订反馈中的可复用偏好走 twin.write 沉淀。",
             "task_close": "显式关闭进行中任务（仅 planning），历史保留可审计。"
                           "可选 outcome ∈ failed|superseded（缺省 superseded）——"

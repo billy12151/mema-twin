@@ -245,3 +245,138 @@ def test_have_ignored_without_persona(env):
     r = server._twin_impl("task_start", {"brief": "B", "work_type": "周报",
                                    "have_persona_version": 5})
     assert r["ok"] and "尚无 persona prompt" in r["hint"]
+
+
+# ---- v0.4.8 task_revise 注入面（同 task_resume，F1-F8）----
+
+def _submitted(brief="T"):
+    """建 planning 任务并交付——revise 的前置态。返回任务 id。
+    （库隔离由 conftest autouse 兜底，无需 env 参数。）"""
+    from mema_twin import server
+    t = flow.insert_task(brief=brief, status="planning", dims=_dims())
+    r = server._twin_impl("task_submit", {"task_id": t["id"], "deliverable_md": "# v1"})
+    assert r["ok"]
+    return t["id"]
+
+
+def test_revise_injects_persona_full(env):
+    """F1：revise 未申报 have → 全文注入（11-09 事故的直接修复面）。"""
+    from mema_twin import server
+    _make_versions(2)
+    r = server._twin_impl("task_revise", {"task_id": _submitted(), "revision_reason": "改"})
+    assert r["ok"] and r["persona_version"] == 2 and r["persona_prompt_md"] == "# v2"
+    assert "persona_unchanged" not in r
+
+
+def test_revise_short_circuit(env):
+    """F2：申报相等 → 短路（无全文，hint 带逃生口）。"""
+    from mema_twin import server
+    _make_versions(2)
+    tid = _submitted()
+    r = server._twin_impl("task_revise", {"task_id": tid, "revision_reason": "改",
+                                   "have_persona_version": 2})
+    assert r["ok"] and r["persona_unchanged"] is True
+    assert "persona_prompt_md" not in r and r["persona_version"] == 2
+    assert "get" in r["hint"]
+    # 短路不影响建档：子任务行记 active 版本
+    assert flow.get_task(r["task_id"])["persona_version"] == 2
+
+
+def test_revise_mismatch_reinjectes(env):
+    """F3：申报不等 → 全文重注入 + 中性变更注记。"""
+    from mema_twin import server
+    _make_versions(3)
+    r = server._twin_impl("task_revise", {"task_id": _submitted(), "revision_reason": "改",
+                                   "have_persona_version": 1})
+    assert r["ok"] and r["persona_prompt_md"] == "# v3"
+    assert "已从 v1 变更为 v3" in r["note"]
+
+
+def test_revise_have_garbage_no_side_effects(env):
+    """F4：have 脏值在状态变更前打回——父任务仍 submitted、无子任务；报错
+    优先级：三字段全空时先报「至少其一」。"""
+    from mema_twin import server
+    from mema_twin import db as twin_db
+    _make_versions(1)
+    tid = _submitted()
+    conn = twin_db.connect()
+    n_before = conn.execute("SELECT COUNT(*) FROM twin_tasks").fetchone()[0]
+    conn.close()
+    for bad in ("abc", 2.9, True, 0, -1):
+        r = server._twin_impl("task_revise", {"task_id": tid, "revision_reason": "改",
+                                       "have_persona_version": bad})
+        assert r.get("ok") is False and r.get("field") == "have_persona_version", bad
+    assert flow.get_task(tid)["status"] == "submitted"
+    conn = twin_db.connect()
+    assert conn.execute("SELECT COUNT(*) FROM twin_tasks").fetchone()[0] == n_before
+    conn.close()
+    # 报错优先级：brief/deliverable/reason 全空 + have 脏值 → 先报「至少其一」
+    r2 = server._twin_impl("task_revise", {"task_id": tid, "have_persona_version": "x"})
+    assert r2.get("ok") is False and "至少给" in r2.get("reason", "")
+
+
+def test_revise_child_row_records_active_version(env):
+    """F5：子任务行记本次读取的 active 版本，不再抄父行（审计归因真实）。"""
+    from mema_twin import server
+    from mema_twin import db as twin_db, store
+    _make_versions(1)
+    tid = _submitted()  # 父行 persona_version=None（insert_task 未指定）或建档时版本
+    conn = twin_db.connect()
+    store.create_version(conn, "work_report", "# v2", ["9"], model="m")
+    conn.close()
+    r = server._twin_impl("task_revise", {"task_id": tid, "revision_reason": "改"})
+    assert r["ok"] and flow.get_task(r["task_id"])["persona_version"] == 2
+
+
+def test_revise_mirror_never_short_circuits(env):
+    """F6：mirror 降级（无版本身份）永不短路——申报了也全文注入。"""
+    from mema_twin import server
+    from mema_twin import db as twin_db, store
+    conn = twin_db.connect()
+    store.create_version(conn, "work_report", "# v1 mirror", ["1"], model="m")
+    conn.close()
+    conn = twin_db.connect()
+    conn.execute("DELETE FROM twin_prompt_versions")
+    conn.commit()
+    conn.close()
+    r = server._twin_impl("task_revise", {"task_id": _submitted(), "revision_reason": "改",
+                                   "have_persona_version": 1})
+    assert r["ok"] and r["persona_prompt_md"] == "# v1 mirror"
+    assert "persona_unchanged" not in r and r["persona_version"] is None
+
+
+def test_revise_brief_guard(env):
+    """F7（评审轮1 P2-2）：revise 的 new_brief 过 2000 帽，无副作用拒绝。"""
+    from mema_twin import server
+    from mema_twin import db as twin_db
+    tid = _submitted()
+    conn = twin_db.connect()
+    n_before = conn.execute("SELECT COUNT(*) FROM twin_tasks").fetchone()[0]
+    conn.close()
+    r = server._twin_impl("task_revise", {"task_id": tid, "brief": "超" * 2001})
+    assert r.get("ok") is False and r.get("field") == "brief"
+    assert flow.get_task(tid)["status"] == "submitted"
+    conn = twin_db.connect()
+    assert conn.execute("SELECT COUNT(*) FROM twin_tasks").fetchone()[0] == n_before
+    conn.close()
+
+
+def test_revise_no_persona_no_supplement_hint(env):
+    """F8（评审轮1 P2-3a）：无 persona + 无增补的 else 分支——通用标准 hint；
+    空库无同域工种时 fallback 为空注入，hint 仍在场。"""
+    from mema_twin import server
+    r = server._twin_impl("task_revise", {"task_id": _submitted(), "revision_reason": "改"})
+    assert r["ok"] and "尚无 persona prompt" in r["hint"]
+    assert "persona_prompt_md" not in r and "persona_supplement" not in r
+
+
+def test_revise_superseded_gate_points_to_latest(env):
+    """施工对抗轮 P2-1：对 superseded（revise 换代后拿旧 id 重试）指路最新代，
+    不再误称「历史遗留状态」。"""
+    from mema_twin import server
+    tid = _submitted()
+    child = server._twin_impl("task_revise", {"task_id": tid, "revision_reason": "改"})
+    assert child["ok"]
+    r = server._twin_impl("task_revise", {"task_id": tid, "revision_reason": "再改"})
+    assert r.get("ok") is False
+    assert "task_recent" in r.get("reason", "") and "历史遗留" not in r.get("reason", "")

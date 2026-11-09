@@ -379,6 +379,9 @@ def _action_status(data: dict) -> dict:
 
 
 def _action_get(data: dict) -> dict:
+    # v0.4.8：get 复用 _supplement_payload（读通道补未编译增补）。函数内
+    # 延迟 import——顶层会成环（pref → task → compile → pref，2026-11-09 实测）
+    from . import task_actions
     wt = str(data.get("work_type") or "").strip()
     if not wt:
         return {"ok": False, "error": "invalid_input", "field": "work_type", "reason": "required"}
@@ -389,7 +392,8 @@ def _action_get(data: dict) -> dict:
     conn = db.connect()
     try:
         aud = store.split_audience_profile(wt)
-        if aud is not None:
+        is_aud = aud is not None
+        if is_aud:
             # 受众画像只读通道（AR-6）：aud-{受众码} 可查全文；后缀必须是已知受众
             if not store._is_known_audience(conn, aud):
                 return {"ok": False, "error": "invalid_input", "field": "work_type",
@@ -412,9 +416,27 @@ def _action_get(data: dict) -> dict:
                           "版本化读取不可用——不带 version 调 get 可取 active 全文；"
                           "twin(action=\"status\") 查看版本概况"}
     if not rec:
-        return {"ok": True, "work_type": code, "prompt_md": None,
-                "hint": "尚无 persona prompt；可先喂历史产出物或积累偏好后 compile"}
-    return {"ok": True, **rec}
+        out: dict = {"ok": True, "work_type": code, "prompt_md": None,
+                     "hint": "尚无 persona prompt；可先喂历史产出物或积累偏好后 compile"}
+        # v0.4.8 B：读通道补未编译增补（逃生口完整性）——get 是 revise 等链路
+        # 「上文不可见」时的取回口，此前只回全文不带增补。仅 work_type 读
+        # active 时附；aud- 画像与 versioned 历史读不附（增补锚定 active 语义）
+        if not is_aud and version is None:
+            supp = task_actions._supplement_payload(code, None,
+                                                    client=identity.effective_client(data))
+            if supp:
+                out.update(supp)
+                out["hint"] = ("该工作性质尚无编译版 persona，以上增补即已沉淀偏好，"
+                               "按其执行；积累后可 twin(action=\"compile\") 生成 v1")
+        return out
+    out = {"ok": True, **rec}
+    if not is_aud and version is None:
+        # 同上：active 读取附未编译增补（软失败，mema 读挂不阻断全文返回）；
+        # 不注 _fallback_payload——读通道与执行通道的有意不对称（方案 §1.3）
+        out.update(task_actions._supplement_payload(
+            code, {"version": rec.get("version")},
+            client=identity.effective_client(data)))
+    return out
 
 
 def _coerce_version_field(data: dict):

@@ -1465,3 +1465,168 @@ def test_tool_result_single_write_compact():
     # output_schema 变非 None → 线上每次调用对 structuredContent=None 硬错误，
     # 而只测信封的断言照样全绿——这行才堵住 CHANGELOG 自称要堵的洞
     assert server.mcp._tool_manager.get_tool("twin").fn_metadata.output_schema is None
+
+
+# ---- v0.4.8 revise 注入增补面 + get 读通道增补（S1-S7）----
+
+def _submitted_report():
+    """建 work_report 维度任务（带计划+打卡的完整执行记录）并交付，返回任务
+    id（revise 前置态；执行记录同时满足 playbook_submit 溯源验证门）。"""
+    dims = {"work_type": {"ok": True, "kind": "work_type", "raw": "周报",
+                          "code": "work_report"},
+            "audience": {"ok": True, "kind": "audience", "raw": "高层",
+                         "code": "leadership"},
+            "purpose": {"ok": True, "kind": "purpose", "raw": "同步",
+                        "code": "sync_info"}}
+    t = flow.insert_task(brief="T", status="planning", dims=dims)
+    plan = server._twin_impl("plan_set", {"task_id": t["id"], "steps": [
+        {"title": "取数"}, {"title": "成稿"}]})
+    ids = {s["seq"]: s["id"] for s in plan["steps"]}
+    server._twin_impl("step_update", {"step_id": ids[1], "status": "done"})
+    server._twin_impl("step_update", {"step_id": ids[2], "status": "done"})
+    r = server._twin_impl("task_submit", {"task_id": t["id"], "deliverable_md": "# v1"})
+    assert r["ok"]
+    return t["id"]
+
+
+def test_revise_supplement_injected(monkeypatch):
+    """S1：有 persona + 未编译证据 → 增补随 revise 响应在场。"""
+    _stub_read(monkeypatch)
+    server._twin_impl("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m"})
+    _mk_uncompiled([701, 702])
+    r = server._twin_impl("task_revise", {"task_id": _submitted_report(),
+                                   "revision_reason": "改"})
+    assert r["ok"]
+    assert r["persona_prompt_md"] == "# v1"
+    assert len(r["persona_supplement"]) == 2
+    assert "以增补为准" in r["persona_supplement_note"]
+
+
+def test_revise_supplement_with_shortcircuit(monkeypatch):
+    """S2：revise 短路分支同样带增补（#895 陷阱镜像——增补是新进场材料）。"""
+    _stub_read(monkeypatch)
+    server._twin_impl("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m"})
+    _mk_uncompiled([703])
+    r = server._twin_impl("task_revise", {"task_id": _submitted_report(),
+                                   "revision_reason": "改", "have_persona_version": 1})
+    assert r["ok"] and r.get("persona_unchanged") is True
+    assert "persona_prompt_md" not in r
+    assert len(r["persona_supplement"]) == 1
+
+
+def test_revise_injects_audience_profile(monkeypatch):
+    """S3：audience 归一时受众画像键随 revise 在场（画像 active 版本优先；
+    雏形垫底会排除本 work_type 证据，故直接造 aud- 画像版本）。"""
+    _stub_read(monkeypatch, contents="受众偏好：高管看结论")
+    server._twin_impl("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m"})
+    from mema_twin import store
+    conn = db.connect()
+    store.create_version(conn, "aud-leadership", "# 受众画像：结论先行", ["1"], model="m")
+    conn.close()
+    r = server._twin_impl("task_revise", {"task_id": _submitted_report(),
+                                   "revision_reason": "改"})
+    assert r["ok"]
+    assert r.get("audience_profile_md") == "# 受众画像：结论先行"
+
+
+def test_revise_injects_playbook(monkeypatch):
+    """S4：active playbook 随 revise 在场，last_used 刷成本次 client。"""
+    _stub_read(monkeypatch)
+    server._twin_impl("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m"})
+    tid = _submitted_report()
+    pb = server._twin_impl("playbook_submit", {"key": "work_report",
+                                    "content_md": "# pb\n工具面板：Bash",
+                                    "source_task_ids": [tid]})
+    assert pb["ok"]
+    r = server._twin_impl("task_revise", {"task_id": tid,
+                                   "revision_reason": "改", "client": "revise-test"})
+    assert r["ok"] and "playbook_md" in r
+    conn = db.connect()
+    row = conn.execute("SELECT last_used_client FROM twin_playbooks"
+                       " WHERE key='work_report' AND status='active'").fetchone()
+    conn.close()
+    assert row is not None and row["last_used_client"] == "revise-test"
+
+
+def test_revise_playbook_available_tools_from_parent_row(monkeypatch):
+    """S7（评审轮1 P2-3c）：available_tools 缺省沿用父任务行自报；父行无自报
+    时按未验证路径要求自报（available_tools_required）。"""
+    _stub_read(monkeypatch)
+    server._twin_impl("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m"})
+    tid = _submitted_report()
+    server._twin_impl("playbook_submit", {"key": "work_report",
+                              "content_md": "# pb\n工具面板：Bash",
+                              "source_task_ids": [tid]})
+    r = server._twin_impl("task_revise", {"task_id": tid,
+                                   "revision_reason": "改"})
+    assert r["ok"] and r.get("available_tools_required") is True  # 父行无自报 → 保守面
+
+
+def test_get_active_includes_supplement(monkeypatch):
+    """S5a：get 读 active 附未编译增补（软失败；逃生口完整性）。"""
+    _stub_read(monkeypatch)
+    server._twin_impl("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m"})
+    _mk_uncompiled([705])
+    r = server._twin_impl("get", {"work_type": "周报"})
+    assert r["ok"] and r["prompt_md"] == "# v1"
+    assert len(r["persona_supplement"]) == 1
+    assert "以增补为准" in r["persona_supplement_note"]
+
+
+def test_get_versioned_excludes_supplement(monkeypatch):
+    """S5b：指定 version 历史读不带增补（增补锚定 active 语义）。"""
+    _stub_read(monkeypatch)
+    server._twin_impl("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m"})
+    server._twin_impl("submit", {"work_type": "周报", "prompt_md": "# v2", "model": "m"})
+    _mk_uncompiled([706])
+    r = server._twin_impl("get", {"work_type": "周报", "version": 1})
+    assert r["ok"] and r["prompt_md"] == "# v1"
+    assert "persona_supplement" not in r
+
+
+def test_get_no_persona_with_evidence(monkeypatch):
+    """S6a：无 persona 有未编译证据 → get 也给增补 + 引导编译 hint。"""
+    _stub_read(monkeypatch)
+    _mk_uncompiled([707])
+    r = server._twin_impl("get", {"work_type": "周报"})
+    assert r["ok"] and r["prompt_md"] is None
+    assert len(r["persona_supplement"]) == 1
+    assert "compile" in r["hint"]
+
+
+def test_get_audience_no_supplement(monkeypatch):
+    """S6b：aud-{受众} 画像分支不带增补（AR-2：aud- 证据行不参与编译生命周期）。"""
+    _stub_read(monkeypatch, contents="受众偏好")
+    from mema_twin import store
+    conn = db.connect()
+    # 造受众画像 active 版本（否则 aud- 分支走 prompt_md None 分支同样无增补，断言不充分）
+    store.create_version(conn, "aud-leadership", "# 画像", ["1"], model="m")
+    conn.close()
+    r = server._twin_impl("get", {"work_type": "aud-leadership"})
+    assert r["ok"] and r["prompt_md"] == "# 画像"
+    assert "persona_supplement" not in r
+
+
+def test_revise_no_persona_with_supplement(monkeypatch):
+    """F9（评审轮1 P2-3b，施工轮1 P2-1 补）：无 persona + 有未编译增补的
+    elif 分支——增补在场 + hint「按上方已沉淀偏好执行」。"""
+    _stub_read(monkeypatch)
+    _mk_uncompiled([708])  # 不 submit persona → 无编译版
+    r = server._twin_impl("task_revise", {"task_id": _submitted_report(),
+                                   "revision_reason": "改"})
+    assert r["ok"]
+    assert "persona_prompt_md" not in r
+    assert len(r["persona_supplement"]) == 1
+    assert "按上方已沉淀偏好执行" in r["hint"]
+
+
+def test_get_supplement_mema_down_returns_full(monkeypatch):
+    """施工对抗轮 P3-5：mema 读挂时 get 软失败——全文照常返回，supplement 缺席
+    （skipped 标记在场），不 500。"""
+    _stub_read(monkeypatch, fail=True)
+    server._twin_impl("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m"})
+    _mk_uncompiled([709])
+    r = server._twin_impl("get", {"work_type": "周报"})
+    assert r["ok"] and r["prompt_md"] == "# v1"
+    assert "persona_supplement" not in r
+    assert r.get("persona_supplement_skipped")

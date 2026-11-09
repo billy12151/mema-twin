@@ -5,7 +5,7 @@ description: 个人分身：工作类偏好沉淀与 persona prompt 编译，经
 
 # mema-twin 使用引导
 
-> 对齐服务端 **v0.4.7**。动作全集、入参与基础语义以 `twin(action="help")` 为准——**调用动作前先查一次 help**（会话内一次即可），本文件不复述入参。下文只写三样：何时用哪个动作的路由、执行门、help 未覆盖或与实测不符的口径。
+> 对齐服务端 **v0.4.8**。动作全集、入参与基础语义以 `twin(action="help")` 为准——**调用动作前先查一次 help**（会话内一次即可），本文件不复述入参。下文只写三样：何时用哪个动作的路由、执行门、help 未覆盖或与实测不符的口径。
 > **夜间治理/编译会话不需要本 skill**：twin_nightly_compile 两支线与 compile/submit 编译口径在 `mema-twin-governance` skill（唯一真源），本文件只留指向它的路由。
 
 ## 查证协议（任何动作之前，先于分流；2026-10-22 立）
@@ -49,9 +49,9 @@ description: 个人分身：工作类偏好沉淀与 persona prompt 编译，经
 - 走了非常规工具路径（失败/重试/降级、首次打通的新路子）→ `twin(action="tool_log")`（口径见「执行流」）
 - 查任务 → `twin(action="task_recent")` / `twin(action="task_get")`；**两者都回 `deliverable_md` 全文**，token 敏感时把 limit 压到 1–3
 - 交付稿完成 → `twin(action="task_submit")` 即收口（submit 是终点，无评审环；交付稿落盘 `deliverables/task-<id>.md` 留档）。**收口门**：建档任务的未闭环步骤会被整笔打回（附 open_steps 清单），逐条对账打卡后再交；**一次往返收口**（v0.4.7）：task_submit 直接带 `steps`（同 step_update 批量结构，须属本任务）先补打卡再收口——被拒时响应带 `steps_applied`（打卡已落库、幂等），按 open_steps 补齐直接重交即可，无需重新打卡；用户看过稿子后的修改意见按**合并沉淀**口径走 twin.write
-- 要返工改稿 → `twin(action="task_revise")`（仅 submitted；brief/deliverable_md/revision_reason 至少其一）。revise 不恢复 todos、不重注入 persona，需要时重新 task_start；子任务回 planning 重走并记 lineage：parent_task_id + iteration 递增，未完结步骤深拷贝到新 task_id
+- 要返工改稿 → `twin(action="task_revise")`（仅 submitted；brief/deliverable_md/revision_reason 至少其一）。revise 不恢复 todos，但会按 task_resume 同款重注入分身（persona + 未编译增补 + 受众画像 + playbook，v0.4.8 起）；子任务回 planning 重走并记 lineage：parent_task_id + iteration 递增，未完结步骤深拷贝到新 task_id
 - 中断/隔日继续 → `twin(action="task_resume")`（仅进行中 planning，自动恢复 todos 并再注入分身，同样带 persona_supplement 与同域 fallback）；不再做的进行中任务用 `twin(action="task_close")` 显式关闭（**关闭前先经用户确认**，不要自行清理）；失败必须显式标 `outcome=failed`（缺省 superseded），否则结果列与未完成任务无法区分
-- **同会话重复注入省 token**：同一会话再次 task_start/task_resume 同 work_type，且上文注入返回的 persona_version 仍在场（未被上下文压缩）→ 传 `have_persona_version=<上文版本号>`，版本未变则不再重复注入全文；上文不可见就**不要传**（服务端会照常全文注入，宁可重复不可缺席）
+- **同会话重复注入省 token**：同一会话再次 task_start/task_resume/task_revise 同 work_type，且上文注入返回的 persona_version 仍在场（未被上下文压缩）→ 传 `have_persona_version=<上文版本号>`，版本未变则不再重复注入全文；上文不可见就**不要传**（服务端会照常全文注入，宁可重复不可缺席）——**尤其 revise：跨会话返工是常态，别从任务行抄 persona_version 当 have 申报**（会短路掉全文注入，分身缺席）
 - write 响应提示"有偏好未编译" → **不要**立即 compile，也不要每写一条就播报：任务收尾（或用户问起）时非阻塞汇总一句（如"分身积累了 N 条新偏好，要不要现在整理？"）；是否整理由用户拍板，或交给夜间编译定时任务统一处理
 - **触达 mema 的动作响应可能带 mema_notices**（advisory）：`similar_active_memory` 疑似重复 → 静默分诊（偏好是增量语义，重复由编译期合并吸收；真重复才改走 mema update 原条目，不必打扰用户）；**语义冲突 notice → 先按 read_call 读完整通知与两侧原文**，误报 dismiss，真冲突才问用户三选项：两条都留（编译条件化）/ 新的替旧的（twin void 旧条）/ 撤销新写的（twin void 本条）
 - 响应带 `twin_notices`（**升级提示，独立于 mema_notices**）：按其 agent_instruction 告知用户**一次**，不自动升级、不重复提醒（比对 GitHub 版本，同版本 7 天抑制；`MEMA_TWIN_UPDATE_CHECK=0` 可关）
@@ -68,7 +68,7 @@ description: 个人分身：工作类偏好沉淀与 persona prompt 编译，经
   - 换 client/宿主跑同一任务可能仍被判"没跑过"，照常更新任务即可
 - **首次**交付产出物时提醒一次（不是每次）：后续修改尽量交给 Agent 而非手动改，每次修改都是一次偏好沉淀机会
 - 用户要求撤销/回退某版分身 → `twin(action="rollback")`：零阻力直接执行（不删历史、版本号不回收），**不要建议重新编译代替回滚**
-- 用户问"现在分身长什么样 / 把 vN 给我看看" → `twin(action="get")` 读 persona 全文（work_type 传 `aud-<受众>` 读受众画像）
+- 用户问"现在分身长什么样 / 把 vN 给我看看" → `twin(action="get")` 读 persona 全文（work_type 传 `aud-<受众>` 读受众画像）。读 active 时响应附未编译增补 `persona_supplement`（v0.4.8 起，指定历史版本/受众画像不附）——上下文被压缩后取回分身就用它，别只拿 prompt 全文漏了增补
 
 ## 三字段选码（归一门：清单硬约束，未命中必问用户）
 

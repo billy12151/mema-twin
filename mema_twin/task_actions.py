@@ -543,8 +543,9 @@ def _action_task_resume(data: dict) -> dict:
         return {"ok": False, "error": "not_found", "reason": f"task id {tid}"}
     if record["status"] not in flow._RESUMABLE_STATUSES:
         if record["status"] == "submitted":
-            hint = ("已交付（submitted）的返工走 task_revise——注意 revise 不恢复 todos、"
-                    "不重注入 persona/增补/受众画像，需要时以新任务视角重新 task_start")
+            hint = ("已交付（submitted）的返工走 task_revise——revise 不恢复 todos，"
+                    "但会按 task_resume 同款注入 persona/未编译增补/受众画像/playbook；"
+                    "需要恢复 todos 时以新任务视角重新 task_start")
         else:
             hint = "历史遗留状态（v0.3.8 前的评审环终态），无迁移入口；继续该工作请重新 task_start"
         return {"ok": False, "error": "invalid_input",
@@ -648,6 +649,17 @@ def _action_task_revise(data: dict) -> dict:
     if not (new_brief or deliverable or revision_reason):
         return {"ok": False, "error": "invalid_input",
                 "reason": "至少给 brief / deliverable_md / revision_reason 之一"}
+    # v0.4.8（评审轮1 P2-2）：revise 的 brief 与 task_start 同款限长——
+    # 子任务 brief 直接进素材包，超长值在一切状态变更之前打回
+    if new_brief and (brief_err := _brief_guard(new_brief)):
+        return {"ok": False, "error": "invalid_input", "field": "brief",
+                "reason": brief_err}
+    # v0.4.8：have 校验前置（无副作用拒绝；口径同 task_start/task_resume）
+    try:
+        have = _coerce_have_version(data)
+    except ValueError as e:
+        return {"ok": False, "error": "invalid_input",
+                "field": "have_persona_version", "reason": str(e)}
     flow.ensure_schema()
     record = flow.get_task(int(tid))
     if not record:
@@ -655,6 +667,11 @@ def _action_task_revise(data: dict) -> dict:
     if record["status"] not in flow._REVISABLE_STATUSES:
         if record["status"] == "planning":
             hint = "进行中（planning）直接继续执行或 task_resume"
+        elif record["status"] == "superseded":
+            # 施工对抗轮 P2-1：superseded 多为 revise/让位换代（含 revise 尾段
+            # 异常后的重试），「历史遗留」是错误归因——指路最新代而非重新 start
+            hint = ("该任务已被后续任务取代——twin(action=\"task_recent\") 取最新代继续："
+                    "planning 可 task_resume 续作，已交付（submitted）可对其 task_revise")
         else:
             hint = "历史遗留状态（v0.3.8 前的评审环终态），无迁移入口；继续该工作请重新 task_start"
         return {"ok": False, "error": "invalid_input",
@@ -663,6 +680,14 @@ def _action_task_revise(data: dict) -> dict:
     dims = {k: {"ok": bool(record.get(k)), "kind": k, "raw": record.get(f"{k}_raw") or "",
                 "code": record.get(k), "matched_by": "db_alias" if record.get(k) else None}
             for k in taxonomy.KINDS}
+    # v0.4.8 A2'：建档前读 active persona（子任务行记实际注入版本，不再抄
+    # 父行——父行是建档时的版本号，中途 compile/rollback 后已失真）
+    conn = db.connect()
+    try:
+        code = record.get("work_type")
+        persona = _task_persona(conn, code)
+    finally:
+        conn.close()
     # 对抗 review#8：修订=返工，子任务一律 planning 重走执行→提交，
     # 不继承终态（否则出现"从未被交付确认的收口"审计伪造）
     child = flow.insert_task(
@@ -671,7 +696,7 @@ def _action_task_revise(data: dict) -> dict:
         interpreted_intent=record.get("interpreted_intent"),
         deliverable_md=deliverable or record.get("deliverable_md") or "",
         reason=revision_reason or None,
-        persona_version=record.get("persona_version"),
+        persona_version=(persona or {}).get("version"),
         parent_task_id=int(tid), iteration=int(record.get("iteration") or 0) + 1,
         revision_reason=revision_reason or None,
         client=identity.effective_client(data),
@@ -690,7 +715,8 @@ def _action_task_revise(data: dict) -> dict:
     out: dict = {"ok": True, "parent_task_id": int(tid), "task_id": child["id"],
                  "iteration": child["iteration"], "status": child["status"],
                  "guidance": (f"已生成修订版任务 #{child['id']}（第 {child['iteration']} 次修订，"
-                              "回到 planning 重走执行）。继续执行后 task_submit。")}
+                              "回到 planning 重走执行）。persona/未编译增补/受众画像"
+                              "已按 task_resume 同款注入。继续执行后 task_submit。")}
     if plan_copied["steps"]:
         out["plan_copied"] = plan_copied
         if plan_copied["deps_dropped"]:
@@ -700,6 +726,41 @@ def _action_task_revise(data: dict) -> dict:
             out.setdefault("warnings", []).append(
                 f"{plan_copied['questions_dropped']} 个 open 疑问因关联步骤已全部闭环，"
                 "未带入新代")
+    # v0.4.8 A3：注入面同 task_resume（11-09 jingleAI 事故：revise 链路
+    # persona 缺席，跨会话返工时上下文已压缩，偏好白纸黑字却不在场）。
+    # supplement 取数放建档/让位之后（P3-7 先例：慢 mema 读不拉长让位竞窗）
+    supplement = _supplement_payload(code, persona,
+                                     client=identity.effective_client(data)) if code else {}
+    aud_code = record.get("audience")
+    if aud_code:
+        out.update(_audience_payload(aud_code, code,
+                                     client=identity.effective_client(data)))
+    if persona:
+        out.update(_persona_injection(persona, have))
+        out.update(supplement)
+    elif supplement:
+        out.update(supplement)
+        out["hint"] = ("该工作性质尚无编译版 persona，按上方已沉淀偏好执行；"
+                       "可 compile 生成 v1")
+        out.update(_fallback_payload(code))
+    else:
+        out["hint"] = ("该工作性质尚无 persona prompt；可先 compile 生成或按通用标准执行")
+        out.update(_fallback_payload(code))
+    # playbook 注入（v0.4 P3）：available_tools 缺省沿用父任务行自报（容错同 resume）
+    pb_data = dict(data)
+    if pb_data.get("available_tools") is None:
+        try:
+            stored = json.loads(record.get("available_tools") or "null")
+        except (ValueError, TypeError):
+            stored = None
+        if isinstance(stored, list):
+            pb_data["available_tools"] = stored
+    pb_conn = db.connect()
+    try:
+        from . import playbook_actions
+        playbook_actions.inject_playbook(pb_conn, out, code, pb_data)
+    finally:
+        pb_conn.close()
     return out
 
 

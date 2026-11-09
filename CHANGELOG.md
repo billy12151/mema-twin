@@ -2,6 +2,39 @@
 
 ## [Unreleased]
 
+- **v0.4.8 task_revise 补注入面 + get 补未编译增补**（来源：2026-11-09
+  jingleAI PRD 修订链路事故——revise 生成子任务不注入 persona/增补，跨会话
+  返工时上下文已压缩，已编译偏好（未评审保持 V1.0、文档信息/修订记录不占
+  编号）白纸黑字却不在场，agent 连犯三条规范；方案
+  `~/ZCodeProject/docs/twin-v048-revise-persona-injection-plan.md`，两轮方案
+  评审（设计轮 4 P2+6 P3、对抗轮 2 P2+4 P3）全部吸收）：
+  - **task_revise 注入面同 task_resume**：persona（#895 have_persona_version
+    申报短路）+ 未编译增补 persona_supplement + 受众画像 + 无专属 persona 时
+    同域 fallback + playbook。短路分支同样带增补（#895 陷阱）。**revise 的
+    guidance/help 不教短路**（对抗轮 P2-1）：revise 主场景是跨会话返工，
+    agent 可从任务行抄 persona_version 假申报导致全文缺席、事故重演——
+    help 明写「仅同一会话上文已有该版本全文才申报」。
+  - **子任务行 persona_version 语义**：从抄父行改为记本次实际读取的 active
+    版本（父行是建档时版本号，中途 compile/rollback 后已失真；消费面仅展示
+    投影，无逻辑消费）。
+  - **校验补齐（无副作用先行）**：new_brief 过 _brief_guard 2000 帽（既有
+    缺口顺带修）；have_persona_version 脏值在一切状态变更前打回。
+  - **get 读 active 附未编译增补**：逃生口修完整——get 是 revise 等链路
+    「上文不可见」时的取回口，此前只回全文不带增补。指定 version 历史读与
+    aud- 受众画像分支不附（增补锚定 active 语义；aud- 证据行不参与编译
+    生命周期，AR-2）。软失败不阻断全文返回。
+  - 文案同步：server help（task_revise/get）、task_resume 拦截文案、
+    skill/SKILL.md（版本行/task_revise/同会话短路句扩列+限定/get）、
+    README 三处。
+  - **superseded 态 revise 拦截文案纠偏**（施工对抗轮 P2-1）：对被 revise 换代
+    的 superseded 任务重试 revise，旧文案误称「历史遗留状态…重新 task_start」
+    ——改为指路 task_recent 取最新代（resume 续作/再 revise）。
+  - 测试 417 绿（397 基线 + 20 新增：revise 注入 F1-F8（test_flow）+
+    supplement/get/playbook/画像/elif 分支/软失败/superseded 门文案共 12 例
+    （test_server_boundary））。
+
+## [0.4.7] — 2026-11-04
+
 - **v0.4.7 往返次数优化**（来源：宿主会话复盘 18min/27 次往返归因，方案
   `~/ZCodeProject/docs/twin-v047-roundtrip-optimization-plan.md` v1.1，两轮方案
   对抗评审 + 两轮实施 review 全部吸收）：
