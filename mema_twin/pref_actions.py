@@ -11,33 +11,14 @@ import datetime as _dt
 import json
 import sqlite3
 
-from . import db, flow, identity, normalize, scan, sink, store, taxonomy, templates
+from . import db, flow, identity, normalize, scan, store, taxonomy, templates
 
-_KIND_PREFIX = {"work_type": "wt", "audience": "au", "purpose": "pu"}
 _RAW_MAX_CHARS = 200      # 三维度值：短枚举说法
 _CONTENT_MAX_CHARS = 8000  # 偏好正文
-_BUCKET = "mema-twin"  # mema 侧偏好存储桶：固定值（画像人级全局），0.3.3 起写死、无 env 覆盖
 
 
 def _today() -> str:
     return _dt.date.today().isoformat()
-
-
-def _memory_id_of(data) -> int | None:
-    """mema remember 响应里的记忆 id（data.id；兼容 data.record.id 形态）。"""
-    if not isinstance(data, dict):
-        return None
-    for cand in (data.get("id"), (data.get("record") or {}).get("id") if isinstance(data.get("record"), dict) else None):
-        try:
-            return int(cand)
-        except (TypeError, ValueError):
-            continue
-    return None
-
-
-def _bucket() -> str:
-    """mema 侧偏好存储桶（0.3.3 起写死，保留函数以免调用点散改）。"""
-    return _BUCKET
 
 
 def _action_write(data: dict) -> dict:
@@ -106,80 +87,71 @@ def _action_write(data: dict) -> dict:
     conn = db.connect()
     dims: dict = {}
     misses: list[dict] = []
-    tags = ["twin-preference"]
     try:
         kinds = ("audience", "purpose") if audience_scoped else taxonomy.KINDS
         for kind in kinds:
-            # 归一门（v0.3.8）：未命中不写 mema、不进 deferred——收集后整笔打回
+            # 归一门（v0.3.8）：未命中不落库——收集后整笔打回
             r = normalize.normalize_value(kind, str(data[kind]), conn)
             if r.get("error"):
                 return {"ok": False, "error": "invalid_input", "field": kind, "reason": r.get("reason")}
             dims[kind] = r
-            if r.get("ok"):
-                tags.append(f"twin:{_KIND_PREFIX[kind]}:{r['code']}")
-            else:
+            if not r.get("ok"):
                 misses.append(r)
     finally:
-        conn.close()  # 后续是 30s 级 HTTP 调用，连接不能跨调用挂着（review#7）
+        conn.close()
     if misses:
         gate = normalize.gate_reject(misses)
         if gate is not None:
             return gate
-        # 全部被并发裁定：dims 已被 gate_reject 就地改写为命中，补 tags
-        for kind in (("audience", "purpose") if audience_scoped else taxonomy.KINDS):
-            if dims[kind].get("ok"):
-                tags.append(f"twin:{_KIND_PREFIX[kind]}:{dims[kind]['code']}")
+        # 全部被并发裁定：dims 已被 gate_reject 就地改写为命中
     if audience_scoped:
         aud_code = dims["audience"]["code"]
         dims["work_type"] = {"ok": True, "kind": "work_type", "raw": "(受众级偏好)",
                              "code": store.audience_profile_code(aud_code),
                              "label_zh": dims["audience"].get("label_zh"), "matched_by": "audience_scope"}
-        tags.append(f"twin:aud:{aud_code}")
-    resp = sink.remember(
-        content=content,
-        subject=str(data.get("subject") or (
-            f"受众级偏好：{dims['audience'].get('label_zh') or dims['audience'].get('raw')}"
-            if audience_scoped else f"工作偏好：{dims['work_type'].get('raw')}")),
-        tags=tags + user_tags,
-        workspace=_bucket(),
-        source_ref=str(data.get("source_ref") or ""),
-        event_time=_today(),
-        client=identity.effective_client(data),  # 多 Agent：显式 data.client > 头 > env
-    )
-    ok = bool(resp.get("ok"))
-    out: dict = {"ok": ok, "memory": resp.get("data") if ok else resp,
-                 "dimensions": dims}
-    if inherited:
-        # 继承透明面：哪些维度来自任务行（显式传入的不在此列）
-        out["dims_inherited"] = inherited
-    if ok:
-        mid = _memory_id_of(resp.get("data"))
-        conn = db.connect()
-        try:
-            if mid is None:
-                # 对抗 review#9①：id 缺失则证据永不登记，必须显式告警而非静默
-                out["warnings"] = ["mema 响应缺记忆 id，本条未入证据索引（compile 不可见），建议重写"]
+    # v0.5.0 本地化（#1604）：偏好本体直写 twin_evidence（词法去重 + 本地发号，
+    # 事务在 db.add_local_evidence 内）。tags 前缀家族（twin:/twin-preference）
+    # 是 mema 桶行的维度外化物，自持库维度就在行上不再需要；user_tags 与
+    # source_ref 原样落行（API 契约保留）。
+    tags_json = json.dumps(user_tags, ensure_ascii=False)
+    source_ref = str(data.get("source_ref") or "")
+    subject = str(data.get("subject") or (
+        f"受众级偏好：{dims['audience'].get('label_zh') or dims['audience'].get('raw')}"
+        if audience_scoped else f"工作偏好：{dims['work_type'].get('raw')}"))
+    identity.effective_client(data)  # 身份校验保持入口同款 fail-fast（审计归因在入口层）
+    conn = db.connect()
+    try:
+        res = db.add_local_evidence(conn, dims, subject=subject, content=content,
+                                    tags_json=tags_json, source_ref=source_ref)
+        mid = res["memory_id"]
+        out: dict = {"ok": True, "duplicate": res["duplicate"],
+                     "memory_id": mid, "evidence_id": mid,
+                     "memory": {"id": mid, "subject": subject},
+                     "dimensions": dims}
+        if inherited:
+            # 继承透明面：哪些维度来自任务行（显式传入的不在此列）
+            out["dims_inherited"] = inherited
+        if res["duplicate"]:
+            out["note"] = ("同类型已存在内容完全相同的偏好（词法去重命中），本次未重复"
+                           "写入；本响应即幂等成功，请勿重试、也无需改写")
+            return out
+        if audience_scoped:
+            zh = dims["audience"].get("label_zh") or dims["audience"]["raw"]
+            out["hint"] = (f"已沉淀为对「{zh}」的受众级通用偏好（不绑定工作类型）；"
+                           "该受众有新证据时，夜间任务会重抽象其画像，"
+                           "对该受众的任何任务开工时自动带上")
+        else:
+            active = store.get_active(conn, dims["work_type"]["code"])
+            if active and active.get("version") is not None:
+                out["hint"] = (f"{dims['work_type']['label_zh']} 已有 persona prompt v{active['version']}；"
+                               "本次偏好已入池未编译——无需立即整理，"
+                               "由用户决定何时 compile，或等定时扫描统一处理")
             else:
-                db.record_evidence(conn, mid, dims,
-                                   subject=str(data.get("subject") or ""))
-                out["evidence_id"] = mid
-            if audience_scoped:
-                zh = dims["audience"].get("label_zh") or dims["audience"]["raw"]
-                out["hint"] = (f"已沉淀为对「{zh}」的受众级通用偏好（不绑定工作类型）；"
-                               "该受众有新证据时，夜间任务会重抽象其画像，"
-                               "对该受众的任何任务开工时自动带上")
-            else:
-                active = store.get_active(conn, dims["work_type"]["code"])
-                if active and active.get("version") is not None:
-                    out["hint"] = (f"{dims['work_type']['label_zh']} 已有 persona prompt v{active['version']}；"
-                                   "本次偏好已入池未编译——无需立即整理，"
-                                   "由用户决定何时 compile，或等定时扫描统一处理")
-                else:
-                    out["hint"] = (f"{dims['work_type']['label_zh']} 尚无 persona prompt，"
-                                   "可 twin(action=\"compile\") 生成 v1"
-                                   f"（{templates.STRONG_MODEL_NOTE}）")
-        finally:
-            conn.close()
+                out["hint"] = (f"{dims['work_type']['label_zh']} 尚无 persona prompt，"
+                               "可 twin(action=\"compile\") 生成 v1"
+                               f"（{templates.STRONG_MODEL_NOTE}）")
+    finally:
+        conn.close()
     return out
 
 
@@ -362,16 +334,8 @@ def _action_status(data: dict) -> dict:
             stats_conn.close()
     except sqlite3.Error:
         pass  # 软失败：统计面缺失不影响其余 status 输出
-    try:
-        resp = sink.review_conflicts()
-        payload = resp.get("data") or resp or {}
-        conf = payload.get("conflicts") or []
-        out["open_conflicts"] = sum(
-            1 for c in conf
-            if isinstance(c, dict) and c.get("status") == "open"
-            and c.get("workspace_canonical") == _bucket())
-    except (sink.SinkError, AttributeError, TypeError, ValueError):
-        pass  # 软失败：mema 抖动少一个计数即可，status 是夜间第一步不能被拖垮
+    # v0.5.0：mema 桶冲突计数（open_conflicts）随 sink 数据面退役整体移除
+    #（拆分后偏好不在 mema，写时语义冲突检测亦不服务 twin——见方案 §3.4）
     notice = scan.scan_notice()
     if notice:
         out["scan_notice"] = notice
@@ -422,8 +386,7 @@ def _action_get(data: dict) -> dict:
         # 「上文不可见」时的取回口，此前只回全文不带增补。仅 work_type 读
         # active 时附；aud- 画像与 versioned 历史读不附（增补锚定 active 语义）
         if not is_aud and version is None:
-            supp = task_actions._supplement_payload(code, None,
-                                                    client=identity.effective_client(data))
+            supp = task_actions._supplement_payload(code, None)
             if supp:
                 out.update(supp)
                 out["hint"] = ("该工作性质尚无编译版 persona，以上增补即已沉淀偏好，"
@@ -431,11 +394,10 @@ def _action_get(data: dict) -> dict:
         return out
     out = {"ok": True, **rec}
     if not is_aud and version is None:
-        # 同上：active 读取附未编译增补（软失败，mema 读挂不阻断全文返回）；
+        # 同上：active 读取附未编译增补（本地自取，软失败不阻断全文返回）；
         # 不注 _fallback_payload——读通道与执行通道的有意不对称（方案 §1.3）
         out.update(task_actions._supplement_payload(
-            code, {"version": rec.get("version")},
-            client=identity.effective_client(data)))
+            code, {"version": rec.get("version")}))
     return out
 
 
@@ -631,8 +593,7 @@ def _action_void(data: dict) -> dict:
     if out["already_void"]:
         out["note"] = "该证据已是作废状态，幂等无变更"
         return out
-    notes = ["作废不可逆（内容仍在 mema，需要可重写一条）；mema 本体的 retire/update "
-             "按其治理流程另行处理，twin 只管证据索引。"]
+    notes = ["作废不可逆（行保留、全链路排除；正文已在本库归档，需要可重写一条新偏好）。"]
     wt = row["work_type"]
     if (row["compiled_version"] is not None and wt
             and store.classify_code(wt) == store.CODE_KIND_WORK_TYPE):

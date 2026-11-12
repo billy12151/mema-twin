@@ -1,3 +1,5 @@
+import sqlite3
+
 import pytest
 
 from mema_twin import db as twin_db
@@ -56,10 +58,13 @@ def test_mark_compiled_and_idempotence(env):
     assert row["status"] == "compiled" and row["compiled_version"] == 3
 
 
-def test_duplicate_memory_id_ignored(env):
+def test_duplicate_memory_id_raises_for_import_conflict(env):
+    """v0.5.0 record_evidence 弃 OR IGNORE：显式 id 撞 UNIQUE(memory_id) 裸抛
+    IntegrityError，由导入器计冲突数（R1：OR IGNORE 吞冲突静默丢写）。"""
     conn = twin_db.connect()
     twin_db.record_evidence(conn, 301, _dims())
-    twin_db.record_evidence(conn, 301, _dims())  # 二次登记不重复计数
+    with pytest.raises(sqlite3.IntegrityError):
+        twin_db.record_evidence(conn, 301, _dims())
     assert len(twin_db.uncompiled_evidence(conn, "work_report")) == 1
 
 

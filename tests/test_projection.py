@@ -22,31 +22,26 @@ def env(tmp_path, monkeypatch):
 GOOD_MD = "# 整体风格\n\n- 规则一\n\n## 前置确认清单\n\n- 问题一\n"
 
 
-def _mk_uncompiled(mids, code="work_report", audience="leadership"):
+def _mk_uncompiled(mids, code="work_report", audience="leadership",
+                   subject=None, content=None):
+    """v0.5.0 起正文本地自持：直接 seed evidence 行（subject/content 默认
+    偏好{mid}/内容{mid}，与旧 read stub 的返回对齐）。"""
     conn = db.connect()
     dims = {"work_type": {"ok": True, "code": code, "raw": "周报"},
             "audience": {"ok": True, "code": audience, "raw": "高层"},
             "purpose": {"ok": True, "code": "sync_info", "raw": "同步"}}
     for mid in mids:
-        db.record_evidence(conn, mid, dims)
+        db.record_evidence(conn, mid, dims,
+                           subject=f"偏好{mid}" if subject is None else subject,
+                           content=f"内容{mid}" if content is None else content)
     conn.close()
-
-
-def _stub_read(monkeypatch):
-    from mema_twin import sink
-
-    def fake(mid, workspace=None, client=None):
-        return {"ok": True, "data": {"memory": {"id": mid, "subject": f"偏好{mid}",
-                                                "content": f"内容{mid}"}}}
-    monkeypatch.setattr(sink, "read_memory", fake)
 
 
 # ---- 全量投影 ----
 
-def test_compile_material_includes_compiled_evidence(monkeypatch):
+def test_compile_material_includes_compiled_evidence():
     """v1 吸收 801 后再 compile：已编译的 801 仍在素材里（全量投影，弱底稿
     不遗传——每版从头重编）。"""
-    _stub_read(monkeypatch)
     _mk_uncompiled([801])
     server._twin_impl("submit", {"work_type": "周报", "prompt_md": GOOD_MD,
                            "model": "m", "source_memory_ids": [801]})
@@ -56,30 +51,18 @@ def test_compile_material_includes_compiled_evidence(monkeypatch):
     assert "全部偏好证据" in r["material"] and "全量投影" in r["material"]
 
 
-def test_compile_no_evidence_empty_material(monkeypatch):
+def test_compile_no_evidence_empty_material():
     """alive 为空 → 素材证据节为空（v0.3.9 删 find 兜底：无在世证据时正确行为
-    是素材为空，find 语义召回可能不相干的 mema 记忆属伪造素材）。find stub 防联网。"""
-    from mema_twin import sink
-    _stub_read(monkeypatch)
-    calls = []
-
-    def fake_find(*a, **k):
-        calls.append(a)
-        return {"ok": True, "data": {"results": [
-            {"id": 811, "tags": ["twin:wt:work_report"], "subject": "s", "content": "c"}]}}
-
-    monkeypatch.setattr(sink, "find", fake_find)
+    是素材为空，语义召回不相干记忆属伪造素材；v0.5.0 起本地取数，find 通道已删）。"""
     r = server._twin_impl("compile", {"work_type": "周报"})
-    assert r["ok"] and calls == []  # 兜底已退役，find 一次都不该被调
+    assert r["ok"]
     assert "[811]" not in r["material"]
     assert "（无在世证据——如仍要重编，可基于当前版本做结构化重写）" in r["material"]
 
 
-def test_compile_rules_trio_present(monkeypatch):
+def test_compile_rules_trio_present():
     """编译规则三件套进素材包：稳定律 / 变更分级（归因）/ 硬预算（默认值）。
     v0.3.9 增：简练优先（双模式）与类型模式反向守门。"""
-    from mema_twin import sink
-    monkeypatch.setattr(sink, "find", lambda *a, **k: {"ok": True, "data": {"results": []}})
     r = server._twin_impl("compile", {"work_type": "周报"})
     m = r["material"]
     assert "含义稳定，表达自由" in m
@@ -94,15 +77,15 @@ def test_compile_rules_trio_present(monkeypatch):
     assert "不制造单分支条件段" not in r2["material"]  # 守门只进类型规则
 
 
-def test_material_dimension_tags_and_distribution(monkeypatch):
+def test_material_dimension_tags_and_distribution():
     """v0.3.9 F1：类型模式素材包证据行带 (受众:/用途:) code 标签 + 证据节前
     维度分布摘要；画像模式两者皆无；空值跳过（不渲染「受众:」空段）。"""
-    _stub_read(monkeypatch)
     _mk_uncompiled([801, 802], audience="leadership")
     # 803 无受众/用途（v0.3.8 前历史行回填形态）
     conn = db.connect()
     db.record_evidence(conn, 803, {"work_type": {"ok": True, "code": "work_report",
-                                                  "raw": "周报"}})
+                                                  "raw": "周报"}},
+                       subject="偏好803", content="内容803")
     conn.close()
     r = server._twin_impl("compile", {"work_type": "周报"})
     m = r["material"]
@@ -192,8 +175,7 @@ def test_last_scan_at_removed(tmp_path, monkeypatch):
 
 # ---- void 与全链路排除 ----
 
-def test_void_excludes_everywhere(monkeypatch):
-    _stub_read(monkeypatch)
+def test_void_excludes_everywhere():
     _mk_uncompiled([821, 822])
     server._twin_impl("submit", {"work_type": "周报", "prompt_md": GOOD_MD,
                            "model": "m", "source_memory_ids": [821, 822]})
@@ -216,8 +198,7 @@ def test_void_excludes_everywhere(monkeypatch):
     assert flow.get_meta("persona_stale:work_report") is None
 
 
-def test_void_uncompiled_marks_stale_false(monkeypatch):
-    _stub_read(monkeypatch)
+def test_void_uncompiled_marks_stale_false():
     _mk_uncompiled([831])
     r = server._twin_impl("void", {"memory_id": 831})
     assert r["ok"] and r["was_compiled"] is False
@@ -242,8 +223,7 @@ def test_void_not_found_and_aud_row():
     assert "leadership" in s["audience_stale"]
 
 
-def test_audience_evidence_excludes_void(monkeypatch):
-    _stub_read(monkeypatch)
+def test_audience_evidence_excludes_void():
     _mk_uncompiled([851])
     server._twin_impl("void", {"memory_id": 851})
     conn = db.connect()
@@ -252,10 +232,9 @@ def test_audience_evidence_excludes_void(monkeypatch):
     assert all(r["memory_id"] != 851 for r in rows)
 
 
-def test_damping_bypasses_when_evidence_base_shrunk(monkeypatch):
+def test_damping_bypasses_when_evidence_base_shrunk():
     """评审轮1 P1-1：void 后期望集收缩（E⊊old），画像/类型重抽象提交必是旧
     source 集真子集——阻尼必须放行，否则 void 驱动的重编被永久拦死。"""
-    _stub_read(monkeypatch)
     _mk_uncompiled([861, 862])
     # 画像 v1 吸收两条受众证据
     server._twin_impl("submit", {"work_type": "aud-leadership",
@@ -279,9 +258,8 @@ def test_damping_bypasses_when_evidence_base_shrunk(monkeypatch):
     assert r2["ok"] is False and r2["error"] == "no_new_evidence"
 
 
-def test_profile_material_voided_section_by_audience(monkeypatch):
+def test_profile_material_voided_section_by_audience():
     """评审轮1 P1-2：画像模式的作废条款节按 audience 查（跨类型行也算）。"""
-    _stub_read(monkeypatch)
     _mk_uncompiled([871, 872])
     server._twin_impl("void", {"memory_id": 871})
     r = server._twin_impl("compile", {"work_type": "aud-leadership"})
@@ -290,9 +268,8 @@ def test_profile_material_voided_section_by_audience(monkeypatch):
     assert "[871]" in voided_part and "未入编译" in voided_part
 
 
-def test_void_idempotent_no_stale_remark(monkeypatch):
+def test_void_idempotent_no_stale_remark():
     """评审轮1 P3-1：重复 void 幂等返回，不重置已清的 persona_stale。"""
-    _stub_read(monkeypatch)
     _mk_uncompiled([881])
     server._twin_impl("submit", {"work_type": "周报", "prompt_md": GOOD_MD,
                            "model": "m", "source_memory_ids": [881]})
@@ -321,9 +298,8 @@ def test_status_lists_persona_stale(monkeypatch):
     assert s["persona_stale"][0]["voided"] == [901]
 
 
-def test_rollback_revives_void_guard(monkeypatch):
+def test_rollback_revives_void_guard():
     """评审轮2 P2-2：回滚到 source 含已作废证据的版本 → 重标 persona_stale。"""
-    _stub_read(monkeypatch)
     _mk_uncompiled([891, 892])
     server._twin_impl("submit", {"work_type": "周报", "prompt_md": GOOD_MD,
                                  "model": "m", "source_memory_ids": [891, 892]})

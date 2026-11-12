@@ -192,11 +192,10 @@ def test_nightly_reject_dirty_meta_tolerated():
 
 # ---- 素材标记守卫 ----
 
-def test_material_markers_drift_guard(monkeypatch):
+def test_material_markers_drift_guard():
     """G1 标记漂移守卫：类型 + 受众两种素材包合起来覆盖全部标记——
-    模板改字而 MATERIAL_MARKERS 不同步会直接红，防止门静默失效。"""
-    from mema_twin import sink
-    monkeypatch.setattr(sink, "find", lambda *a, **k: {"ok": True, "data": {"results": []}})
+    模板改字而 MATERIAL_MARKERS 不同步会直接红，防止门静默失效。
+    （v0.5.0 起取材本地化，无 mema find 需 stub。）"""
     m1 = server._twin_impl("compile", {"work_type": "周报"})
     m2 = server._twin_impl("compile", {"work_type": "aud-leadership"})
     assert m1["ok"] and m2["ok"]

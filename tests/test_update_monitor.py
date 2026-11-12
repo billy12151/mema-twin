@@ -167,21 +167,17 @@ def test_twin_notices_only_on_ok(um_env, monkeypatch):
     assert err["ok"] is False and "twin_notices" not in err
 
 
-def test_twin_notices_and_mema_notices_coexist(um_env, monkeypatch):
+def test_twin_notices_on_ok_only(um_env, monkeypatch):
+    """twin_notices（升级提示）仍在；mema_notices 透传已随 sink 数据面退役，
+    响应不再出现该键（v0.5.0 回归钉）。"""
     monkeypatch.setattr(um, "consume_notices",
-                        lambda: [{"type": "update_available"}])
-    # mema_notices 经 contextvar 收集（_twin_impl reset 在 handler 之前）——
-    # 把 drain 挂进 handler 执行期内，验证两键可同现
-    from mema_twin import sink
-    orig = server._ACTIONS["task_recent"]
-
-    def fake(data):
-        sink._drain_notices({"notices": [{"type": "similar_active_memory"}]})
-        return orig(data)
-
-    monkeypatch.setitem(server._ACTIONS, "task_recent", fake)
+                        lambda: [{"type": "update_available", "current": "0.3.11",
+                                  "latest": "9.9.9"}])
     ok = server._twin_impl("task_recent", {})
-    assert "mema_notices" in ok and "twin_notices" in ok
+    assert ok["ok"] and ok["twin_notices"][0]["latest"] == "9.9.9"
+    assert "mema_notices" not in ok
+    err = server._twin_impl("nope", {})
+    assert err["ok"] is False and "twin_notices" not in err
 
 
 def test_current_version_prefers_newer_repo_version(um_env, monkeypatch):

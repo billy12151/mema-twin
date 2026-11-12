@@ -1,128 +1,84 @@
-"""云端网关形态的 sink 鉴权与错误面（2026-10-25）。
+"""sink 收缩后的身份通道面（v0.5.0 拆分 #1604）。
 
-覆盖三件事：MEMA_TWIN_MEMA_TOKEN 非空时带 Authorization: Bearer、
-空/未设时不发头（本地无鉴权 mema 形态不变）、HTTP 被拒（401 等）报
-「被拒」而非「不可达」——云端部署首故障是 token 缺失，误报不可达会把
-排查引向网络层。
+数据面（remember/read/find/review_conflicts + notices 透传 + token 透传）
+已整体退役——本文件钉住三件事：
+1. 数据面函数删除后 import 无死引用（hasattr 反向回归）；
+2. 启动校验只查宿主身份 env（MEMA_TWIN_CLIENT_ID），token env 不再校验
+   （数据面没了，MEMA_TWIN_MEMA_TOKEN 仅剩多租户互斥校验语义）；
+3. whoami 端点推导（…/mcp → …/whoami）与三态错误类仍在（多租户路由面，
+   三态行为细节在 tests/test_tenant.py）。
 """
-import io
-import json
-import urllib.error
+import urllib.request
 
 import pytest
 
 from mema_twin import server, sink
 
 
-class _FakeResp(io.BytesIO):
-    """urlopen 上下文管理器形态。"""
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
+# ---- 数据面函数删除（sink 收缩回归）----------------------------------
 
 
-def _ok_body() -> bytes:
-    payload = {"jsonrpc": "2.0", "id": 1,
-               "result": {"content": [{"type": "text",
-                                       "text": json.dumps({"ok": True, "data": {}})}]}}
-    return f"event: message\ndata: {json.dumps(payload)}\n".encode()
+def test_sink_data_plane_functions_removed():
+    """remember/read_memory/find/review_conflicts/notices/token 透传整体退役：
+    函数不存在（运行时调用点已删的断言见 test_v050_separation.py 的
+    status/compile 响应键检查）。"""
+    for name in ("remember", "read_memory", "find", "review_conflicts",
+                 "_call", "_headers", "_drain_notices", "_parse_sse",
+                 "collect_notices", "reset_notices", "set_request_token",
+                 "reset_request_token", "_request_token", "_env_token",
+                 "_env_token_header", "_AGENT_ID"):
+        assert not hasattr(sink, name), name
+    for name in ("SinkError", "SinkAuthError", "SinkUnavailableError",
+                 "whoami", "whoami_url", "_env_client"):
+        assert hasattr(sink, name), name
 
 
-def _capture_urlopen(monkeypatch, body=None, raise_=None):
-    captured = {}
-
-    def fake_urlopen(req, timeout=None):
-        captured["req"] = req
-        captured["timeout"] = timeout
-        if raise_ is not None:
-            raise raise_
-        return _FakeResp(body if body is not None else _ok_body())
-
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
-    return captured
+def test_whoami_url_derived_from_mcp_endpoint(monkeypatch):
+    """身份端点由 MCP 端点推导：…/mcp → …/whoami（非 /mcp 端点原样拼）。"""
+    monkeypatch.setenv("MEMA_TWIN_MEMA_URL", "http://127.0.0.1:8000/mcp")
+    assert sink.whoami_url() == "http://127.0.0.1:8000/whoami"
+    monkeypatch.setenv("MEMA_TWIN_MEMA_URL", "http://127.0.0.1:8000/nested/mcp/")
+    assert sink.whoami_url() == "http://127.0.0.1:8000/nested/whoami"
 
 
-# ---- token 头 ----
-
-def test_token_env_adds_bearer_header(monkeypatch):
-    """云端网关形态：token 非空 → Authorization: Bearer 随请求发出。"""
-    monkeypatch.setenv("MEMA_TWIN_MEMA_TOKEN", "twin-test-token-abc.def-123")
-    cap = _capture_urlopen(monkeypatch)
-    assert sink._call("memory", {"action": "read", "data": {"memory_id": 1}})
-    assert cap["req"].get_header("Authorization") == "Bearer twin-test-token-abc.def-123"
+# ---- 宿主身份 env 校验（唯一存续的 mema 相关 env 校验）----------------
 
 
-def test_token_absent_sends_no_auth_header(monkeypatch):
-    """本地无鉴权 mema 形态不变：未设 token 不发 Authorization 头。"""
-    monkeypatch.delenv("MEMA_TWIN_MEMA_TOKEN", raising=False)
-    cap = _capture_urlopen(monkeypatch)
-    sink._call("memory", {"action": "read", "data": {"memory_id": 1}})
-    assert cap["req"].get_header("Authorization") is None
-
-    monkeypatch.setenv("MEMA_TWIN_MEMA_TOKEN", "")  # 空串同义
-    cap = _capture_urlopen(monkeypatch)
-    sink._call("memory", {"action": "read", "data": {"memory_id": 1}})
-    assert cap["req"].get_header("Authorization") is None
+def test_env_client_dirty_rejected_clean_accepted(monkeypatch):
+    """MEMA_TWIN_CLIENT_ID 脏值就地打回 ValueError，合法值原样返回。"""
+    monkeypatch.setenv("MEMA_TWIN_CLIENT_ID", "has space")
+    with pytest.raises(ValueError, match="MEMA_TWIN_CLIENT_ID"):
+        sink._env_client()
+    monkeypatch.setenv("MEMA_TWIN_CLIENT_ID", "zcode")
+    assert sink._env_client() == "zcode"
+    monkeypatch.delenv("MEMA_TWIN_CLIENT_ID", raising=False)
+    assert sink._env_client() == "zcode"  # 缺省回落
 
 
-def test_token_identity_headers_still_present(monkeypatch):
-    """鉴权头不替代身份头：X-Mema-Client / X-Mema-Agent-Id 照发（core 硬门）。"""
-    monkeypatch.setenv("MEMA_TWIN_MEMA_TOKEN", "test-token-x")
-    cap = _capture_urlopen(monkeypatch)
-    sink._call("memory", {"action": "read", "data": {"memory_id": 1}}, client="kimi")
-    assert cap["req"].get_header("X-mema-client") == "kimi"
-    assert cap["req"].get_header("X-mema-agent-id") == "mema-twin"
+def _run_main(monkeypatch, tmp_path):
+    """跑 server.main() 但不让 stdio 真起来（stub mcp.run 吸收调用）。"""
+    monkeypatch.setenv("MEMA_TWIN_UPDATE_CHECK", "0")
+    monkeypatch.setenv("MEMA_TWIN_DB_PATH", str(tmp_path / "twin.sqlite3"))
+    monkeypatch.setenv("MEMA_TWIN_PROMPTS_DIR", str(tmp_path / "prompts"))
+    monkeypatch.setenv("MEMA_TWIN_DELIVERABLES_DIR", str(tmp_path / "deliverables"))
+    calls = []
+    monkeypatch.setattr(server.mcp, "run", lambda transport=None: calls.append(transport))
+    server.main()
+    return calls
 
 
-def test_dirty_token_env_rejected(monkeypatch):
-    """脏 token（空白/换行/不可见）就地打回，不把坏头发给 mema。"""
-    for bad in ("has space", "a\nb", "tok\tx", "a\r\nX-Injected: 1"):
-        monkeypatch.setenv("MEMA_TWIN_MEMA_TOKEN", bad)
-        with pytest.raises(ValueError):
-            sink._headers()
-
-
-def test_startup_validates_token_env(monkeypatch):
-    """server 启动校验覆盖 token env：脏值 SystemExit，不留给运行期。"""
-    monkeypatch.setenv("MEMA_TWIN_UPDATE_CHECK", "0")  # 防 daemon 线程联网
-    monkeypatch.setenv("MEMA_TWIN_TRANSPORT", "stdio")
-    monkeypatch.setenv("MEMA_TWIN_MEMA_TOKEN", "bad token")
+def test_startup_validates_client_env_only(monkeypatch, tmp_path):
+    """启动即校验宿主身份 env：脏值 SystemExit，不留给运行期中途炸。"""
+    monkeypatch.setenv("MEMA_TWIN_CLIENT_ID", "bad token")
     with pytest.raises(SystemExit) as ei:
-        server.main()
-    assert "MEMA_TWIN_MEMA_TOKEN" in str(ei.value)
+        _run_main(monkeypatch, tmp_path)
+    assert "MEMA_TWIN_CLIENT_ID" in str(ei.value)
 
 
-# ---- HTTP 错误面 ----
-
-def test_401_reported_as_rejected_not_unreachable(monkeypatch):
-    """401 是被拒（token 问题）不是不可达：报文带 token 指引。"""
-    err = urllib.error.HTTPError("http://x/mcp", 401, "Unauthorized", {},
-                                 io.BytesIO(b'{"detail":"invalid_token"}'))
-    _capture_urlopen(monkeypatch, raise_=err)
-    with pytest.raises(sink.SinkError) as ei:
-        sink._call("memory", {"action": "read", "data": {"memory_id": 1}})
-    msg = str(ei.value)
-    assert "401" in msg and "不可达" not in msg
-    assert "MEMA_TWIN_MEMA_TOKEN" in msg  # 云端首故障指引
-    assert "invalid_token" in msg  # 响应 detail 透出
-
-
-def test_421_hint_points_at_host_gate(monkeypatch):
-    """421 host 门（core invalid_host）带指向性提示，不误报网络问题。"""
-    err = urllib.error.HTTPError("http://x/mcp", 421, "Misdirected Request", {},
-                                 io.BytesIO(b""))
-    _capture_urlopen(monkeypatch, raise_=err)
-    with pytest.raises(sink.SinkError) as ei:
-        sink._call("memory", {"action": "read", "data": {"memory_id": 1}})
-    assert "421" in str(ei.value) and "host" in str(ei.value)
-
-
-def test_connection_error_still_unreachable(monkeypatch):
-    """真连不上（URLError）仍报不可达——语义未被 401 分支吞掉。"""
-    _capture_urlopen(monkeypatch, raise_=urllib.error.URLError("refused"))
-    with pytest.raises(sink.SinkError) as ei:
-        sink._call("memory", {"action": "read", "data": {"memory_id": 1}})
-    assert "不可达" in str(ei.value)
+def test_startup_no_longer_validates_token_env(monkeypatch, tmp_path):
+    """v0.5.0：MEMA_TWIN_MEMA_TOKEN 数据面退役——脏 token env 不再阻断启动
+    （该 env 只剩多租户互斥校验语义，default 形态无人消费）。"""
+    monkeypatch.setenv("MEMA_TWIN_CLIENT_ID", "zcode")
+    monkeypatch.setenv("MEMA_TWIN_MEMA_TOKEN", "bad token with space")
+    calls = _run_main(monkeypatch, tmp_path)
+    assert calls == [None]  # 启动继续（stdio 形态 mcp.run 被调）

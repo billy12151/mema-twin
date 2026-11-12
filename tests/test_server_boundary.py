@@ -37,24 +37,6 @@ def test_malformed_source_memory_ids():
     assert r2.get("ok") is False
 
 
-def test_workspace_env_no_longer_overrides(monkeypatch):
-    """0.3.3 起桶名写死常量：MEMA_TWIN_WORKSPACE（含坏值）一律无效，
-    发往 mema 的 workspace 恒为 mema-twin。"""
-    from mema_twin import sink
-    captured = {}
-
-    def fake_remember(content, subject, tags, workspace, source_ref="", event_time="", client=None):
-        captured["workspace"] = workspace
-        return {"ok": True, "data": {"id": 1}}
-    monkeypatch.setattr(sink, "remember", fake_remember)
-    for env_value in ("../escape", "a/b", "other-bucket"):
-        monkeypatch.setenv("MEMA_TWIN_WORKSPACE", env_value)
-        r = server._twin_impl("write", {"content": "c", "work_type": "周报",
-                                  "audience": "高层", "purpose": "同步"})
-        assert r.get("ok") is True, env_value
-    assert captured["workspace"] == "mema-twin"
-
-
 def test_write_rejects_oversized_dimension():
     r = server._twin_impl("write", {"content": "x", "work_type": "长" * 300,
                               "audience": "高层", "purpose": "同步"})
@@ -116,44 +98,37 @@ def test_append_alias_conflict_rejected(tmp_path, monkeypatch):
         twin_db.append_alias(conn, "purpose", "sync_info", "催办x")
 
 
-def test_write_strips_twin_namespace_tags(monkeypatch):
-    """对抗#13：用户 tags 不能伪造维度命名空间。"""
-    captured = {}
-    from mema_twin import server as srv, sink
-
-    def fake_remember(content, subject, tags, workspace, source_ref="", event_time="", client=None):
-        captured["tags"] = tags
-        return {"ok": True, "data": {"id": 1}}
-    monkeypatch.setattr(sink, "remember", fake_remember)
+def test_write_strips_twin_namespace_tags():
+    """对抗#13：用户 tags 不能伪造维度命名空间（v0.5.0 落行形态：twin:* 在
+    入口剥掉，其余用户 tag 原样落 tags 列；维度在行的三维 code 列上）。"""
+    from mema_twin import server as srv
     r = srv._twin_impl("write", {"content": "c", "work_type": "周报", "audience": "高层",
                            "purpose": "同步", "tags": ["twin:wt:presentation", "正常tag"]})
     assert r["ok"]
-    assert "twin:wt:presentation" not in captured["tags"]
-    assert "正常tag" in captured["tags"]
-    assert captured["tags"].count("twin:wt:work_report") == 1
-
-
-def test_write_no_ghost_pending_on_sink_failure(monkeypatch):
-    """对抗#14：mema 写失败不留幽灵 pending；v0.3.8 归一门下未命中更是先打回
-    （mema 根本不被触达，票据即裁定义务，不是幽灵）。"""
-    from mema_twin import server as srv, sink
-    called = []
-    monkeypatch.setattr(sink, "remember",
-                        lambda *a, **k: called.append(1) or (_ for _ in ()).throw(sink.SinkError("down")))
-    r = srv._twin_impl("write", {"content": "c", "work_type": "周报",
-                           "audience": "高层", "purpose": "同步"})
-    assert r.get("error") == "mema_unreachable" and called  # 门过、mema 失败
     conn = db.connect()
-    n = conn.execute("SELECT COUNT(*) AS c FROM twin_pending_values").fetchone()["c"]
+    row = conn.execute("SELECT tags, work_type FROM twin_evidence").fetchone()
     conn.close()
-    assert n == 0
-    # 未命中：打回 + 票据，mema 不被调用
-    called.clear()
-    r2 = srv._twin_impl("write", {"content": "c", "work_type": "灵能审计年报",
-                            "audience": "高层", "purpose": "同步"})
-    assert r2.get("error") == "unmatched_value" and not called
-    assert r2["fields"]["work_type"]["pending_id"]
-    assert any(c["code"] == "data_analysis" for c in r2["fields"]["work_type"]["candidates"])
+    import json as _json
+    tags = _json.loads(row["tags"])
+    assert not any(str(t).startswith("twin:") for t in tags)
+    assert "正常tag" in tags
+    assert row["work_type"] == "work_report"  # 归一门结果，不被 tags 伪造
+
+
+def test_write_no_ghost_pending_on_gate_reject():
+    """对抗#14 本地化：v0.3.8 归一门下未命中先打回——不落库、只落裁定义务
+    票据（v0.5.0 起 write 本地成功路径不存在 sink 失败分支，幽灵行无从产生）。"""
+    from mema_twin import server as srv
+    r = srv._twin_impl("write", {"content": "c", "work_type": "灵能审计年报",
+                           "audience": "高层", "purpose": "同步"})
+    assert r.get("error") == "unmatched_value"
+    conn = db.connect()
+    n_ev = conn.execute("SELECT COUNT(*) AS c FROM twin_evidence").fetchone()["c"]
+    rows = {(x["type_kind"], x["raw_value"]) for x in db.list_pending(conn)}
+    conn.close()
+    assert n_ev == 0  # 未命中不落半行
+    assert rows == {("work_type", "灵能审计年报")}  # 票据只落未命中维（高层/同步已知）
+    assert any(c["code"] == "data_analysis" for c in r["fields"]["work_type"]["candidates"])
 
 
 def test_revise_child_is_planning():
@@ -207,21 +182,19 @@ def test_main_transport_selection(monkeypatch):
         server.main()
 
 
-def test_write_client_identity_passthrough(monkeypatch):
-    """多 Agent：write 的 data.client 决定发往 mema 的 X-Mema-Client。"""
-    from mema_twin import sink
-    captured = {}
-
-    def fake_call(name, arguments, client=None, timeout=30):
-        captured["client"] = client
-        return {"ok": True, "data": {"id": 7}}
-    monkeypatch.setattr(sink, "_call", fake_call)
+def test_write_client_identity_attributed_locally(monkeypatch):
+    """多 Agent：write 的 data.client 决定审计归因（v0.5.0 起 client 不再外发，
+    身份落在本地审计行）。"""
+    from mema_twin import audit
     r = server._twin_impl("write", {"content": "c", "work_type": "周报", "audience": "高层",
                               "purpose": "同步", "client": "kimi"})
-    assert r["ok"] and captured["client"] == "kimi"
-    r2 = server._twin_impl("write", {"content": "c", "work_type": "周报", "audience": "高层",
+    assert r["ok"]
+    r2 = server._twin_impl("write", {"content": "c2", "work_type": "周报", "audience": "高层",
                                "purpose": "同步"})
-    assert r2["ok"] and captured["client"] is None  # 回落 env 默认
+    assert r2["ok"]
+    rows = audit.recent(action="write", limit=5)
+    assert rows[0]["client"] in (None, "")  # 无 data.client 且无头 → 空（不猜 env 外的身份）
+    assert "kimi" in {x["client"] for x in rows}
 
 
 # ---- 0.3.3 client 头透传 ----
@@ -272,14 +245,8 @@ def test_request_client_rejects_dirty_header(monkeypatch):
 
 def test_write_client_header_authoritative(monkeypatch):
     """对抗#1：http 头存在时头是权威——data.client 不一致打回（堵跨宿主冒充），
-    一致或省略放行。"""
-    from mema_twin import sink
-    captured = {}
-
-    def fake_call(name, arguments, client=None, timeout=30):
-        captured["client"] = client
-        return {"ok": True, "data": {"id": 7}}
-    monkeypatch.setattr(sink, "_call", fake_call)
+    一致或省略放行（v0.5.0 起 client 只进本地审计，不再外发）。"""
+    from mema_twin import audit
     monkeypatch.setattr(server.mcp, "get_context",
                         lambda: _FakeCtx([("x-mema-client", "kimi")]))
     r = server._twin_impl("write", {"content": "c", "work_type": "周报", "audience": "高层",
@@ -287,10 +254,12 @@ def test_write_client_header_authoritative(monkeypatch):
     assert r.get("ok") is False and r.get("error") == "invalid_input" and "不一致" in r.get("reason", "")
     r2 = server._twin_impl("write", {"content": "c", "work_type": "周报", "audience": "高层",
                                "purpose": "同步", "client": "kimi"})
-    assert r2["ok"] and captured["client"] == "kimi"
+    assert r2["ok"]
     r3 = server._twin_impl("write", {"content": "c", "work_type": "周报",
                                "audience": "高层", "purpose": "同步"})
-    assert r3["ok"] and captured["client"] == "kimi"
+    assert r3["ok"]
+    rows = audit.recent(action="write", limit=3)
+    assert rows and all(x["client"] == "kimi" for x in rows)  # 头是权威归因
 
 
 def test_write_rejects_dirty_explicit_client():
@@ -322,29 +291,27 @@ def test_dirty_explicit_client_rejected_at_entry():
 
 
 def test_sink_env_client_dirty_rejected(monkeypatch):
-    """轮1#9：MEMA_TWIN_CLIENT_ID env 脏值就地打回，不发脏头给 mema。"""
+    """轮1#9：MEMA_TWIN_CLIENT_ID env 脏值就地打回（v0.5.0 起唯一存续的
+    mema 相关 env 校验，校验单点 sink._env_client）。"""
     from mema_twin import sink
     monkeypatch.setenv("MEMA_TWIN_CLIENT_ID", "has space")
     with pytest.raises(ValueError):
-        sink._headers()
+        sink._env_client()
     monkeypatch.setenv("MEMA_TWIN_CLIENT_ID", "zcode")
-    assert sink._headers()["X-Mema-Client"] == "zcode"
+    assert sink._env_client() == "zcode"
 
 
 # ---- 第二轮对抗性 review 回归（0.3.3）----
 
-def test_stdio_explicit_client_still_works(monkeypatch):
-    """对抗#1 正例：stdio 无头时 data.client 仍是唯一显式归属手段。"""
-    from mema_twin import sink
-    captured = {}
-
-    def fake_call(name, arguments, client=None, timeout=30):
-        captured["client"] = client
-        return {"ok": True, "data": {"id": 7}}
-    monkeypatch.setattr(sink, "_call", fake_call)
+def test_stdio_explicit_client_still_works():
+    """对抗#1 正例：stdio 无头时 data.client 仍是唯一显式归属手段
+    （v0.5.0 起归属落本地审计行）。"""
+    from mema_twin import audit
     r = server._twin_impl("write", {"content": "c", "work_type": "周报", "audience": "高层",
                               "purpose": "同步", "client": "kimi"})
-    assert r["ok"] and captured["client"] == "kimi"
+    assert r["ok"]
+    rows = audit.recent(action="write", limit=1)
+    assert rows and rows[0]["client"] == "kimi"
 
 
 def test_client_type_and_whitespace_rejected(monkeypatch):
@@ -416,11 +383,10 @@ def test_flow_env_fallback_validated(monkeypatch):
 
 # ---- 0.3.4 compile 会话治理 ----
 
-def test_compile_material_labels_old_version(monkeypatch):
+def test_compile_material_labels_old_version():
     """素材包旧版标签：出生即「编译参考，非执行依据」，不再自标当前版本
     （submit 落新版后该标签会变假话且无法回收——从源头不产生）。"""
-    from mema_twin import sink, store
-    monkeypatch.setattr(sink, "find", lambda *a, **k: {"ok": True, "data": {"results": []}})
+    from mema_twin import store
     conn = db.connect()
     store.create_version(conn, "work_report", "# v1 内容", ["1"], model="m")
     conn.close()
@@ -478,32 +444,22 @@ def test_rollback_action_boundary():
 
 # ---- v0.3.5 增补注入（#905-②）----
 
-def _mk_uncompiled(mids, code="work_report"):
+def _mk_uncompiled(mids, code="work_report", subject=None, content=None):
+    """v0.5.0 起正文本地自持：直接 seed evidence 行（subject/content 默认
+    s{mid}/偏好{mid}，与旧 read stub 的返回对齐）。"""
     conn = db.connect()
     dims = {"work_type": {"ok": True, "code": code, "raw": "周报"},
             "audience": {"ok": True, "code": "leadership", "raw": "高层"},
             "purpose": {"ok": True, "code": "sync_info", "raw": "同步"}}
     for mid in mids:
-        db.record_evidence(conn, mid, dims)
+        db.record_evidence(conn, mid, dims,
+                           subject=f"s{mid}" if subject is None else subject,
+                           content=f"偏好{mid}" if content is None else content)
     conn.close()
 
 
-def _stub_read(monkeypatch, contents=None, fail=False):
-    from mema_twin import sink
-    if fail:
-        def boom(mid, workspace=None, client=None):
-            raise sink.SinkError("mema HTTP MCP 不可达（127.0.0.1:8000）")
-        monkeypatch.setattr(sink, "read_memory", boom)
-        return
-    def fake(mid, workspace=None, client=None):
-        return {"ok": True, "data": {"memory": {"id": mid,
-                "subject": f"s{mid}", "content": contents or f"偏好{mid}"}}}
-    monkeypatch.setattr(sink, "read_memory", fake)
-
-
-def test_task_start_supplement_injected(monkeypatch):
+def test_task_start_supplement_injected():
     """有 persona + 未编译证据 → 增补随注入，优先级声明在场。"""
-    _stub_read(monkeypatch)
     server._twin_impl("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m"})
     _mk_uncompiled([501, 502])
     r = server._twin_impl("task_start", {"brief": "B", "work_type": "周报"})
@@ -514,9 +470,8 @@ def test_task_start_supplement_injected(monkeypatch):
     assert "以增补为准" in r["persona_supplement_note"]
 
 
-def test_task_start_supplement_with_shortcircuit(monkeypatch):
+def test_task_start_supplement_with_shortcircuit():
     """短路相等分支必须同样带增补：增补是新进场材料，上文没有（#895 陷阱）。"""
-    _stub_read(monkeypatch)
     server._twin_impl("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m"})
     _mk_uncompiled([503])
     r = server._twin_impl("task_start", {"brief": "B", "work_type": "周报",
@@ -526,9 +481,8 @@ def test_task_start_supplement_with_shortcircuit(monkeypatch):
     assert len(r["persona_supplement"]) == 1
 
 
-def test_task_start_supplement_cap(monkeypatch):
+def test_task_start_supplement_cap():
     """上限 10 条截旧留新 + 积压提醒（#905-C 拍板）。"""
-    _stub_read(monkeypatch)
     server._twin_impl("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m"})
     _mk_uncompiled(list(range(600, 612)))
     r = server._twin_impl("task_start", {"brief": "B", "work_type": "周报"})
@@ -538,19 +492,19 @@ def test_task_start_supplement_cap(monkeypatch):
     assert "compile" in r["persona_supplement_note"]
 
 
-def test_task_start_supplement_mema_fail_soft(monkeypatch):
-    """mema 全挂 → 无增补字段，persona 照常注入（软失败，绝不缺席）。"""
-    _stub_read(monkeypatch, fail=True)
+def test_task_start_supplement_missing_content_soft_fail():
+    """本地化软失败形态（原「mema 全挂」用例）：行 content 空（旧指针行待迁移）
+    → 无增补字段（skipped 如实上报），persona 照常注入，绝不缺席。"""
     server._twin_impl("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m"})
-    _mk_uncompiled([504, 505])
+    _mk_uncompiled([504, 505], content="")
     r = server._twin_impl("task_start", {"brief": "B", "work_type": "周报"})
     assert r["ok"] and r["persona_prompt_md"] == "# v1"
     assert "persona_supplement" not in r
+    assert len(r["persona_supplement_skipped"]) == 2
 
 
-def test_task_start_empty_persona_proto(monkeypatch):
+def test_task_start_empty_persona_proto():
     """空 persona 分支（#905-A 拍板：给）：原始证据当雏形注入。"""
-    _stub_read(monkeypatch)
     _mk_uncompiled([506])
     r = server._twin_impl("task_start", {"brief": "B", "work_type": "周报"})
     assert r["ok"]
@@ -560,19 +514,16 @@ def test_task_start_empty_persona_proto(monkeypatch):
     assert "通用标准" not in r["hint"]
 
 
-def test_task_start_no_evidence_no_supplement(monkeypatch):
-    """无未编译证据 → 不产生增补字段（也不能走 find 兜底，AR-3）。"""
-    from mema_twin import sink
-    monkeypatch.setattr(sink, "find", lambda *a, **k: {"ok": True, "data": {"results": [
-        {"id": 999, "tags": ["twin:wt:work_report"], "content": "历史偏好"}]}})
+def test_task_start_no_evidence_no_supplement():
+    """无未编译证据 → 不产生增补字段（find 兜底已随 v0.3.9 删除，
+    v0.5.0 起连外呼通道都不存在）。"""
     server._twin_impl("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m"})
     r = server._twin_impl("task_start", {"brief": "B", "work_type": "周报"})
     assert "persona_supplement" not in r
 
 
-def test_task_resume_supplement(monkeypatch):
+def test_task_resume_supplement():
     """task_resume 同一注入点：增补照带。"""
-    _stub_read(monkeypatch)
     server._twin_impl("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m"})
     start = server._twin_impl("task_start", {"brief": "B", "work_type": "周报"})
     _mk_uncompiled([507])
@@ -598,43 +549,21 @@ def test_compile_material_conditional_and_prohibitions(monkeypatch):
 # ---- 轮1 review 修复的回归 ----
 
 
-def test_supplement_failfast_discriminating(monkeypatch):
-    """首条连接级 SinkError → 跳过剩余（增补整体缺席），不是逐条重试。"""
-    from mema_twin import sink
-    calls = []
-    def fake(mid, workspace=None, client=None):
-        calls.append(mid)
-        raise sink.SinkError("mema HTTP MCP 不可达（127.0.0.1:8000）")
-    monkeypatch.setattr(sink, "read_memory", fake)
+def test_supplement_single_row_missing_content_no_failfast():
+    """单条 content 空（旧指针行）不熔断：其余条目照带上，skipped 如实上报。"""
     server._twin_impl("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m"})
-    _mk_uncompiled([508, 509])
-    r = server._twin_impl("task_start", {"brief": "B", "work_type": "周报"})
-    assert "persona_supplement" not in r
-    assert "persona_prompt_md" in r
-    assert len(calls) == 1  # 第二条没再打 mema
-
-
-def test_supplement_single_row_notok_no_failfast(monkeypatch):
-    """单条 read 未命中不熔断：后续条目照读，skipped 如实上报。"""
-    from mema_twin import sink
-    def fake(mid, workspace=None, client=None):
-        if mid == 508:
-            return {"ok": False, "error": "not_found"}
-        return {"ok": True, "data": {"memory": {"id": mid, "subject": "s",
-                                                "content": f"偏好{mid}"}}}
-    monkeypatch.setattr(sink, "read_memory", fake)
-    server._twin_impl("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m"})
-    _mk_uncompiled([508, 509])
+    _mk_uncompiled([508], content="")
+    _mk_uncompiled([509])
     r = server._twin_impl("task_start", {"brief": "B", "work_type": "周报"})
     assert len(r["persona_supplement"]) == 1
     assert r["persona_supplement"][0]["id"] == 509
-    assert r["persona_supplement_skipped"] == [{"memory_id": 508,
-                                                "reason": "not_found"}]
+    assert len(r["persona_supplement_skipped"]) == 1
+    assert r["persona_supplement_skipped"][0]["memory_id"] == 508
+    assert r["persona_supplement_skipped"][0]["reason"].startswith("missing_content")
 
 
-def test_mirror_persona_full_injection_no_offer(monkeypatch):
+def test_mirror_persona_full_injection_no_offer():
     """mirror 降级无版本身份：全文照注入（提议机制已删，增补照带）。"""
-    _stub_read(monkeypatch)
     mirror = __import__("pathlib").Path(
         __import__("os").environ["MEMA_TWIN_PROMPTS_DIR"]) / "work_report" / "active.md"
     mirror.parent.mkdir(parents=True, exist_ok=True)
@@ -646,9 +575,8 @@ def test_mirror_persona_full_injection_no_offer(monkeypatch):
 
 
 
-def test_task_resume_empty_persona_supplement(monkeypatch):
+def test_task_resume_empty_persona_supplement():
     """resume 的空 persona 分支同样走雏形注入。"""
-    _stub_read(monkeypatch)
     _mk_uncompiled([511])
     t1 = server._twin_impl("task_start", {"brief": "B", "work_type": "周报"})
     r = server._twin_impl("task_resume", {"task_id": t1["task_id"]})
@@ -675,9 +603,8 @@ def test_notice_suppressed_by_scheduled_compile():
 # ---- 轮2 对抗性 review 修复的回归 ----
 
 
-def test_supplement_note_pinned_to_version(monkeypatch):
+def test_supplement_note_pinned_to_version():
     """优先级声明钉死版本号，不宣称"编译后新增"（漏列 source id 时旧证据也走增补）。"""
-    _stub_read(monkeypatch)
     server._twin_impl("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m"})
     _mk_uncompiled([520])
     r = server._twin_impl("task_start", {"brief": "B", "work_type": "周报"})
@@ -703,9 +630,8 @@ def test_submit_prompt_md_size_cap():
     assert ok.get("ok") is True
 
 
-def test_submit_leftover_unabsorbed_warning(monkeypatch):
+def test_submit_leftover_unabsorbed_warning():
     """source_memory_ids 漏列：当场警告 + 残留证据继续以增补在场。"""
-    _stub_read(monkeypatch)
     _mk_uncompiled([601, 602])
     r = server._twin_impl("submit", {"work_type": "周报", "prompt_md": "# v1",
                                "model": "m", "source_memory_ids": [601]})
@@ -734,17 +660,16 @@ def test_custom_code_charset_whitelist():
     conn.close()
 
 
-def test_supplement_all_skipped_reports_skipped(monkeypatch):
-    """全部条目读未命中：无增补字段，但 skipped 如实上报（可区分"没有未编译"）。"""
-    from mema_twin import sink
-    monkeypatch.setattr(sink, "read_memory",
-                        lambda mid, workspace=None, client=None:
-                        {"ok": False, "error": "not_found"})
+def test_supplement_all_skipped_reports_skipped():
+    """全部条目 content 空（旧指针行待迁移）：无增补字段，但 skipped 如实上报
+    （可区分"没有未编译"）。"""
     server._twin_impl("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m"})
-    _mk_uncompiled([611, 612])
+    _mk_uncompiled([611, 612], content="")
     r = server._twin_impl("task_start", {"brief": "B", "work_type": "周报"})
     assert "persona_supplement" not in r
     assert len(r["persona_supplement_skipped"]) == 2
+    assert all(s["reason"].startswith("missing_content")
+               for s in r["persona_supplement_skipped"])
 
 
 # ---- v0.3.6 受众画像 ①：伪类型存储与防串味 ----
@@ -828,16 +753,16 @@ def test_task_start_injects_audience_profile(monkeypatch):
     assert "本类型增补 > 类型 persona > 受众画像" in r["audience_profile_note"]
 
 
-def test_task_start_audience_proto(monkeypatch):
+def test_task_start_audience_proto():
     """画像未编出：雏形垫底（排除本类型行，防与增补重复）。"""
-    _stub_read(monkeypatch)
     server._twin_impl("submit", {"work_type": "PPT", "prompt_md": "# p", "model": "m"})
     _mk_uncompiled([901])  # 周报+领导（本类型外）
     conn = db.connect()
     ppt_dims = {"work_type": {"ok": True, "code": "presentation", "raw": "PPT"},
                 "audience": {"ok": True, "code": "leadership", "raw": "领导"},
                 "purpose": {"ok": True, "code": "sync_info", "raw": "同步"}}
-    db.record_evidence(conn, 902, ppt_dims)  # 本类型行：不进雏形（在增补里）
+    db.record_evidence(conn, 902, ppt_dims, subject="s902",
+                       content="偏好902")  # 本类型行：不进雏形（在增补里）
     conn.close()
     r = server._twin_impl("task_start", {"brief": "B", "work_type": "PPT", "audience": "高层"})
     assert [e["id"] for e in r["audience_profile_proto"]] == [901]
@@ -862,9 +787,8 @@ def test_task_resume_injects_audience_profile():
 
 # ---- v0.3.6 受众画像 ③：compile 参考节 + ④画像素材 ----
 
-def test_compile_material_includes_audience_profiles(monkeypatch):
+def test_compile_material_includes_audience_profiles():
     """类型编译素材包含已有受众画像 + 守门句；无画像时提示待生成。"""
-    _stub_read(monkeypatch)
     server._twin_impl("submit", {"work_type": "aud-leadership", "prompt_md": "# 简洁白话",
                            "model": "m"})
     _mk_uncompiled([921])  # 周报 + 领导：让类型证据能关联到该受众
@@ -876,9 +800,8 @@ def test_compile_material_includes_audience_profiles(monkeypatch):
     assert "暂无" in r2["material"]
 
 
-def test_compile_audience_mode_material(monkeypatch):
+def test_compile_audience_mode_material():
     """compile(aud-x)：受众画像素材包——全量证据（含已 compiled）、画像规则。"""
-    _stub_read(monkeypatch)
     _mk_uncompiled([911])
     server._twin_impl("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m",
                            "source_memory_ids": [911]})
@@ -894,56 +817,43 @@ def test_compile_audience_mode_material(monkeypatch):
 
 def test_audience_stale_trigger():
     """证据数≠画像吸收数（或无画像）→ stale；吸收齐 → 清；新证据 → 再 stale。"""
-    from mema_twin import sink
-    import unittest.mock as _mock
-    with _mock.patch.object(sink, "read_memory",
-                            lambda mid, workspace=None, client=None:
-                            {"ok": True, "data": {"memory": {"id": mid, "subject": "s",
-                                                             "content": "偏好"}}}):
-        _mk_uncompiled([931, 932])
-        s1 = server._twin_impl("status", {})
-        assert s1["audience_stale"].get("leadership") == {"evidence": 2, "profile_evidence": None}
-        server._twin_impl("submit", {"work_type": "aud-leadership", "prompt_md": "# 画像",
-                               "model": "m", "source_memory_ids": [931, 932]})
-        s2 = server._twin_impl("status", {})
-        assert "leadership" not in s2["audience_stale"]
-        _mk_uncompiled([933])
-        s3 = server._twin_impl("status", {})
-        assert s3["audience_stale"]["leadership"] == {"evidence": 3, "profile_evidence": 2}
+    _mk_uncompiled([931, 932])
+    s1 = server._twin_impl("status", {})
+    assert s1["audience_stale"].get("leadership") == {"evidence": 2, "profile_evidence": None}
+    server._twin_impl("submit", {"work_type": "aud-leadership", "prompt_md": "# 画像",
+                           "model": "m", "source_memory_ids": [931, 932]})
+    s2 = server._twin_impl("status", {})
+    assert "leadership" not in s2["audience_stale"]
+    _mk_uncompiled([933])
+    s3 = server._twin_impl("status", {})
+    assert s3["audience_stale"]["leadership"] == {"evidence": 3, "profile_evidence": 2}
 
 
 # ---- v0.3.6 受众画像 ⑤：write 受众 scope ----
 
-def test_write_audience_scope(monkeypatch):
-    """scope=audience：work_type 可省略，证据落 aud- 行、tag 走 twin:aud 命名空间。"""
-    from mema_twin import sink
-    captured = {}
-    def fake_remember(content, subject, tags, workspace, source_ref="", event_time="", client=None):
-        captured["tags"] = tags
-        return {"ok": True, "data": {"id": 941}}
-    monkeypatch.setattr(sink, "remember", fake_remember)
+def test_write_audience_scope():
+    """scope=audience：work_type 可省略，证据落 aud- 行（v0.5.0 本地落行：
+    content/三维 code 进 twin_evidence，不再外化 twin:aud tags）。"""
     r = server._twin_impl("write", {"content": "对高层汇报永远要简洁白话",
                               "audience": "高层", "purpose": "同步",
                               "scope": "audience"})
-    assert r["ok"] and r["evidence_id"] == 941
+    assert r["ok"] and r["duplicate"] is False
     assert r["dimensions"]["work_type"]["code"] == "aud-leadership"
-    assert "twin:aud:leadership" in captured["tags"]
-    assert not any(t.startswith("twin:wt:aud-") for t in captured["tags"])
     conn = db.connect()
     rows = db.uncompiled_evidence(conn, "aud-leadership")
+    row = rows[0] if rows else None
     conn.close()
-    assert [x["memory_id"] for x in rows] == [941]
+    assert row is not None and row["memory_id"] == r["memory_id"] == r["evidence_id"]
+    assert row["content"] == "对高层汇报永远要简洁白话"
+    assert row["audience"] == "leadership"
 
 
-def test_write_audience_scope_validations(monkeypatch):
+def test_write_audience_scope_validations():
     # scope 白名单
     r = server._twin_impl("write", {"content": "x", "work_type": "周报", "audience": "高层",
                               "purpose": "同步", "scope": "global"})
     assert r.get("ok") is False and r.get("field") == "scope"
     # audience 未归一 → 显式打回（不落 stranded 证据）
-    from mema_twin import sink
-    monkeypatch.setattr(sink, "remember",
-                        lambda *a, **k: {"ok": True, "data": {"id": 1}})
     r2 = server._twin_impl("write", {"content": "x", "audience": "外星领导",
                                "purpose": "同步", "scope": "audience"})
     assert r2.get("ok") is False and r2.get("error") == "unmatched_value"
@@ -952,9 +862,8 @@ def test_write_audience_scope_validations(monkeypatch):
 
 # ---- v0.3.6 轮1 review 修复的回归 ----
 
-def test_aud_submit_derived_nonconsuming_with_warning(monkeypatch):
+def test_aud_submit_derived_nonconsuming_with_warning():
     """aud- 落版：derived、不 mark_compiled、漏列 id 时当场警告（stale 会持续触发）。"""
-    _stub_read(monkeypatch)
     _mk_uncompiled([951, 952])
     conn = db.connect()
     before = {r["memory_id"]: r["status"] for r in conn.execute(
@@ -1017,30 +926,26 @@ def test_unknown_aud_suffix_rejected_everywhere():
         assert r.get("ok") is False and "unknown audience" in r.get("reason", ""), action
 
 
-def test_proto_truncation_and_partial_skips(monkeypatch):
-    from mema_twin import sink
-    def fake(mid, workspace=None, client=None):
-        if mid == 976:  # 在最新 5 条窗口内失败：进 skipped 而非无声消失
-            return {"ok": False, "error": "not_found"}
-        return {"ok": True, "data": {"memory": {"id": mid, "subject": "s",
-                                                "content": f"偏好{mid}"}}}
-    monkeypatch.setattr(sink, "read_memory", fake)
+def test_proto_truncation_and_partial_skips():
+    """截断窗口内 content 空的行（旧指针行）进 skipped 而非无声消失。"""
     conn = db.connect()
     for mid in range(971, 979):  # 8 条跨类型证据（971-978），截断只留最新 5（974-978）
         db.record_evidence(conn, mid, {
             "work_type": {"ok": True, "code": "presentation", "raw": "PPT"},
             "audience": {"ok": True, "code": "leadership", "raw": "领导"},
-            "purpose": {"ok": True, "code": "sync_info", "raw": "s"}})
+            "purpose": {"ok": True, "code": "sync_info", "raw": "s"}},
+            subject="s", content="" if mid == 976 else f"偏好{mid}")
     conn.close()
     r = server._twin_impl("task_start", {"brief": "B", "work_type": "周报", "audience": "高层"})
     proto = r["audience_profile_proto"]
     assert [e["id"] for e in proto] == [974, 975, 977, 978]
-    assert r["audience_profile_skipped"] == [{"memory_id": 976, "reason": "not_found"}]
+    assert len(r["audience_profile_skipped"]) == 1
+    assert r["audience_profile_skipped"][0]["memory_id"] == 976
+    assert r["audience_profile_skipped"][0]["reason"].startswith("missing_content")
 
 
-def test_profiled_audience_not_crowded_out(monkeypatch):
+def test_profiled_audience_not_crowded_out():
     """无画像的高频受众不挤掉有画像的低频受众（先过滤后 LIMIT）。"""
-    _stub_read(monkeypatch)
     server._twin_impl("submit", {"work_type": "aud-leadership", "prompt_md": "# 领导画像",
                            "model": "m"})
     conn = db.connect()
@@ -1050,25 +955,20 @@ def test_profiled_audience_not_crowded_out(monkeypatch):
         db.record_evidence(conn, 980 + i, {
             "work_type": {"ok": True, "code": "work_report", "raw": "周报"},
             "audience": aud,
-            "purpose": {"ok": True, "code": "sync_info", "raw": "s"}})
+            "purpose": {"ok": True, "code": "sync_info", "raw": "s"}},
+            subject=f"s{980 + i}", content=f"偏好{980 + i}")
     conn.close()
     r = server._twin_impl("compile", {"work_type": "周报"})
     assert "aud-leadership 画像 v1" in r["material"]
     assert "aud-team_peers" not in r["material"]
 
 
-def test_write_scope_ignores_supplied_worktype(monkeypatch):
-    from mema_twin import sink
-    captured = {}
-    def fake_remember(content, subject, tags, workspace, source_ref="", event_time="", client=None):
-        captured["subject"] = subject
-        return {"ok": True, "data": {"id": 991}}
-    monkeypatch.setattr(sink, "remember", fake_remember)
+def test_write_scope_ignores_supplied_worktype():
     r = server._twin_impl("write", {"content": "对高层要白话", "work_type": "周报",
                               "audience": "高层", "purpose": "同步",
                               "scope": "audience"})
     assert r["ok"] and r["dimensions"]["work_type"]["code"] == "aud-leadership"
-    assert "受众级偏好" in captured["subject"]
+    assert "受众级偏好" in r["memory"]["subject"]
 
 
 # ---- v0.3.8 归一门 / 交付流收口 / 删双跑 ----
@@ -1098,10 +998,8 @@ def test_task_start_gate_optional_dims_absent_ok():
     conn.close()
 
 
-def test_write_multi_miss_all_at_once(monkeypatch):
+def test_write_multi_miss_all_at_once():
     """多维未命中一次性全报（含 scope=audience 分支），不逐个往返。"""
-    from mema_twin import sink
-    monkeypatch.setattr(sink, "remember", lambda *a, **k: {"ok": True, "data": {"id": 1}})
     r = server._twin_impl("write", {"content": "c", "work_type": "aaa未知",
                             "audience": "bbb未知", "purpose": "ccc未知"})
     assert r.get("error") == "unmatched_value" and set(r["fields"]) == {
@@ -1111,11 +1009,8 @@ def test_write_multi_miss_all_at_once(monkeypatch):
     assert r2.get("error") == "unmatched_value" and set(r2["fields"]) == {"audience"}
 
 
-def test_gate_closed_loop_map_then_retry(monkeypatch):
+def test_gate_closed_loop_map_then_retry():
     """票据 → map（别名学习）→ 原值重试命中，终身只问一次。"""
-    from mema_twin import sink
-    monkeypatch.setattr(sink, "remember",
-                        lambda *a, **k: {"ok": True, "data": {"id": 77}})
     r = server._twin_impl("write", {"content": "c", "work_type": "数据筛选",
                             "audience": "本人", "purpose": "沉淀"})
     assert r.get("error") == "unmatched_value"
@@ -1218,16 +1113,14 @@ def test_double_run_meta_families_cleaned():
     assert "last_scheduled_compile_at" in keys
 
 
-def test_write_success_zero_pending_rows(monkeypatch):
+def test_write_success_zero_pending_rows():
     """成功路径零票据、零 pending upsert（defer 机制消亡的行为锁定）。"""
-    from mema_twin import sink
-    monkeypatch.setattr(sink, "remember",
-                        lambda *a, **k: {"ok": True, "data": {"id": 88}})
     r = server._twin_impl("write", {"content": "c", "work_type": "周报",
                             "audience": "高层", "purpose": "同步"})
     assert r["ok"] and "pending" not in r
     conn = db.connect()
     assert db.list_pending(conn) == []
+    assert conn.execute("SELECT COUNT(*) AS c FROM twin_evidence").fetchone()["c"] == 1
     conn.close()
 
 
@@ -1251,11 +1144,8 @@ def test_submit_file_written_from_fresh_reread(monkeypatch):
     assert Path(r["deliverable_path"]).read_text(encoding="utf-8") == "# 并发更新后的稿"
 
 
-def test_gate_closed_loop_canonicalize_then_retry(monkeypatch):
+def test_gate_closed_loop_canonicalize_then_retry():
     """canonicalize 闭环（_twin_impl 层）：新码即刻入列、原值重试命中。"""
-    from mema_twin import sink
-    monkeypatch.setattr(sink, "remember",
-                        lambda *a, **k: {"ok": True, "data": {"id": 79}})
     r = server._twin_impl("write", {"content": "c", "work_type": "玄幻设定集",
                             "audience": "本人", "purpose": "沉淀"})
     assert r.get("error") == "unmatched_value"
@@ -1323,24 +1213,15 @@ def test_legacy_deadend_wording():
 
 # ---- v0.3.10 write 任务上下文维度继承（#959）----
 
-def _stub_remember_capture(monkeypatch):
-    """capture sink.remember（防联网），返回 captured dict（tags/memory id）。"""
-    from mema_twin import sink
-    captured = {}
 
-    def fake_remember(content, subject, tags, workspace, source_ref="", event_time="", client=None):
-        captured["tags"] = tags
-        captured["content"] = content
-        return {"ok": True, "data": {"id": 777}}
-    monkeypatch.setattr(sink, "remember", fake_remember)
-    return captured
+def _evidence_row(conn, mid):
+    return conn.execute("SELECT * FROM twin_evidence WHERE memory_id=?", (mid,)).fetchone()
 
 
-def test_write_inherits_all_dims_from_task(monkeypatch):
+def test_write_inherits_all_dims_from_task():
     """task_id + 仅 content：三维度全部沿用任务行（task_start 已归一的 canonical
-    code），归一门零打扰；响应 dims_inherited 列出继承项；审计面不变（twin:*
-    tags + twin_evidence 三 code 列）。"""
-    captured = _stub_remember_capture(monkeypatch)
+    code），归一门零打扰；响应 dims_inherited 列出继承项；v0.5.0 本地落行：
+    三 code 列 + content 进 twin_evidence（维度外化 tags 已随 mema 桶退役）。"""
     t = server._twin_impl("task_start", {"brief": "B", "work_type": "周报",
                                           "audience": "高层", "purpose": "同步"})
     assert t["ok"]
@@ -1351,19 +1232,16 @@ def test_write_inherits_all_dims_from_task(monkeypatch):
     assert r["dimensions"]["work_type"]["code"] == "work_report"
     assert r["dimensions"]["audience"]["code"] == "leadership"
     assert r["dimensions"]["purpose"]["code"] == "sync_info"
-    assert "twin:wt:work_report" in captured["tags"]
-    assert "twin:au:leadership" in captured["tags"]
-    assert "twin:pu:sync_info" in captured["tags"]
     conn = db.connect()
-    row = conn.execute("SELECT work_type, audience, purpose FROM twin_evidence"
-                       " WHERE memory_id=777").fetchone()
+    row = _evidence_row(conn, r["memory_id"])
     conn.close()
+    assert row["content"] == "偏好内容"
     assert row["work_type"] == "work_report" and row["audience"] == "leadership"
+    assert row["purpose"] == "sync_info"
 
 
-def test_write_explicit_dims_override_inheritance(monkeypatch):
+def test_write_explicit_dims_override_inheritance():
     """显式传入优先：work_type 显式给值则不继承；未给的 audience/purpose 继承。"""
-    _stub_remember_capture(monkeypatch)
     t = server._twin_impl("task_start", {"brief": "B", "work_type": "周报",
                                           "audience": "高层", "purpose": "同步"})
     tid = t["task_id"]
@@ -1373,7 +1251,7 @@ def test_write_explicit_dims_override_inheritance(monkeypatch):
     assert r["dimensions"]["work_type"]["code"] == "presentation"
 
 
-def test_write_task_not_found(monkeypatch):
+def test_write_task_not_found():
     r = server._twin_impl("write", {"content": "c", "task_id": 99999,
                                      "work_type": "周报", "audience": "高层", "purpose": "同步"})
     assert r["ok"] is False and r["error"] == "invalid_input" and r["field"] == "task_id"
@@ -1387,10 +1265,9 @@ def test_write_malformed_task_id_types():
         assert r.get("ok") is False and r.get("field") == "task_id", bad
 
 
-def test_write_task_null_dim_falls_back_required(monkeypatch):
+def test_write_task_null_dim_falls_back_required():
     """任务行维度可空（task_start 的 audience/purpose 可选）：继承不到时回退
     required 报错且说明来自任务空维度，不是静默猜。"""
-    _stub_remember_capture(monkeypatch)
     t = server._twin_impl("task_start", {"brief": "B", "work_type": "周报"})
     tid = t["task_id"]
     r = server._twin_impl("write", {"content": "c", "task_id": tid})
@@ -1398,10 +1275,9 @@ def test_write_task_null_dim_falls_back_required(monkeypatch):
     assert "继承不到" in r["reason"] and f"#{tid}" in r["reason"]
 
 
-def test_write_scope_audience_with_task_inheritance(monkeypatch):
+def test_write_scope_audience_with_task_inheritance():
     """scope=audience + task_id：audience/purpose 从任务继承，work_type 不继承
     （受众级偏好不绑工种），落 aud-{code} 证据行。"""
-    captured = _stub_remember_capture(monkeypatch)
     t = server._twin_impl("task_start", {"brief": "B", "work_type": "周报",
                                           "audience": "高层", "purpose": "同步"})
     tid = t["task_id"]
@@ -1410,26 +1286,23 @@ def test_write_scope_audience_with_task_inheritance(monkeypatch):
     assert r["ok"] is True
     assert sorted(r["dims_inherited"]) == ["audience", "purpose"]
     assert r["dimensions"]["work_type"]["code"] == "aud-leadership"
-    assert "twin:au:leadership" in captured["tags"]
-    assert not any(x.startswith("twin:wt:") for x in captured["tags"])  # 任务行 work_type 不进 tags
     conn = db.connect()
-    row = conn.execute("SELECT work_type FROM twin_evidence WHERE memory_id=777").fetchone()
+    row = _evidence_row(conn, r["memory_id"])
     conn.close()
     assert row["work_type"] == "aud-leadership"
+    assert row["audience"] == "leadership"  # 任务行 audience 被继承落行
 
 
-def test_write_without_task_id_unchanged(monkeypatch):
+def test_write_without_task_id_unchanged():
     """裸写（不传 task_id）路径不变：缺维度照旧 required，归一门照旧生效。"""
-    _stub_remember_capture(monkeypatch)
     r = server._twin_impl("write", {"content": "c"})
     assert r["ok"] is False and r["error"] == "invalid_input" and r["field"] == "work_type"
     assert r["reason"] == "required" and "dims_inherited" not in r
 
 
-def test_write_blank_dim_treated_as_missing_inherits(monkeypatch):
+def test_write_blank_dim_treated_as_missing_inherits():
     """显式空串/纯空白维度按"缺失"处理走继承（与 task_start 判空同款口径，
     裸写时空串会打回 required——两径差异由此测试锁定）。"""
-    _stub_remember_capture(monkeypatch)
     t = server._twin_impl("task_start", {"brief": "B", "work_type": "周报",
                                           "audience": "高层", "purpose": "同步"})
     r = server._twin_impl("write", {"content": "c", "task_id": t["task_id"],
@@ -1489,9 +1362,8 @@ def _submitted_report():
     return t["id"]
 
 
-def test_revise_supplement_injected(monkeypatch):
+def test_revise_supplement_injected():
     """S1：有 persona + 未编译证据 → 增补随 revise 响应在场。"""
-    _stub_read(monkeypatch)
     server._twin_impl("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m"})
     _mk_uncompiled([701, 702])
     r = server._twin_impl("task_revise", {"task_id": _submitted_report(),
@@ -1502,9 +1374,8 @@ def test_revise_supplement_injected(monkeypatch):
     assert "以增补为准" in r["persona_supplement_note"]
 
 
-def test_revise_supplement_with_shortcircuit(monkeypatch):
+def test_revise_supplement_with_shortcircuit():
     """S2：revise 短路分支同样带增补（#895 陷阱镜像——增补是新进场材料）。"""
-    _stub_read(monkeypatch)
     server._twin_impl("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m"})
     _mk_uncompiled([703])
     r = server._twin_impl("task_revise", {"task_id": _submitted_report(),
@@ -1514,10 +1385,9 @@ def test_revise_supplement_with_shortcircuit(monkeypatch):
     assert len(r["persona_supplement"]) == 1
 
 
-def test_revise_injects_audience_profile(monkeypatch):
+def test_revise_injects_audience_profile():
     """S3：audience 归一时受众画像键随 revise 在场（画像 active 版本优先；
     雏形垫底会排除本 work_type 证据，故直接造 aud- 画像版本）。"""
-    _stub_read(monkeypatch, contents="受众偏好：高管看结论")
     server._twin_impl("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m"})
     from mema_twin import store
     conn = db.connect()
@@ -1529,9 +1399,8 @@ def test_revise_injects_audience_profile(monkeypatch):
     assert r.get("audience_profile_md") == "# 受众画像：结论先行"
 
 
-def test_revise_injects_playbook(monkeypatch):
+def test_revise_injects_playbook():
     """S4：active playbook 随 revise 在场，last_used 刷成本次 client。"""
-    _stub_read(monkeypatch)
     server._twin_impl("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m"})
     tid = _submitted_report()
     pb = server._twin_impl("playbook_submit", {"key": "work_report",
@@ -1548,10 +1417,9 @@ def test_revise_injects_playbook(monkeypatch):
     assert row is not None and row["last_used_client"] == "revise-test"
 
 
-def test_revise_playbook_available_tools_from_parent_row(monkeypatch):
+def test_revise_playbook_available_tools_from_parent_row():
     """S7（评审轮1 P2-3c）：available_tools 缺省沿用父任务行自报；父行无自报
     时按未验证路径要求自报（available_tools_required）。"""
-    _stub_read(monkeypatch)
     server._twin_impl("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m"})
     tid = _submitted_report()
     server._twin_impl("playbook_submit", {"key": "work_report",
@@ -1562,9 +1430,8 @@ def test_revise_playbook_available_tools_from_parent_row(monkeypatch):
     assert r["ok"] and r.get("available_tools_required") is True  # 父行无自报 → 保守面
 
 
-def test_get_active_includes_supplement(monkeypatch):
+def test_get_active_includes_supplement():
     """S5a：get 读 active 附未编译增补（软失败；逃生口完整性）。"""
-    _stub_read(monkeypatch)
     server._twin_impl("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m"})
     _mk_uncompiled([705])
     r = server._twin_impl("get", {"work_type": "周报"})
@@ -1573,9 +1440,8 @@ def test_get_active_includes_supplement(monkeypatch):
     assert "以增补为准" in r["persona_supplement_note"]
 
 
-def test_get_versioned_excludes_supplement(monkeypatch):
+def test_get_versioned_excludes_supplement():
     """S5b：指定 version 历史读不带增补（增补锚定 active 语义）。"""
-    _stub_read(monkeypatch)
     server._twin_impl("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m"})
     server._twin_impl("submit", {"work_type": "周报", "prompt_md": "# v2", "model": "m"})
     _mk_uncompiled([706])
@@ -1584,9 +1450,8 @@ def test_get_versioned_excludes_supplement(monkeypatch):
     assert "persona_supplement" not in r
 
 
-def test_get_no_persona_with_evidence(monkeypatch):
+def test_get_no_persona_with_evidence():
     """S6a：无 persona 有未编译证据 → get 也给增补 + 引导编译 hint。"""
-    _stub_read(monkeypatch)
     _mk_uncompiled([707])
     r = server._twin_impl("get", {"work_type": "周报"})
     assert r["ok"] and r["prompt_md"] is None
@@ -1594,9 +1459,8 @@ def test_get_no_persona_with_evidence(monkeypatch):
     assert "compile" in r["hint"]
 
 
-def test_get_audience_no_supplement(monkeypatch):
+def test_get_audience_no_supplement():
     """S6b：aud-{受众} 画像分支不带增补（AR-2：aud- 证据行不参与编译生命周期）。"""
-    _stub_read(monkeypatch, contents="受众偏好")
     from mema_twin import store
     conn = db.connect()
     # 造受众画像 active 版本（否则 aud- 分支走 prompt_md None 分支同样无增补，断言不充分）
@@ -1607,10 +1471,9 @@ def test_get_audience_no_supplement(monkeypatch):
     assert "persona_supplement" not in r
 
 
-def test_revise_no_persona_with_supplement(monkeypatch):
+def test_revise_no_persona_with_supplement():
     """F9（评审轮1 P2-3b，施工轮1 P2-1 补）：无 persona + 有未编译增补的
     elif 分支——增补在场 + hint「按上方已沉淀偏好执行」。"""
-    _stub_read(monkeypatch)
     _mk_uncompiled([708])  # 不 submit persona → 无编译版
     r = server._twin_impl("task_revise", {"task_id": _submitted_report(),
                                    "revision_reason": "改"})
@@ -1620,13 +1483,13 @@ def test_revise_no_persona_with_supplement(monkeypatch):
     assert "按上方已沉淀偏好执行" in r["hint"]
 
 
-def test_get_supplement_mema_down_returns_full(monkeypatch):
-    """施工对抗轮 P3-5：mema 读挂时 get 软失败——全文照常返回，supplement 缺席
-    （skipped 标记在场），不 500。"""
-    _stub_read(monkeypatch, fail=True)
+def test_get_supplement_missing_content_reports_skipped():
+    """本地化软失败形态（原「mema 读挂」用例）：get 软失败——全文照常返回，
+    supplement 缺席（skipped 标记在场，reason 指向 import 回填），不 500。"""
     server._twin_impl("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m"})
-    _mk_uncompiled([709])
+    _mk_uncompiled([709], content="")
     r = server._twin_impl("get", {"work_type": "周报"})
     assert r["ok"] and r["prompt_md"] == "# v1"
     assert "persona_supplement" not in r
     assert r.get("persona_supplement_skipped")
+    assert r["persona_supplement_skipped"][0]["reason"].startswith("missing_content")

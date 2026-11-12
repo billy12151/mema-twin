@@ -115,11 +115,10 @@ def _persona_injection(persona: dict | None, have: int | None) -> dict:
 SUPPLEMENT_MAX = 10
 
 
-def _supplement_payload(code: str, persona: dict | None,
-                        client: str | None = None) -> dict:
-    """未编译增补（#905-②）：只走 twin_evidence 索引，绝不走 find 兜底
-    （兜底会把全量历史证据当增补注入，AR-3）。返回可直接并进 task_start/
-    task_resume 响应的键；无可用增补返回 {}（软失败：mema 读挂→空，不影响注入）。
+def _supplement_payload(code: str, persona: dict | None) -> dict:
+    """未编译增补（#905-②）：只走 twin_evidence 索引（v0.5.0 起正文本地自取，
+    不再外呼）。返回可直接并进 task_start/task_resume 响应的键；无可用增补返回
+    {}（旧指针行 content 空→skipped，如实上报不影响注入）。
     注意措辞不宣称"编译后新增"——source_memory_ids 漏列时旧证据也会以增补在场，
     优先级声明一律钉死版本号（轮2 P2-1/P2-2，#896 出生标签要经得起时间）。"""
     conn = db.connect()
@@ -132,7 +131,7 @@ def _supplement_payload(code: str, persona: dict | None,
     total = len(rows)
     if total > SUPPLEMENT_MAX:
         rows = rows[-SUPPLEMENT_MAX:]  # ORDER BY id：尾部即最新
-    evidence, skipped = _read_evidence_rows(rows, client, fail_fast=True)
+    evidence, skipped = _read_evidence_rows(rows)
     if not evidence:
         # 轮2 P3-6：全部读失败也要如实报 skipped，与"没有未编译证据"可区分
         return {"persona_supplement_skipped": skipped} if skipped else {}
@@ -258,8 +257,7 @@ def _fallback_payload(code: str | None) -> dict:
         conn.close()
 
 
-def _audience_payload(audience: str | None, exclude_work_type: str | None,
-                      client: str | None = None) -> dict:
+def _audience_payload(audience: str | None, exclude_work_type: str | None) -> dict:
     """受众画像注入（v0.3.6）：画像全文优先，未编出时雏形垫底；受众未归一或
     无素材返回 {}（软失败）。优先级链在 note 里显式声明：本类型增补 > 类型
     persona > 受众画像/雏形（类型 persona 编译素材含受众参考，分辨率更高）。"""
@@ -285,7 +283,7 @@ def _audience_payload(audience: str | None, exclude_work_type: str | None,
         return {}
     if len(rows) > AUDIENCE_PROTO_MAX:
         rows = rows[-AUDIENCE_PROTO_MAX:]  # 最新优先
-    evidence, skipped = _read_evidence_rows(rows, client, fail_fast=True)
+    evidence, skipped = _read_evidence_rows(rows)
     if not evidence:
         return {"audience_profile_skipped": skipped} if skipped else {}
     out = {"audience_profile_proto": evidence,
@@ -355,9 +353,8 @@ def _action_task_start(data: dict) -> dict:
         available_tools=_coerce_available_tools(data.get("available_tools")),
     )
     superseded = flow.supersede_open_tasks(record["id"])
-    # 增补取数放在建档/让位之后（轮2 P3-7）：慢 mema 读不再拉长并发让位竞窗
-    supplement = _supplement_payload(code, persona,
-                                     client=identity.effective_client(data)) if code else {}
+    # 增补取数放在建档/让位之后（轮2 P3-7 先例：取数不拉长并发让位竞窗）
+    supplement = _supplement_payload(code, persona) if code else {}
     out: dict = {
         "ok": True, "task_id": record["id"], "status": "planning",
         "superseded_open_tasks": superseded,
@@ -377,7 +374,7 @@ def _action_task_start(data: dict) -> dict:
     aud_dim = dims.get("audience") or {}
     aud_code = aud_dim.get("code") if aud_dim.get("ok") else None
     if aud_code:
-        out.update(_audience_payload(aud_code, code, client=identity.effective_client(data)))
+        out.update(_audience_payload(aud_code, code))
     if persona:
         out.update(_persona_injection(persona, have))
         out.update(supplement)
@@ -562,8 +559,7 @@ def _action_task_resume(data: dict) -> dict:
         persona = _task_persona(conn, resume_code)
     finally:
         conn.close()
-    supplement = _supplement_payload(resume_code, persona,
-                                     client=identity.effective_client(data)) if resume_code else {}
+    supplement = _supplement_payload(resume_code, persona) if resume_code else {}
     new_record = flow.insert_task(
         brief=record["brief"], status="planning",
         dims=dims, interpreted_intent=record.get("interpreted_intent"),
@@ -608,8 +604,7 @@ def _action_task_resume(data: dict) -> dict:
         out.setdefault("warnings", []).append("原任务没有 todos——可能已全部完成")
     aud_code = record.get("audience")
     if aud_code:
-        out.update(_audience_payload(aud_code, resume_code,
-                                     client=identity.effective_client(data)))
+        out.update(_audience_payload(aud_code, resume_code))
     if persona:
         out.update(_persona_injection(persona, have))
         out.update(supplement)
@@ -728,13 +723,11 @@ def _action_task_revise(data: dict) -> dict:
                 "未带入新代")
     # v0.4.8 A3：注入面同 task_resume（11-09 jingleAI 事故：revise 链路
     # persona 缺席，跨会话返工时上下文已压缩，偏好白纸黑字却不在场）。
-    # supplement 取数放建档/让位之后（P3-7 先例：慢 mema 读不拉长让位竞窗）
-    supplement = _supplement_payload(code, persona,
-                                     client=identity.effective_client(data)) if code else {}
+    # supplement 取数放建档/让位之后（P3-7 先例：取数不拉长让位竞窗）
+    supplement = _supplement_payload(code, persona) if code else {}
     aud_code = record.get("audience")
     if aud_code:
-        out.update(_audience_payload(aud_code, code,
-                                     client=identity.effective_client(data)))
+        out.update(_audience_payload(aud_code, code))
     if persona:
         out.update(_persona_injection(persona, have))
         out.update(supplement)

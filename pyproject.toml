@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mema-twin"
-version = "0.4.8"
-description = "Personal work twin: compiles versioned persona prompts from mema preference memories and injects them into plan workflows."
+version = "0.5.0"
+description = "Personal work twin: compiles versioned persona prompts from its own preference store and injects them into plan workflows."
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "Apache-2.0"}
@@ -21,6 +21,8 @@ test = ["pytest>=8.0.0", "pytest-asyncio>=0.23.0"]
 
 [project.scripts]
 mema-twin = "mema_twin.server:main"
+mema-twin-console = "mema_twin.console_cli:main"
+mema-twin-import = "mema_twin.import_mema:main"
 
 [tool.setuptools.packages.find]
 include = ["mema_twin*"]

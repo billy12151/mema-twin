@@ -1,14 +1,16 @@
-"""twin 自有 sqlite：canonical 枚举表、pending 治理表、prompt 版本表、证据指针索引表。
+"""twin 自有 sqlite：canonical 枚举表、pending 治理表、prompt 版本表、偏好证据表。
 
-偏好记忆本体不在这里——存 mema（经 HTTP MCP 读写）；twin 只管类型归一、
-待裁长尾、编译产物和证据指针索引（twin_evidence 只存 mema 记忆 id 与维度
-标签，不存正文；设计文档 mema-avatar-design-2026-09-02.md D2/D3 + 实施方案 M1.3）。
+v0.5.0 拆分（#1604）：偏好本体**自持**——twin_evidence.content 即偏好正文
+（2026-11-12 从「mema 存正文、此处只存指针」迁移而来；历史指针行经
+`python -m mema_twin.import_mema` 从 mema 桶导出件回填）。twin 不再外呼
+mema 数据面，本库是偏好唯一载体；twin 只管类型归一、待裁长尾、编译产物
+和证据索引。
 
 多租户（2026-10-25，C 同目录同居形态）：USERS_DIR 形态下账本按租户落在
-网关 users/<uid>/twin.sqlite3（与该用户 memory.sqlite3 同目录、同备份单元，
-core 迁移机制对 twin 文件零接触）；路径解析单点在 tenant 模块，本文件只经
-``tenant.db_path()`` 取路径。authorizer 把「twin 只碰 twin_* 表」钉成引擎
-强制（含封死 ATTACH 旁路），default 自有库形态同样生效。
+网关 users/<uid>/twin.sqlite3（与该用户 memory.sqlite3 同目录；目录归网关，
+twin 不代建）；路径解析单点在 tenant 模块，本文件只经 ``tenant.db_path()``
+取路径。authorizer 把「twin 只碰 twin_* 表」钉成引擎强制（含封死 ATTACH
+旁路），default 自有库形态同样生效。
 """
 from __future__ import annotations
 
@@ -72,6 +74,9 @@ CREATE TABLE IF NOT EXISTS twin_evidence(
   audience_raw TEXT NOT NULL DEFAULT '',
   purpose_raw TEXT NOT NULL DEFAULT '',
   subject TEXT NOT NULL DEFAULT '',
+  content TEXT NOT NULL DEFAULT '',
+  tags TEXT NOT NULL DEFAULT '[]',
+  source_ref TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'uncompiled',
   compiled_version INTEGER,
   created_at TEXT NOT NULL,
@@ -190,7 +195,9 @@ def _migrate(conn: sqlite3.Connection, key: str) -> None:
     ④ v0.3.9 work_type 域重划（#958 按产出物目标六域）：内置 33 码 domain 对齐
       taxonomy 播种源（UPDATE 仅 is_custom=0 行——custom 码的 domain 不动）；
     ⑤ v0.4 twin_tasks 加 outcome / available_tools 两列（旧库 ALTER 补列；新库
-      DDL 已含——flow.ensure_schema 建表可能晚于本迁移，探列前先探表存在）。
+      DDL 已含——flow.ensure_schema 建表可能晚于本迁移，探列前先探表存在）；
+    ⑥ v0.5.0 twin_evidence 加 content 列（偏好本体自持，#1604）：旧指针行
+      content 为空串，由 import 回填（missing_content 跳过语义见 compile）。
     """
     if key in _migrated:
         return
@@ -229,6 +236,18 @@ def _migrate(conn: sqlite3.Connection, key: str) -> None:
         for col in ("outcome", "available_tools"):
             if col not in task_cols:
                 conn.execute(f"ALTER TABLE twin_tasks ADD COLUMN {col} TEXT")
+    ev_cols = {r["name"] for r in conn.execute("PRAGMA table_info(twin_evidence)")}
+    for col, ddl in (("content", "TEXT NOT NULL DEFAULT ''"),
+                     ("tags", "TEXT NOT NULL DEFAULT '[]'"),
+                     ("source_ref", "TEXT NOT NULL DEFAULT ''")):
+        if ev_cols and col not in ev_cols:
+            try:
+                conn.execute(f"ALTER TABLE twin_evidence ADD COLUMN {col} {ddl}")
+            except sqlite3.OperationalError as e:
+                # 首连竞窗（两进程同对旧库迁移，R2 P2-7）：后到者撞 duplicate
+                # column——列已在（先到者已提交），吞掉即可
+                if "duplicate column" not in str(e).lower():
+                    raise
     conn.commit()
     _migrated.add(key)
 
@@ -381,29 +400,119 @@ def set_pending(conn: sqlite3.Connection, pending_id: int, status: str,
     conn.commit()
 
 
-# ---- twin_evidence：偏好指针索引（M1.3，本体在 mema，此处只存指针）----
+# ---- twin_evidence：偏好证据（v0.5.0 起本体自持，content 即正文）----
 
-def record_evidence(conn: sqlite3.Connection, memory_id: int,
-                    dims: dict, subject: str = "") -> None:
-    """write 成功后登记指针。dims 为 normalize 三维结果 dict；pending 维度
-    code 列存 NULL、raw 列存原始值（pending 裁定后可靠对账回填）。"""
-    def _code(kind: str) -> str | None:
+
+def _evidence_values(dims: dict, subject: str, content: str,
+                     tags_json: str = "", source_ref: str = "") -> tuple:
+    """行值组（write 本地化与 import 共用）：dims 为 normalize 三维结果 dict，
+    pending 维度 code 列存 NULL、raw 列存原始值。"""
+    def _code(kind: str):
         d = dims.get(kind) or {}
         return d.get("code") if d.get("ok") else None
 
-    conn.execute(
-        "INSERT OR IGNORE INTO twin_evidence"
-        "(memory_id, work_type, audience, purpose,"
-        " work_type_raw, audience_raw, purpose_raw, subject, created_at)"
-        " VALUES(?,?,?,?,?,?,?,?,?)",
-        (int(memory_id), _code("work_type"), _code("audience"),
-         _code("purpose"),
-         str((dims.get("work_type") or {}).get("raw") or ""),
-         str((dims.get("audience") or {}).get("raw") or ""),
-         str((dims.get("purpose") or {}).get("raw") or ""),
-         subject or "", now_iso()),
-    )
+    return (_code("work_type"), _code("audience"), _code("purpose"),
+            str((dims.get("work_type") or {}).get("raw") or ""),
+            str((dims.get("audience") or {}).get("raw") or ""),
+            str((dims.get("purpose") or {}).get("raw") or ""),
+            subject or "", content or "", tags_json or "[]", source_ref or "",
+            now_iso())
+
+
+_EVIDENCE_INSERT = (
+    "INSERT INTO twin_evidence"
+    "(memory_id, work_type, audience, purpose,"
+    " work_type_raw, audience_raw, purpose_raw, subject, content, tags,"
+    " source_ref, created_at)"
+    " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)"
+)
+
+
+def add_local_evidence(conn: sqlite3.Connection, dims: dict, subject: str,
+                       content: str, tags_json: str = "[]",
+                       source_ref: str = "") -> dict:
+    """write 本地化入口（v0.5.0）：词法去重 + 本地发号 + 插入，单 BEGIN IMMEDIATE
+    事务覆盖（R2 P2-3：去重 SELECT 与发号/插入同事务，双宿主同文并发不双插）。
+
+    发号弃 INSERT OR IGNORE（R1 实测：OR IGNORE 吞 UNIQUE 冲突，并发发号静默
+    丢写且重试永不触发）——裸 INSERT + 撞号回退重试。返回
+    {"duplicate": bool, "memory_id": int, "evidence_id": int}；duplicate=True 时
+    memory_id/evidence_id 为既有行 id。"""
+    import hashlib
+
+    code = (dims.get("work_type") or {}).get("code") if dims.get("work_type", {}).get("ok") else None
+    digest = hashlib.sha256((content or "").strip().encode("utf-8")).hexdigest()
+    values = _evidence_values(dims, subject, content, tags_json, source_ref)
+    for _attempt in range(3):
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError:
+            conn.rollback()  # legacy 隐式事务在场（罕见）：回退后重开
+            conn.execute("BEGIN IMMEDIATE")
+        try:
+            if code:
+                for row in conn.execute(
+                        "SELECT memory_id, id, content FROM twin_evidence"
+                        " WHERE work_type=? AND status IN ('uncompiled','compiled')",
+                        (code,)).fetchall():
+                    other = hashlib.sha256(
+                        (row["content"] or "").strip().encode("utf-8")).hexdigest()
+                    if other == digest:
+                        conn.rollback()
+                        # evidence_id 沿历史契约 = memory_id（对外稳定标识；行自增
+                        # id 是内部实现细节，不外露——R1 P2-11 统一口径）
+                        return {"duplicate": True,
+                                "memory_id": int(row["memory_id"]),
+                                "evidence_id": int(row["memory_id"])}
+            mid = int(conn.execute(
+                "SELECT COALESCE(MAX(memory_id),0)+1 AS n FROM twin_evidence"
+            ).fetchone()["n"])
+            conn.execute(_EVIDENCE_INSERT, (mid, *values))
+            conn.commit()
+            # evidence_id 沿历史契约 = memory_id（与 duplicate 分支同义，R1 P2-11）
+            return {"duplicate": False, "memory_id": mid, "evidence_id": mid}
+        except sqlite3.IntegrityError:
+            # 并发窗口内他事务先插了同号：回退重取 MAX（内容级去重已在他事务提交
+            # 后的下次调用命中，这里只处理撞号）
+            conn.rollback()
+    raise sqlite3.OperationalError("twin_evidence 本地发号重试耗尽（并发冲突）")
+
+
+def record_evidence(conn: sqlite3.Connection, memory_id: int,
+                    dims: dict, subject: str = "", content: str = "",
+                    tags_json: str = "[]", source_ref: str = "") -> None:
+    """显式 id 直插（import 专用，v0.5.0）：迁移保原 memory_id 不断
+    `<!-- src -->` 溯源。裸 INSERT，撞 UNIQUE(memory_id) 抛 IntegrityError
+    由导入器计数（回填行走 UPDATE 路径，不到这里）。"""
+    values = _evidence_values(dims, subject, content, tags_json, source_ref)
+    conn.execute(_EVIDENCE_INSERT, (int(memory_id), *values))
     conn.commit()
+
+
+def backfill_evidence_content(conn: sqlite3.Connection, memory_id: int,
+                              content: str, subject: str = "") -> str:
+    """import 回填（v0.5.0）：既有指针行补正文 + subject 覆盖为 mema 现值；
+    不动 status/compiled_version/dims（twin 侧生命周期保留）。返回处置结果：
+    "missing"（行不存在，导入器走插新行）/ "same"（content 已一致，幂等跳过）/
+    "backfilled"（发生回填）/ "conflict"（行已有**不同**非空正文——不覆盖，交
+    导入器计冲突：该 id 在窗口期被本地写入占用的信号，人工核对）。"""
+    row = conn.execute(
+        "SELECT content, subject FROM twin_evidence WHERE memory_id=?",
+        (int(memory_id),)).fetchone()
+    if row is None:
+        return "missing"
+    old = row["content"] or ""
+    if old == (content or ""):
+        return "same"
+    if old.strip():
+        return "conflict"
+    conn.execute(
+        "UPDATE twin_evidence SET content=?,"
+        " subject=CASE WHEN ?!='' THEN ? ELSE subject END"
+        " WHERE memory_id=?",
+        (content or "", subject or "", subject or "", int(memory_id)))
+    conn.commit()
+    return "backfilled"
 
 
 def uncompiled_evidence(conn: sqlite3.Connection, work_type: str) -> list[dict]:

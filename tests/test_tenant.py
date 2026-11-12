@@ -1,5 +1,5 @@
-"""多租户 C 形态（2026-10-25）：token 透传、租户路径双态、authorizer 命名
-空间强制、入口硬拒矩阵、跨租户隔离。
+"""多租户 C 形态（2026-10-25；v0.5.0 起 token 仅服务租户路由 whoami）：
+whoami 三态、租户路径双态、authorizer 命名空间强制、入口硬拒矩阵、跨租户隔离。
 
 形态开关 = MEMA_TWIN_USERS_DIR；conftest 全局设了 DB/PROMPTS/DELIVERABLES
 env——USERS_DIR 用例里显式 delenv，正是 P1-4（解析点强制互斥）要拦的分脑
@@ -36,7 +36,7 @@ def _as_tenant(t: str):
     return t
 
 
-# ---- sink：token 透传优先级 ------------------------------------------
+# ---- sink：whoami 客户端三态 ----------------------------------------
 
 
 class _FakeResp(io.BytesIO):
@@ -47,13 +47,6 @@ class _FakeResp(io.BytesIO):
         return False
 
 
-def _ok_body() -> bytes:
-    payload = {"jsonrpc": "2.0", "id": 1,
-               "result": {"content": [{"type": "text",
-                                       "text": json.dumps({"ok": True, "data": {}})}]}}
-    return f"event: message\ndata: {json.dumps(payload)}\n".encode()
-
-
 def _capture_urlopen(monkeypatch, body=None, raise_=None):
     captured = {}
 
@@ -61,43 +54,10 @@ def _capture_urlopen(monkeypatch, body=None, raise_=None):
         captured["req"] = req
         if raise_ is not None:
             raise raise_
-        return _FakeResp(body if body is not None else _ok_body())
+        return _FakeResp(body if body is not None else _whoami_body())
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     return captured
-
-
-def test_request_token_relayed_verbatim(monkeypatch):
-    """请求头 token 原样转发（含调用方 Bearer 前缀，不重构）。"""
-    sink.set_request_token("Bearer relay-tok-123")
-    try:
-        cap = _capture_urlopen(monkeypatch)
-        sink._call("memory", {"action": "read", "data": {"memory_id": 1}})
-        assert cap["req"].get_header("Authorization") == "Bearer relay-tok-123"
-    finally:
-        sink.reset_request_token()
-
-
-def test_request_token_beats_env(monkeypatch):
-    monkeypatch.setenv("MEMA_TWIN_MEMA_TOKEN", "env-tok")
-    sink.set_request_token("Bearer req-tok")
-    try:
-        cap = _capture_urlopen(monkeypatch)
-        sink._call("memory", {"action": "read", "data": {"memory_id": 1}})
-        assert cap["req"].get_header("Authorization") == "Bearer req-tok"
-    finally:
-        sink.reset_request_token()
-
-
-def test_env_token_still_works_without_request_token(monkeypatch):
-    """default 形态兜底不变：无请求头时 env 拼前缀。"""
-    monkeypatch.setenv("MEMA_TWIN_MEMA_TOKEN", "env-tok")
-    cap = _capture_urlopen(monkeypatch)
-    sink._call("memory", {"action": "read", "data": {"memory_id": 1}})
-    assert cap["req"].get_header("Authorization") == "Bearer env-tok"
-
-
-# ---- sink：whoami 客户端三态 ----------------------------------------
 
 
 def _whoami_body(uid=7) -> bytes:
@@ -258,12 +218,6 @@ def test_todos_session_isolated_across_tenants(users_dir):
 # ---- server 入口矩阵 -------------------------------------------------
 
 
-def _stub_mema_write(monkeypatch):
-    def fake_call(name, arguments, client=None, timeout=30):
-        return {"ok": True, "data": {"id": 55}}
-    monkeypatch.setattr(sink, "_call", fake_call)
-
-
 def test_users_dir_missing_header_rejected(users_dir):
     """无 http 请求上下文（测试直调）→ 无 Authorization 头 → 除 help 外全拒。"""
     r = server._twin_impl("write", {"content": "c", "work_type": "周报",
@@ -275,7 +229,7 @@ def test_users_dir_missing_header_rejected(users_dir):
 
 def test_users_dir_bad_token_unauthorized(users_dir, monkeypatch):
     monkeypatch.setattr(server, "_request_auth_token", lambda: "Bearer bad-tok")
-    monkeypatch.setattr(tenant, "resolve",
+    monkeypatch.setattr(sink, "whoami",
                         lambda t: (_ for _ in ()).throw(
                             sink.SinkAuthError("网关拒绝该 token（HTTP 401）")))
     r = server._twin_impl("status", {})
@@ -285,7 +239,7 @@ def test_users_dir_bad_token_unauthorized(users_dir, monkeypatch):
 
 def test_users_dir_gateway_5xx_maps_tenant_unavailable(users_dir, monkeypatch):
     monkeypatch.setattr(server, "_request_auth_token", lambda: "Bearer t")
-    monkeypatch.setattr(tenant, "resolve",
+    monkeypatch.setattr(sink, "whoami",
                         lambda t: (_ for _ in ()).throw(
                             sink.SinkUnavailableError("whoami HTTP 500")))
     r = server._twin_impl("status", {})
@@ -293,10 +247,10 @@ def test_users_dir_gateway_5xx_maps_tenant_unavailable(users_dir, monkeypatch):
 
 
 def test_users_dir_write_lands_in_tenant_db(users_dir, monkeypatch):
-    """端到端：透传 + 租户解析 → 偏好证据落该租户库；default 库不产生。"""
+    """端到端：头 + 租户解析 → 偏好证据（content 本地落行）进该租户库；
+    default 库不产生。"""
     monkeypatch.setattr(server, "_request_auth_token", lambda: "Bearer t")
-    monkeypatch.setattr(tenant, "resolve", lambda t: "u1")
-    _stub_mema_write(monkeypatch)
+    monkeypatch.setattr(sink, "whoami", lambda t: {"ok": True, "user_id": 1})
     r = server._twin_impl("write", {"content": "云端偏好", "work_type": "周报",
                                     "audience": "高层", "purpose": "同步"})
     assert r["ok"], r
@@ -304,9 +258,10 @@ def test_users_dir_write_lands_in_tenant_db(users_dir, monkeypatch):
     tenant.set_tenant("u1")
     try:
         conn = db.connect()
-        n = conn.execute("SELECT COUNT(*) AS c FROM twin_evidence").fetchone()["c"]
+        row = conn.execute(
+            "SELECT content FROM twin_evidence").fetchone()
         conn.close()
-        assert n == 1
+        assert row["content"] == "云端偏好"
     finally:
         tenant.reset_tenant()
     assert not (users_dir / "2" / "twin.sqlite3").exists()
@@ -322,6 +277,9 @@ def _startup(monkeypatch, tmp_path, *, transport="http", extra=None):
     monkeypatch.delenv("MEMA_TWIN_PLAYBOOKS_DIR", raising=False)
     monkeypatch.delenv("MEMA_TWIN_MEMA_TOKEN", raising=False)
     monkeypatch.setenv("MEMA_TWIN_UPDATE_CHECK", "0")
+    # v0.5.0：多租户启动强制 MEMA_TWIN_MEMA_URL（whoami 定位）——helper 默认给
+    # 合法值，URL 缺失分支由 test_v050 专项测
+    monkeypatch.setenv("MEMA_TWIN_MEMA_URL", "http://127.0.0.1:8001/mcp")
     monkeypatch.setenv("MEMA_TWIN_USERS_DIR", str(tmp_path / "users"))
     if transport:
         monkeypatch.setenv("MEMA_TWIN_TRANSPORT", transport)
@@ -399,7 +357,7 @@ def test_append_alias_rejects_path_chars(users_dir):
 def test_tenant_error_mapped_not_escaped(users_dir, monkeypatch):
     """P1 回归：租户目录缺失的 TenantError 必须落成结构化错误，不裸逃逸。"""
     monkeypatch.setattr(server, "_request_auth_token", lambda: "Bearer t")
-    monkeypatch.setattr(tenant, "resolve", lambda t: "u9")  # users/9 不存在
+    monkeypatch.setattr(sink, "whoami", lambda t: {"ok": True, "user_id": 9})  # users/9 不存在
     r = server._twin_impl("status", {})
     assert r["ok"] is False and r["error"] == "tenant_unavailable"
     assert "Traceback" not in r["reason"]
@@ -424,6 +382,7 @@ def test_authorizer_denies_writable_schema(users_dir):
 
 
 # ---- Bearer 前缀可选（2026-10-25 owner 拍板：配置面不要求写前缀）----
+#（v0.5.0：normalize 只服务租户路由头；env 兜底 token 已随数据面退役）
 
 
 def test_normalize_adds_bearer_to_bare_token():
@@ -440,25 +399,17 @@ def test_normalize_rejects_empty_bearer_body():
         server._normalize_auth_header("Bearer ")
 
 
-def test_env_token_header_accepts_bare_token(monkeypatch):
-    """env 兜底同款：裸值自动补前缀，带前缀原样。"""
-    monkeypatch.setenv("MEMA_TWIN_MEMA_TOKEN", "bare-tok-1")
-    assert sink._env_token_header() == "Bearer bare-tok-1"
-    monkeypatch.setenv("MEMA_TWIN_MEMA_TOKEN", "Bearer prefixed-tok")
-    assert sink._env_token_header() == "Bearer prefixed-tok"
-
-
-def test_bare_request_token_reaches_mema_with_prefix(users_dir, monkeypatch):
-    """端到端：宿主配置写裸 token → 入口补前缀 → 透传给网关的已是 Bearer 形态。"""
+def test_bare_request_token_resolves_tenant(users_dir, monkeypatch):
+    """端到端：宿主配置写裸 token → 入口补前缀 → whoami 按该 token 解析租户
+    （v0.5.0 起 token 唯一去向是租户路由，不再透传数据面）。"""
     seen = {}
     monkeypatch.setattr(server, "_request_auth_token",
                         lambda: server._normalize_auth_header("bare-req-tok"))
-    monkeypatch.setattr(tenant, "resolve", lambda t: "u1")
 
-    def fake_call(name, arguments, client=None, timeout=30):
-        seen["token"] = sink._request_token.get()
-        return {"ok": True, "data": {"id": 1}}
-    monkeypatch.setattr(sink, "_call", fake_call)
+    def fake_whoami(token):
+        seen["token"] = token
+        return {"ok": True, "user_id": 1}
+    monkeypatch.setattr(sink, "whoami", fake_whoami)
     r = server._twin_impl("write", {"content": "c", "work_type": "周报",
                                     "audience": "高层", "purpose": "同步"})
     assert r["ok"], r

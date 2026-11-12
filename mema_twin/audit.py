@@ -215,6 +215,8 @@ def stats() -> dict:
                 "SELECT COUNT(*) AS c FROM twin_audit").fetchone()["c"])
             failed = int(conn.execute(
                 "SELECT COUNT(*) AS c FROM twin_audit WHERE ok=0").fetchone()["c"])
+            # v0.5.0 起 mema 数据面退役，mema_unreachable 不再新增——该计数冻结
+            # 为历史值（保留键名供旧库核对；新部署恒 0）
             unreachable = int(conn.execute(
                 "SELECT COUNT(*) AS c FROM twin_audit"
                 " WHERE ok=0 AND error='mema_unreachable'").fetchone()["c"])

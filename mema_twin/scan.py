@@ -4,8 +4,8 @@
 漂移。平台无关（mema 2026-09-02 owner decision 同款）：twin 自己不起任何调度，
 Agent 拿指令后在宿主平台创建等价任务。twin_scan（每周治理扫描）已随 v0.3.7
 退役：其职能被夜间编译任务（吸收证据/画像重抽象/stale 自愈/治理计数汇总）与
-status 常显（pending/未收口/冲突计数）覆盖；提醒逻辑瘦身为只看夜间编译在转
-信号——夜间任务停转或 mema 长挂超过 7 天时重新提示。
+status 常显（pending/未收口计数）覆盖；提醒逻辑瘦身为只看夜间编译在转
+信号——夜间任务停转超过 7 天时重新提示（v0.5.0 起 twin 自持，无 mema 依赖）。
 """
 from __future__ import annotations
 
@@ -103,8 +103,6 @@ SCHEDULED_TASKS_SPEC: dict = {
                                   " status 的 nightly_rejected 累计）；"
                                   "结束输出各类型前后版本号与吸收证据数汇总，"
                                   "并附 status 里的 pending_count 与未收口任务数各一句；"
-                                  "响应带 mema_notices 时原样记录进汇总输出，"
-                                  "留待用户在场时分诊（notice 是 advisory），夜间不处理；"
                                   "工具出错跳过并如实记录，同一项最多重试一次"}},
                 {"tool": "twin", "action": "compile",
                  "data": {"audience": True,

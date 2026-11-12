@@ -1,11 +1,12 @@
 """v0.4.7 往返优化：plan_set 缺省回退 / step_update 批量 / task_submit 附带
-steps / taxonomy kind 数组+compact / compile 冲突警示（sink 通道）。
+steps / taxonomy kind 数组+compact。（compile 冲突警示节已随 v0.5.0 sink
+数据面退役整体移除，对应用例删除。）
 
 方案：~/ZCodeProject/docs/twin-v047-roundtrip-optimization-plan.md（v1.1）。
 """
 import pytest
 
-from mema_twin import compile_actions, exec_actions, flow, pref_actions, sink
+from mema_twin import compile_actions, exec_actions, flow, pref_actions
 
 
 def _start_task(brief="测试任务", wt="product_doc"):
@@ -301,52 +302,6 @@ def test_taxonomy_bad_kind_rejected():
     assert not r["ok"] and "bogus" in r["reason"]
 
 
-# ---------- E. compile 冲突警示（sink 通道） ----------
-
-def _mk_conflicts(*items):
-    return {"ok": True, "data": {"conflicts": list(items)}}
-
-
-def test_compile_conflict_warning_in_material(monkeypatch):
-    tid = _start_task()  # 保证库非空即可
-    monkeypatch.setattr(
-        compile_actions.sink, "review_conflicts",
-        lambda client=None: _mk_conflicts(
-            {"id": 9, "memory_ids": [1, 2], "reason": "语义冲突", "status": "open",
-             "workspace_canonical": "mema-twin", "created_at": "2026-11-04"},
-            {"id": 8, "status": "open", "workspace_canonical": "other-ws"}))
-    monkeypatch.setattr(compile_actions, "_fetch_evidence", lambda *a, **k: ([], []))
-    monkeypatch.setattr(compile_actions, "_compile_audience_profiles",
-                        lambda *a, **k: [])
-    r = compile_actions._action_compile({"work_type": "product_doc"})
-    assert r["ok"], r
-    assert r["conflict_warning"]["pending"] == 1  # 他桶被滤掉
-    assert r["conflict_warning"]["items"][0]["id"] == 9
-    assert "1 条 twin 偏好冲突未解决" in r["material"]
-
-
-def test_compile_conflict_warning_absent_when_clean_or_broken(monkeypatch):
-    _start_task()
-    monkeypatch.setattr(compile_actions.sink, "review_conflicts",
-                        lambda client=None: _mk_conflicts())
-    monkeypatch.setattr(compile_actions, "_fetch_evidence", lambda *a, **k: ([], []))
-    monkeypatch.setattr(compile_actions, "_compile_audience_profiles",
-                        lambda *a, **k: [])
-    r = compile_actions._action_compile({"work_type": "product_doc"})
-    assert r["ok"] and "conflict_warning" not in r
-    # 响应缺 conflicts 键（形状漂移）→ None 且 ok
-    monkeypatch.setattr(compile_actions.sink, "review_conflicts",
-                        lambda client=None: {"ok": True, "data": {}})
-    r2 = compile_actions._action_compile({"work_type": "product_doc"})
-    assert r2["ok"] and "conflict_warning" not in r2
-    # SinkError → None 且 ok（缺警示不阻断编译）
-    def _boom(client=None):
-        raise sink.SinkError("mema 不可达")
-    monkeypatch.setattr(compile_actions.sink, "review_conflicts", _boom)
-    r3 = compile_actions._action_compile({"work_type": "product_doc"})
-    assert r3["ok"] and "conflict_warning" not in r3
-
-
 # ---------- 批量审计挂载 ----------
 
 def test_step_update_batch_audit_row_has_task_id():
@@ -386,18 +341,3 @@ def test_step_update_batch_edges():
         "task_id": tid, "reason": "x",
         "steps": [{"step_id": sids[0], "status": "done"}]})
     assert not r["ok"] and "互斥" in r["reason"]
-
-
-def test_compile_conflict_warning_called_before_evidence_reads(monkeypatch):
-    """钉住「警示先于逐条证据 read」的落点（mema 挂死时先 10s 软失败）。"""
-    _start_task()
-    order: list[str] = []
-    monkeypatch.setattr(compile_actions, "_conflict_warning",
-                        lambda client=None: order.append("conflict") or None)
-    monkeypatch.setattr(compile_actions, "_fetch_evidence",
-                        lambda *a, **k: order.append("evidence") or ([], []))
-    monkeypatch.setattr(compile_actions, "_compile_audience_profiles",
-                        lambda *a, **k: [])
-    r = compile_actions._action_compile({"work_type": "product_doc"})
-    assert r["ok"]
-    assert order == ["conflict", "evidence"]

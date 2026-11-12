@@ -1,11 +1,13 @@
 """mema-twin MCP server：单工具 twin(action, data)，动作式紧凑接口（仿 mema/plan-mode 风格）。
 
 v0.3.8 拆分（单文件 ≤1000 行，设计文档 E）：本模块只留工具面——分发与边界、
-宿主身份头读取、mema notices 透传、动作注册表、help、传输层。动作实现分散到
+宿主身份头读取、租户路由、动作注册表、help、传输层。动作实现分散到
 pref_actions（偏好与治理）/ compile_actions（编译与版本）/ task_actions（交付
 任务流）；身份校验在 identity（contextvar 注入，动作模块调用点形态不变）。
 依赖单向：server → actions → (identity, db, flow, store, normalize, taxonomy,
 sink, scan, templates)，无环。
+v0.5.0 拆分（#1604）：mema notices 透传随 sink 数据面退役——偏好自持本库后
+不再有任何 mema 数据通道；sink 只剩 whoami（多租户路由）与宿主身份 env 校验。
 """
 from __future__ import annotations
 
@@ -71,8 +73,8 @@ def _single_text_result(result: dict) -> CallToolResult:
 
 def _attach_twin_notices(result) -> None:
     """升级提示出口（v0.4 P0）：仅 ok 响应附 twin_notices——notice 按版本抑制键
-    存续，无丢失风险，下次成功响应必然再出。与 mema_notices 完全独立的键，互不
-    干扰；两数组同现时各自独立分诊。本函数任何故障不击穿已成功的工具响应。"""
+    存续，无丢失风险，下次成功响应必然再出。本函数任何故障不击穿已成功的工具
+    响应。（v0.5.0：mema_notices 通道已随 sink 数据面退役，本键是唯一 notice 面。）"""
     if not isinstance(result, dict) or not result.get("ok"):
         return
     try:
@@ -96,15 +98,10 @@ def _twin_impl(action: str, data: dict | None = None) -> dict:
         # 无论动作立即打回（fail-fast，也避免 handler 先落票据再炸留幽灵行）
         identity.set_client_header(_request_client())
         identity.effective_client(data)
-        # mema notice 透传（v0.3.7）：入口清零、出口统一附带——任何触达 mema 的
-        # 动作（内部 read/find 也会 claim notice，先到先得）都可能在响应带出
-        sink.reset_notices()
-        # 多租户（2026-10-25）：入口清零 tenant/token contextvar（对齐 notices
-        # 的 reset 模式），USERS_DIR 形态解析租户并硬拒矩阵（除 help 外缺头/
-        # 坏 token 一律打回）；token 透传优先级=请求头 > env 兜底（default
-        # 形态）。解析（含 whoami 同步 HTTP）在本线程内——不回事件循环。
+        # 多租户（2026-10-25）：入口清零 tenant contextvar，USERS_DIR 形态解析租户
+        # 并硬拒矩阵（除 help 外缺头/坏 token 一律打回）。v0.5.0：token 仅服务
+        # 租户路由（whoami），不再透传数据面（偏好已自持，#1604）。
         tenant.reset_tenant()
-        sink.reset_request_token()
         token = _request_auth_token()
         if tenant.users_dir_mode() and action != "help":
             if not token:
@@ -117,20 +114,13 @@ def _twin_impl(action: str, data: dict | None = None) -> dict:
                 return _audited(action, "unauthorized", str(e), started, data)
             except sink.SinkUnavailableError as e:
                 return _audited(action, "tenant_unavailable", str(e), started, data)
-        sink.set_request_token(token)
+            except sink.SinkError as e:
+                return _audited(action, "gateway_unreachable", str(e), started, data)
         result = handler(data)
-        notices = sink.collect_notices()
-        # 非 ok 的 dict 响应同样附带（评审轮1 P3-4）：notice 被 claim 即 delivered
-        # 不重发，handler 后段出错丢掉等于永久丢失
-        if notices and isinstance(result, dict):
-            result["mema_notices"] = notices
-            result["mema_notices_guidance"] = _notices_guidance(notices)
         _attach_twin_notices(result)
         _attach_stall_guidance(result, data)
         _record_audit(action, result, started, data)
         return result
-    except sink.SinkError as e:
-        return _audited(action, "mema_unreachable", str(e), started, data)
     except tenant.TenantError as e:
         # 多租户形态的结构化拒绝（互斥 env/目录缺失/租户未设）——不接住会
         # 裸逃逸出工具面（对抗轮2 P1：裸 RuntimeError + 服务器绝对路径直打
@@ -213,30 +203,6 @@ def _task_id_of(data: dict):
     """从入参取 task_id 观测键（脏值原样透给 audit.stall_guidance 的
     int() 兜底，不在入口二次校验——动作自身有 _coerce_task_id 门）。"""
     return data.get("task_id")
-
-
-def _notices_guidance(notices: list[dict]) -> str:
-    """notice 分诊分层（v0.3.7 拍板）：similar_active_memory 在 twin 写流量上近乎
-    必然触发（默认 subject 同类型全同），只做静默分诊；semantic notice 才升级问
-    用户三选项。mema notice 是 advisory，不是正式冲突，不能直接 judge。"""
-    parts = []
-    for n in notices:
-        t = str(n.get("type") or "")
-        if t == "similar_active_memory":
-            parts.append("similar_active_memory（疑似重复偏好）：静默分诊——偏好是增量"
-                         "语义、重复由编译期合并吸收；仅当内容真属重复时改走 mema update "
-                         "原条目，不必打扰用户")
-        elif n.get("action_required") == "read_semantic_notice" or "semantic" in t:
-            parts.append(f"语义冲突 notice（notice_id={n.get('notice_id')}）：先按其 "
-                         "read_call（形如 memory_repair 的 notice 任务）读完整通知与两侧"
-                         "原文分诊，宿主缺该工具时直接 memory(action=\"read\") 按 notice "
-                         "相关 memory_id 读两侧原文——误报 dismiss；真冲突才问用户三选项："
-                         "两条都留（编译条件化）/ 新的替旧的（twin(action=\"void\") 旧条，"
-                         "mema 本体的 retire 是另行一步按其治理流程走）/ 撤销新写的"
-                         "（void 本条）")
-        else:
-            parts.append(f"mema notice（type={t}）：按其自带指引处理")
-    return "；".join(parts)
 
 
 def _request_client() -> str | None:
@@ -343,7 +309,8 @@ def _action_help(data: dict) -> dict:
     return {
         "ok": True,
         "actions": {
-            "write": "沉淀一条工作偏好。必填 content/work_type/audience/purpose"
+            "write": "沉淀一条工作偏好（v0.5.0 起偏好本体自持本库，不经 mema）。"
+                     "必填 content/work_type/audience/purpose"
                      "（先 taxonomy 查清单选码；清单无合适项的值会被整笔打回并附清单——"
                      "必须问用户：归一到已有值（resolve map）还是创建新值（resolve "
                      "canonicalize，即刻入清单），裁定后重试）；"
@@ -351,18 +318,20 @@ def _action_help(data: dict) -> dict:
                      "（task_start 已归一；scope=audience 时不继承 work_type；显式传入优先，"
                      "响应 dims_inherited 列出继承项）；"
                      "可选 subject/tags/source_ref/client（多 Agent 共接时 client 填宿主标识，如 kimi/jinleai）。"
-                     "对该受众的通用偏好（不限工作类型）传 scope=audience（此时 work_type 省略）。",
+                     "对该受众的通用偏好（不限工作类型）传 scope=audience（此时 work_type 省略）。"
+                     "同类型下内容完全相同的偏好命中词法去重：返回 ok+duplicate=true"
+                     "（幂等成功），请勿重试也无需改写。",
             "status": "查看各 work_type 的 prompt 版本概况（含体积/超预算标记）、受众画像"
                       "（audience_profiles）、需重抽象的受众（audience_stale）、条款作废待重编"
                       "（persona_stale）、pending 数量（归一门待裁票据）、未编译统计、夜间被拒计数"
-                      "（nightly_rejected）、open 冲突/进行中任务计数、执行计划统计（plan_stats："
+                      "（nightly_rejected）、进行中任务计数、执行计划统计（plan_stats："
                       "任务/步骤各态/backfilled/open blocking 疑问/tool_usage/playbooks/"
                       "playbook_rejected/采纳率 submitted_with_plan÷tasks_submitted——"
                       "分母 0 无读数，历史 submitted 会稀释，看增量任务）"
                       "与调用审计统计（audit：总调用/失败/近 24h/top 动作，环形缓冲近 2 万条，"
                       "MEMA_TWIN_AUDIT=0 关闭）与定时任务安装提醒。",
             "compile": "取编译素材包（旧版本 prompt 编译参考 + **全部在世证据**（全量投影，"
-                       "每版从头重编）+ 已作废条款清单 + 同受众画像参考 + 编译规则"
+                       "每版从头重编，正文本地自取）+ 已作废条款清单 + 同受众画像参考 + 编译规则"
                        "（含义稳定表达自由/变更分级/硬预算）），"
                        "由当前会话模型编译；独立会话执行、收尾即弃（session_note）。参数 work_type；"
                        "传 aud-{受众} 取受众画像素材包（该受众全部证据）。",
@@ -391,8 +360,8 @@ def _action_help(data: dict) -> dict:
             "resolve": "治理待裁值。pending_id + decision ∈ map(带 code)|canonicalize(带 new_type{code,zh,en,domain})|reject"
                        "（reject=不入体系并放弃本次写入，不得拿原值重试）。",
             "void": "作废一条偏好证据（冲突裁定「新替旧/撤销新写的」的执行机制）。参数 memory_id；"
-                    "行级作废、全链路排除、不可逆；曾入编译的证据会触发 persona_stale 夜间重编，"
-                    "受众证据计数变化触发画像重抽象。mema 本体的 retire 按其治理流程另行处理。",
+                    "行级作废、全链路排除、不可逆（正文在本库归档保留）；曾入编译的证据会"
+                    "触发 persona_stale 夜间重编，受众证据计数变化触发画像重抽象。",
             "task_start": "开工建档（流程注入点）。必填 brief/work_type（audience/purpose 可选，"
                           "但给了值必须在清单内——未命中整笔打回，须问用户裁定后重试）；"
                           "返回该工作性质的 persona prompt 与前置清单，进行中任务自动让位。"
@@ -540,6 +509,13 @@ def main() -> None:
                     f"启动失败：{env} 与 MEMA_TWIN_USERS_DIR 互斥"
                     "（多租户形态 token 随请求透传、路径按租户收口）")
         from pathlib import Path as _Path
+        if not (os.environ.get("MEMA_TWIN_MEMA_URL") or "").strip():
+            # R2 P2-4：多租户唯一 mema 交点是 /whoami（租户路由）；URL 缺失会
+            # 回落默认 127.0.0.1:8000 而真实网关常在别口——服务活着但全租户
+            # gateway_unreachable 的「全瞎」形态，启动期 fail-fast。
+            raise SystemExit(
+                "启动失败：多租户形态需 MEMA_TWIN_MEMA_URL（网关 whoami 定位，"
+                "如 http://127.0.0.1:8001/mcp）")
         users_root = _Path(os.environ[tenant.USERS_DIR_ENV])
         if not users_root.is_dir():
             raise SystemExit(f"启动失败：MEMA_TWIN_USERS_DIR={users_root} 不存在")
@@ -551,10 +527,10 @@ def main() -> None:
                 f"（含非数字子目录：{bad[:3]}）")
     # 升级检查（v0.4 P0）：daemon 线程后台跑，不阻塞启动；禁用 env 下内部 no-op
     update_monitor.maybe_start_check_if_due()
-    # 启动即校验 env 兜底身份与 token，脏值清晰报错退出，不留给运行期中途炸
+    # 启动即校验 env 兜底身份，脏值清晰报错退出，不留给运行期中途炸
+    #（v0.5.0：MEMA_TWIN_MEMA_TOKEN 数据面退役，token env 不再校验也不再消费）
     try:
         sink._env_client()
-        sink._env_token()
     except ValueError as e:
         raise SystemExit(f"启动失败：{e}")
     transport = (os.environ.get("MEMA_TWIN_TRANSPORT") or "stdio").strip().lower()

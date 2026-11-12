@@ -40,7 +40,7 @@ EXCLUSIVE_ENVS = (
 
 # 进程内租户（"u<uid>"）；default 形态恒为 None。在 _twin_impl 线程内
 # 设置——anyio.to_thread 的 context 副本随线程消亡，跨请求无残留；
-# 入口仍显式清零（对齐 sink.reset_notices 既有模式）。
+# 入口仍显式清零（跨请求无残留防御，v0.5.0 起 notices 机制已退役）。
 _tenant: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "mema_tenant", default=None)
 

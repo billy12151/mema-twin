@@ -5,7 +5,7 @@ description: 个人分身：工作类偏好沉淀与 persona prompt 编译，经
 
 # mema-twin 使用引导
 
-> 对齐服务端 **v0.4.8**。动作全集、入参与基础语义以 `twin(action="help")` 为准——**调用动作前先查一次 help**（会话内一次即可），本文件不复述入参。下文只写三样：何时用哪个动作的路由、执行门、help 未覆盖或与实测不符的口径。
+> 对齐服务端 **v0.5.0**。动作全集、入参与基础语义以 `twin(action="help")` 为准——**调用动作前先查一次 help**（会话内一次即可），本文件不复述入参。下文只写三样：何时用哪个动作的路由、执行门、help 未覆盖或与实测不符的口径。
 > **夜间治理/编译会话不需要本 skill**：twin_nightly_compile 两支线与 compile/submit 编译口径在 `mema-twin-governance` skill（唯一真源），本文件只留指向它的路由。
 
 ## 查证协议（任何动作之前，先于分流；2026-10-22 立）
@@ -31,7 +31,8 @@ description: 个人分身：工作类偏好沉淀与 persona prompt 编译，经
 - **事件/事实/进展**（做了什么、何时交付、结论是什么）→ `memory.remember`
 - **可复用的抽象**（偏好与规则：用语/详略/格式/口吻，结构习惯，开工前应确认的问题与材料）→ `twin(action="write")`，只收这三类；必带三字段 work_type / audience / purpose（选码见下节）。事件性内容不要走 twin.write
 - 拿不准时问自己："下次干同类活，这条还适用吗？"——适用就是偏好，只发生一次就是事件。混进事件记忆不会污染分身（无维度标签进不了 compile），但偏好漏存会让分身学不到
-- **禁止双写**：偏好进了 twin 就是唯一存档——不要再同步到宿主的本地记忆文档/笔记，也不要把同一条偏好再写一遍 `memory.remember`。用时从 twin 取（task_start 自动注入，其他场景 `twin(action="get")`）
+- **禁止双写**：工作偏好 `twin.write` 自持（v0.5.0 起存 twin 自有库，不进 mema）；事件性事实仍走 mema `memory.remember`；同一条偏好不得同时写两处（拆分后 mema-twin 桶已冻结），也不要再同步到宿主的本地记忆文档/笔记。用时从 twin 取（task_start 自动注入，其他场景 `twin(action="get")`）
+- write 响应 `duplicate=true`（同 work_type 内容完全相同，词法去重）＝**幂等成功**——偏好已存在，勿重试、勿改写重发
 
 ## 何时用
 
@@ -53,14 +54,16 @@ description: 个人分身：工作类偏好沉淀与 persona prompt 编译，经
 - 中断/隔日继续 → `twin(action="task_resume")`（仅进行中 planning，自动恢复 todos 并再注入分身，同样带 persona_supplement 与同域 fallback）；不再做的进行中任务用 `twin(action="task_close")` 显式关闭（**关闭前先经用户确认**，不要自行清理）；失败必须显式标 `outcome=failed`（缺省 superseded），否则结果列与未完成任务无法区分
 - **同会话重复注入省 token**：同一会话再次 task_start/task_resume/task_revise 同 work_type，且上文注入返回的 persona_version 仍在场（未被上下文压缩）→ 传 `have_persona_version=<上文版本号>`，版本未变则不再重复注入全文；上文不可见就**不要传**（服务端会照常全文注入，宁可重复不可缺席）——**尤其 revise：跨会话返工是常态，别从任务行抄 persona_version 当 have 申报**（会短路掉全文注入，分身缺席）
 - write 响应提示"有偏好未编译" → **不要**立即 compile，也不要每写一条就播报：任务收尾（或用户问起）时非阻塞汇总一句（如"分身积累了 N 条新偏好，要不要现在整理？"）；是否整理由用户拍板，或交给夜间编译定时任务统一处理
-- **触达 mema 的动作响应可能带 mema_notices**（advisory）：`similar_active_memory` 疑似重复 → 静默分诊（偏好是增量语义，重复由编译期合并吸收；真重复才改走 mema update 原条目，不必打扰用户）；**语义冲突 notice → 先按 read_call 读完整通知与两侧原文**，误报 dismiss，真冲突才问用户三选项：两条都留（编译条件化）/ 新的替旧的（twin void 旧条）/ 撤销新写的（twin void 本条）
-- 响应带 `twin_notices`（**升级提示，独立于 mema_notices**）：按其 agent_instruction 告知用户**一次**，不自动升级、不重复提醒（比对 GitHub 版本，同版本 7 天抑制；`MEMA_TWIN_UPDATE_CHECK=0` 可关）
+- v0.5.0 起 twin 不再产生 `mema_notices`（语义冲突检测随拆分退役，重复防线=写时词法去重 `duplicate=true`）——响应里见到该键属旧版残留，忽略
+- 响应带 `twin_notices`（**升级提示**）：按其 agent_instruction 告知用户**一次**，不自动升级、不重复提醒（比对 GitHub 版本，同版本 7 天抑制；`MEMA_TWIN_UPDATE_CHECK=0` 可关）
 - 用户明确要求更新分身 → **开一次性独立会话按 `mema-twin-governance` skill 执行 compile→submit**（编译口径、硬预算自检、冲突裁定全在那；会话隔离是避免新旧 persona 冲突的唯一硬手段，勿在同一会话继续交付任务）。用户要求在当前会话整理就直接执行；强模型建议提一次即可，不要反复劝说换会话。夜间定时任务自动执行同一 skill，不在本文件展开
 - 手动补评估/落执行经验（非夜间）→ `task_evaluate` → `playbook_submit`，溯源与落版口径同 `mema-twin-governance` skill
-- 冲突裁定"新替旧/撤销新写的"的执行动作是 `twin(action="void")`：行级作废、全链路排除、不可逆；曾入编译的证据会自动触发该类型夜间重编剔除该条款（persona_stale）；受众级证据作废会改变证据计数 → 触发画像重抽象（audience_stale）。mema 本体条目的 retire 按其治理流程另行处理
+- playbook 需回退 → `twin(action="playbook_rollback")`：`key` 必填，`version` 省略回上一版；零阻力、不删历史（语义同 persona `rollback`）
+- 冲突裁定"新替旧/撤销新写的"的执行动作是 `twin(action="void")`：行级作废、全链路排除、不可逆；曾入编译的证据会自动触发该类型夜间重编剔除该条款（persona_stale）；受众级证据作废会改变证据计数 → 触发画像重抽象（audience_stale）
 - `write` 的 `client` 填宿主标识（如 kimi / zcode；HTTP 接入时若头里已带 `X-Mema-Client` 则无需再传，help 未列此口径）
-- `status` 稳定带 `plan_stats`，键名全集：tasks_total / tasks_planned / steps_total / steps_failed / steps_skipped / steps_backfilled / open_blocking_questions / tasks_unevaluated / tasks_submitted / submitted_with_plan（采纳率=后者÷前者，分母 0 无读数；历史 submitted 会稀释，看增量任务）/ tool_usage_total / tool_usage_fail / playbooks（另 nightly_rejected、playbook_rejected 为拒绝落版计数，键缺席即 0）
-  - **status 判空**：`uncompiled` / `audience_stale` 返回 `{}`，`persona_stale` / `nightly_rejected` 是**键缺席**即空；plan_stats **可能整桶缺席**（仅 status 内部软失败时缺席，空库仍返回全零桶）——一律按「键缺席 或 空容器」等价处理，别因为没看到键就以为字段缺失或去查源码
+- `status` 稳定带 `plan_stats`，键名全集：tasks_total / tasks_planned / steps_total / steps_failed / steps_skipped / steps_backfilled / open_blocking_questions / tasks_unevaluated / tasks_submitted / submitted_with_plan（采纳率=后者÷前者，分母 0 无读数；历史 submitted 会稀释，看增量任务）/ tool_usage_total / tool_usage_fail / playbooks / **audit**（v0.4.6 起 action 级调用审计：total/failed/unreachable/fail_rate/last_24h/top_actions，`MEMA_TWIN_AUDIT=0` 关闭；unreachable 为 v0.4 历史冻结值，v0.5.0 起不再新增）/ **playbook_rejected**（明细数组 `[{key,count,last_check,last_at}]`，按 key 记落版被拒）
+  - 顶层 `nightly_rejected` 才是「夜间拒绝落版计数」（键缺席即 0）；`plan_stats.playbook_rejected` 是**数组不是计数**，别按数字读
+  - **status 判空**：`uncompiled` / `audience_stale` 返回 `{}`，`persona_stale` / `nightly_rejected` 是**键缺席**即空；plan_stats **可能整桶缺席**（仅 status 内部软失败时缺席，空库仍返回全零桶），其 `audit` / `playbook_rejected` 同理按「键缺席 或 空容器」处理——一律等价处理，别因为没看到键就以为字段缺失或去查源码
 - `status` 返回 scan_notice 时：按其 agent_instruction 询问用户是否创建/更新夜间任务（当前 spec 是单一任务 `twin_nightly_compile`，**从响应的 setup.tasks 取 spec 原文**建到宿主平台，不要凭记忆写）。处置口径四条：
   - **更新现有任务，不要再建第二个**：只建「纯 persona 编译」旧形态永远过不了停转保险丝，会被持续引导升级成合并 spec（两支线：评估在前、编译在后，缺评估支线心跳就刷不上）
   - 夜间任务的 prompt 指到 **`mema-twin-governance` skill**（夜间会话只读它）

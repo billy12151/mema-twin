@@ -2,6 +2,33 @@
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-11-12
+
+拆分自持（#1604）：偏好本体从 mema 迁入 twin 自持库，mema 数据面通道整体退役。
+方案 `~/ZCodeProject/docs/mema-twin-separation-plan.md`（R1 功能性 14 项 + R2 对抗性 14 项全处置，含云端真库拓扑纠偏：生产=京东云单进程多租户 twin）；实施两轮 review。
+
+### Added
+
+- **偏好自持存储**：`twin_evidence` 加 `content`/`tags`/`source_ref` 三列（旧库 ALTER 幂等迁移，旧指针行 content='' 由导入器回填）——write 不再外呼 mema，正文/用户 tags/source_ref 全部落本库；本库自此为偏好唯一载体（备份见 README 新增小节）。
+- **词法去重底线**（owner 拍板「接受语义冲突检测缺位」）：同 work_type 在世证据 sha256(content.strip()) 比对，完全相同 → 返回 `ok:true + duplicate:true + 既有 id`（幂等成功语义，对齐 mema 0.16.6 去重门先例，宿主勿重试）；去重 SELECT 与发号/插入同 `BEGIN IMMEDIATE` 事务（双宿主同文并发不双插）。
+- **本地发号**：`db.add_local_evidence` 发号 `MAX(memory_id)+1`，裸 INSERT + 撞 UNIQUE 回退重试（弃 INSERT OR IGNORE——并发发号实测静默丢写的坑）；写路径恒本地发号；import 走 `record_evidence(memory_id=原值)` 显式直插（迁移保原 id，`<!-- src: N -->` 溯源不断链）。
+- **迁移工具**：`python -m mema_twin.import_mema <jsonl> [--tenant uid] [--users-dir] [--dry-run]`——吃 mema 侧 `scripts/export_twin_bucket.py`（memory-arbiter 仓）产出的 backup envelope JSONL；双模式（既有指针行回填 content+subject / 缺失行插新行，三维从 tags 还原含 `twin:aud:` 受众级特判）；按 envelope.workspace_canonical 过滤（#976 痕迹行防误迁）、非 active 跳过、无三维 tag 行 skip 人工看、撞号计冲突；幂等重跑；完成落 `import_done` meta（console 迁移横幅判据）。
+- **独立本地 Console**：`mema-twin-console` 命令（127.0.0.1:8766，仅 loopback；**仅 default 单机形态**，多租户渲染引导横幅）——从 mema console /twin 页（d6a1714..b8af279 六 commit 资产）整体迁入并简化：写面进程内直调 `_twin_impl`（spawn stdio MCP 方案退役，client='console' 审计归因）、证据抽屉直读本地 content（mema 联查退役）、门卫四件套保留（Host 白名单/415/X-Console-Request/OPTIONS 无 CORS）；「按产出类型浏览」形态与可用性修复原样保留。
+- 新增测试 tests/test_v050_separation.py（31 例：发号/去重/旧库迁移/import 端到端/幂等/missing_content/响应键/收缩钉）。
+
+### Changed
+
+- **sink 收缩**：数据面（remember/find/read_memory/review_conflicts/notices 透传/token 透传）整体退役；只剩 `whoami`（多租户路由）+ 三态错误类 + `_env_client`（身份 env 校验）。多租户 whoami 网络不可达新映射 `gateway_unreachable`；`MEMA_TWIN_MEMA_URL` 语义收窄为「网关 whoami 定位（仅多租户）」；`MEMA_TWIN_MEMA_TOKEN` 不再消费（仅存互斥名单）。
+- **冲突链路退役**：compile 的 conflict_warning 节、status 的 open_conflicts 键、mema_notices/mema_notices_guidance 出口与分诊文案——偏好不在 mema 后写时语义冲突检测不再服务 twin（R2 拍板接受缺位，真裁定靠编译期模型 + console 人工审）。
+- **write/status/help 文案**：write 响应改 `memory_id/evidence_id/duplicate` 键族；void note 改「正文已在本库归档」；help 同步（去 mema retire 句、加 duplicate 勿重试句）。
+- 文档面：README（自持表述/env 表/备份/迁移/Console 三新节）、skill/SKILL.md（双写禁令改「mema-twin 桶已冻结」+ duplicate 句 + mema_notices 段退役）、skill-governance/SKILL.md（同）、deploy/mema-twin.service（MEMA_TWIN_MEMA_URL 注释化）；`__version__` 从落伍的 0.3.8 钉到 0.5.0。
+
+### Removed
+
+- `mema_twin/sink` 数据面函数全家与 `_BUCKET`/`_memory_id_of`；tests/test_notices.py 整文件；sink 数据面测试族（test_sink_token.py 重写为收缩面）。全量 476 passed（含 console 43 例；import 冲突/无 tag 行以退出码 2 阻断后续部署步骤）。
+
+## [0.4.8] — 2026-11-09
+
 - **v0.4.8 task_revise 补注入面 + get 补未编译增补**（来源：2026-11-09
   jingleAI PRD 修订链路事故——revise 生成子任务不注入 persona/增补，跨会话
   返工时上下文已压缩，已编译偏好（未评审保持 V1.0、文档信息/修订记录不占

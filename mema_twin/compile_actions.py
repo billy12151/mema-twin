@@ -11,64 +11,45 @@ from __future__ import annotations
 import json
 import re
 
-from . import db, flow, identity, sink, store, taxonomy, templates
-from .pref_actions import _bucket, _mark_persona_stale  # _bucket: read 通路存桶标识
+from . import db, flow, identity, store, taxonomy, templates
+from .pref_actions import _mark_persona_stale
 
 
-def _read_evidence_rows(rows: list[dict], client: str | None = None,
-                        fail_fast: bool = False) -> tuple[list[dict], list[dict]]:
-    """按 id 逐条 read 全文（compile 与增补注入共用的读取通路）。fail_fast=True
-    （仅增补）时连接级 SinkError 即跳过剩余条目——增补在 task_start 热路径上，
-    不能被挂起的 mema 逐条拖慢；compile 保持逐条独立重试（0.3.4 行为，SinkError
-    也含单条 JSON-RPC 错误，不能当全局宕机）。单条 not-ok 不触发 fail-fast。"""
+def _read_evidence_rows(rows: list[dict]) -> tuple[list[dict], list[dict]]:
+    """本地取正文（v0.5.0 自持，#1604）：rows 为 twin_evidence 行（SELECT * 自带
+    content），不再逐条外呼 mema。content 空的行是迁移前旧指针行——跳过并报
+    missing_content（运行 `python -m mema_twin.import_mema` 回填）。"""
     evidence: list[dict] = []
     skipped: list[dict] = []
-    mema_down = False
     for r in rows:
         mid = r["memory_id"]
-        if mema_down:
-            skipped.append({"memory_id": mid, "reason": "mema 不可达，跳过剩余"})
-            continue
-        try:
-            resp = sink.read_memory(mid, _bucket(), client=client)
-        except sink.SinkError as e:
-            skipped.append({"memory_id": mid, "reason": f"mema read 失败: {e}"})
-            if fail_fast:
-                mema_down = True
-            continue
-        if not resp.get("ok"):
+        content = r.get("content") or ""
+        if not str(content).strip():
             skipped.append({"memory_id": mid,
-                            "reason": (resp.get("error") or "read 未命中")})
-            continue
-        mem = (resp.get("data") or {}).get("memory") or {}
-        if not (mem.get("content") or "").strip():
-            # 对抗 review#9②：形状漂移不能产出空证据行（compile 素材包/增补同规）
-            skipped.append({"memory_id": mid, "reason": "read 响应缺 memory.content"})
+                            "reason": "missing_content（旧指针行待迁移："
+                                      "python -m mema_twin.import_mema 回填）"})
             continue
         evidence.append({
             "id": mid,
-            "subject": mem.get("subject") or r.get("subject") or "",
-            "content": mem.get("content") or "",
+            "subject": r.get("subject") or "",
+            "content": content,
             "audience": r.get("audience"),
             "purpose": r.get("purpose"),
         })
     return evidence, skipped
 
 
-def _fetch_evidence(conn, code: str, client: str | None = None) -> tuple[list[dict], list[dict]]:
+def _fetch_evidence(conn, code: str) -> tuple[list[dict], list[dict]]:
     """compile 证据（v0.3.7 全量投影）：该类型**全部在世证据**（uncompiled+compiled，
-    排除 void）逐条 read——每版从头重编，弱底稿不遗传、作废行天然不在场；与验证门
-    G3 期望集同源（alive_evidence）。v0.3.9 删 find 兜底召回（索引落地前存量数据
-    引导期已过；无在世证据时正确行为是素材为空——find 语义召回可能不相干的
-    mema 记忆属伪造素材。索引真丢失的正解：按 twin:wt:* 等 tags 从 mema 重建
-    twin_evidence，一次性脚本，需要时再写）。"""
+    排除 void）——每版从头重编，弱底稿不遗传、作废行天然不在场；与验证门
+    G3 期望集同源（alive_evidence）。"""
     rows = db.alive_evidence(conn, code)
     if not rows:
         return [], []
-    return _read_evidence_rows(rows, client)
+    return _read_evidence_rows(rows)
 
 
-def _compile_audience_profiles(conn, code: str, client: str | None = None) -> list[dict]:
+def _compile_audience_profiles(conn, code: str) -> list[dict]:
     """compile 素材包的受众画像参考（AR-4）：按该类型证据出现频次取 ≤3 个
     **已有画像**的受众（轮1 P2-4：先过滤有画像再 LIMIT，防无画像受众挤占名额）；
     无画像的受众不塞原始证据（原始通道只有注入雏形一条）。"""
@@ -93,34 +74,6 @@ def _compile_audience_profiles(conn, code: str, client: str | None = None) -> li
     return out
 
 
-def _conflict_warning(client: str | None = None) -> dict | None:
-    """0.18.3 策展面（owner 拍板 2026-11-01 Q7=A「twin 冲突马上提示」）：编译
-    素材含未裁决冲突时警示——带着矛盾证据编译=把矛盾固化进 persona。走
-    sink.review_conflicts（与 status.open_conflicts 同通道同口径：status=='open'
-    且 workspace_canonical==本桶），不直开 memory.sqlite3（C 形态不变量：twin
-    只经 mema 接口读它，直开绕过 authorizer 且耦合内部表结构）；软失败返回
-    None——缺警示不阻断编译，console 侧另有常驻警示区兜底。"""
-    try:
-        resp = sink.review_conflicts(client=client)
-    except (sink.SinkError, AttributeError, TypeError, ValueError):
-        return None
-    payload = (resp.get("data") or resp or {}) if isinstance(resp, dict) else {}
-    conf = payload.get("conflicts")
-    if not isinstance(conf, list):
-        return None
-    bucket = _bucket()
-    mine = [c for c in conf if isinstance(c, dict)
-            and c.get("status") == "open"
-            and c.get("workspace_canonical") == bucket]
-    if not mine:
-        return None
-    keep = ("id", "memory_ids", "reason", "created_at", "status")
-    items = [{k: c[k] for k in keep if k in c} for c in mine[:10]]
-    return {"pending": len(mine), "items": items,
-            "hint": "存在未解决的偏好冲突，persona 编译素材包含矛盾证据；"
-                    "请先在 mema Console 处理（保留哪条/作废哪条），否则编译产物将自相矛盾"}
-
-
 def _action_compile(data: dict) -> dict:
     wt = str(data.get("work_type") or "").strip()
     if not wt:
@@ -140,21 +93,18 @@ def _action_compile(data: dict) -> dict:
                         "reason": "unknown code；先 twin(action=\"taxonomy\") 查码或治理 pending"}
         t = taxonomy.by_code("work_type", code)
         active = store.get_active(conn, code)
-        client = identity.effective_client(data)
-        # 冲突警示在逐条证据 read **之前**打（v0.4.7）：mema 挂死时先 10s 软失败
-        # 拿到警示判定，而不是 N×30s 读超时之后——对夜间编译预算更友好
-        conflict_warning = _conflict_warning(client)
+        identity.effective_client(data)  # 身份校验 fail-fast（与入口同款）
         if aud is not None:
-            # 受众画像素材（AR-2）：该受众全部证据（不分 compiled），逐条 read
+            # 受众画像素材（AR-2）：该受众全部证据（不分 compiled），本地取正文
             rows = db.audience_evidence(conn, aud)
-            evidence, skipped = _read_evidence_rows(rows, client=client)
+            evidence, skipped = _read_evidence_rows(rows)
             audience_profiles = None
             # 已作废条款按 audience 查（评审轮1 P1-2——受众相关行的 work_type 各不
             # 相同）；取数放证据之后（评审轮2 P3-5：并发 void 落在两查询之间时，
             # 「素材含该条+stale 次夜自愈」比「整条消失」安全）
             voided = db.voided_audience_evidence(conn, aud)
         else:
-            evidence, skipped = _fetch_evidence(conn, code, client=client)
+            evidence, skipped = _fetch_evidence(conn, code)
             audience_profiles = _compile_audience_profiles(conn, code)
             voided = db.voided_evidence(conn, code)
     finally:
@@ -168,13 +118,8 @@ def _action_compile(data: dict) -> dict:
         aud or code, title_zh, active, evidence,
         audience_profiles=audience_profiles, audience_mode=aud is not None,
         voided=voided)
-    # 0.18.3 策展面：警示段插素材头部+结构化字段（conflict_warning 已在证据
-    # read 之前算好），由编译会话转告用户（console 亦有常驻警示区）
-    if conflict_warning is not None:
-        material = (
-            f"> ⚠️ **{conflict_warning['pending']} 条 twin 偏好冲突未解决**（详见 conflict_warning 字段）——"
-            f"素材中的矛盾证据尚未经用户裁决，编译产物可能与既有 persona 自相矛盾。\n\n" + material
-        )
+    # v0.5.0：mema 冲突警示节（conflict_warning）随 sink 数据面退役整体移除
+    #（偏好已自持，写时语义冲突检测不再服务 twin——方案 §3.4）
 
     out: dict = {"ok": True, "work_type": code,
                  "current_version": (active or {}).get("version"),
@@ -187,8 +132,6 @@ def _action_compile(data: dict) -> dict:
                          "twin(action=\"submit\", data={work_type, prompt_md, source_memory_ids, model})"}
     if skipped:
         out["skipped_evidence"] = skipped
-    if conflict_warning is not None:
-        out["conflict_warning"] = conflict_warning
     return out
 
 

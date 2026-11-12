@@ -1,23 +1,19 @@
 # mema-twin.service — systemd unit 模板（远端/自托管 sidecar 形态）。
 #
-# 使用：复制到 /etc/systemd/system/mema-twin.service，替换下面 4 个 <...>
+# 使用：复制到 /etc/systemd/system/mema-twin.service，替换下面 3 个 <...>
 # 占位符，然后 `systemctl daemon-reload && systemctl enable --now mema-twin`：
 #   <venv>          venv 安装路径（ExecStart 用其 bin/mema-twin）
 #   <user>          运行账号（专用非特权账号，勿 root）
 #   <twin-base>     twin 数据根目录（twin.sqlite3 / prompts/ 等落这里）
-#   <secrets-file>  存 MEMA_TWIN_MEMA_TOKEN 的环境文件路径（chmod 600）
 #
-# 形态：偏好本体经 MEMA_TWIN_MEMA_URL 写 mema（默认本地 core 的 8000 端口；
-# mema 端点带鉴权时改为该端点，并在 <secrets-file> 配 token）；宿主 Agent 经
+# 形态：偏好本体自持 twin.sqlite3（v0.5.0 拆分，不写 mema）；宿主 Agent 经
 # SSH 隧道接 127.0.0.1:8765/mcp。
 #
 # 安全边界（不变量）：
 # - MEMA_TWIN_HTTP_HOST 必须 loopback——X-Mema-Client 不是鉴权，对外暴露
 #   等于开放身份伪造（twin 启动自检强制，mema core 同款策略）。
-# - token 明文只进 <secrets-file>（unit 文件通常 world-readable，勿写这里）。
-#   确定启用鉴权端点后，建议去掉 EnvironmentFile 的 "-" 前缀：env 文件缺失
-#   直接启动失败，好过运行期才发现 401。
-# - UMask=0077：twin.sqlite3 与 prompts/ 镜像含个人画像，0600。
+# - UMask=0077：twin.sqlite3 与 prompts/ 镜像含个人画像，0600；twin.sqlite3
+#   是偏好唯一副本（v0.5.0 自持），自托管需自配备份（见 README「备份」节）。
 
 [Unit]
 Description=mema-twin (personal work twin MCP server)
@@ -37,17 +33,18 @@ Environment=MEMA_TWIN_TRANSPORT=http
 Environment=MEMA_TWIN_HTTP_HOST=127.0.0.1
 Environment=MEMA_TWIN_HTTP_PORT=8765
 
-# mema 端点：本地 core 默认 8000；远端/经鉴权网关时改为对应 /mcp 端点
-Environment=MEMA_TWIN_MEMA_URL=http://127.0.0.1:8000/mcp
-EnvironmentFile=-<secrets-file>
+# 网关定位端点（v0.5.0 语义收窄）：仅多租户形态需要（whoami 解析租户），
+# 单用户自持形态无需设置
+#Environment=MEMA_TWIN_MEMA_URL=http://127.0.0.1:8000/mcp
 
 # 多租户形态（服务网关的多个用户）：指向网关 users 目录——账本/镜像按租户
 # 落 users/<uid>/，token 随请求透传（静态 token env 与镜像/DB env 均不可设，
 # 且仅支持 http 传输）。单用户自托管不设此行。运行账号需对该目录有写权
-#（网关部署中通常即网关服务账号）。
+#（网关部署中通常即网关服务账号）。此形态还需放开上方 MEMA_TWIN_MEMA_URL
+#（指向网关，whoami 定位用）。
 #Environment=MEMA_TWIN_USERS_DIR=<gateway-users-dir>
 
-# twin 自有数据（元数据/镜像），与 mema 库分文件——设计如此，不是遗漏。
+# twin 自有数据（偏好本体/元数据/镜像）——v0.5.0 起自持库，设计如此，不是遗漏。
 # ⚠️ 多租户形态（设置 MEMA_TWIN_USERS_DIR）下以下四行必须整段删除或注释
 #（与之互斥，启动会 fail-fast 拒绝）；单用户自托管保留即可。
 Environment=MEMA_TWIN_DB_PATH=<twin-base>/twin.sqlite3

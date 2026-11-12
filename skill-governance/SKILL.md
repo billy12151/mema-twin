@@ -5,16 +5,16 @@ description: mema-twin 夜间治理/编译会话专用：twin_nightly_compile �
 
 # mema-twin 夜间治理手册
 
-> 对齐服务端 **v0.4.6**。流程单一真源是 `mema_twin/scan.py` 的 `SCHEDULED_TASKS_SPEC`
+> 对齐服务端 **v0.5.0**。流程单一真源是 `mema_twin/scan.py` 的 `SCHEDULED_TASKS_SPEC`
 > （建任务时随 scan_notice 的 setup 下发）——与本文件不一致时**以 scan.py 为准**；
 > 动作入参与基础语义以 `twin(action="help")` 为准。本文件写执行口径与真源未展开的细节。
 
 ## 夜间会话总则
 
-- 无人值守一次性会话（凌晨用户不在场）：**不向用户提问**、不代裁 pending、不处理 mema_notices（只记录进汇总）
+- 无人值守一次性会话（凌晨用户不在场）：**不向用户提问**、不代裁 pending；twin v0.5.0 起无 mema_notices，如见到该键属旧版残留，忽略
 - 两支线**顺序执行、各自无素材早退**：①执行经验评估在前（轻且快，防被最重的编译段吃掉会话预算后永远轮不到；水位在，漏一晚次晚自动补）②persona 编译在后
 - 工具出错跳过并如实记录，同一项最多重试一次
-- 收尾输出汇总：各类型前后版本号与吸收证据数、status 的 pending_count 与未收口任务数各一句、mema_notices 原样记录（留用户在场时分诊）
+- 收尾输出汇总：各类型前后版本号与吸收证据数、status 的 pending_count 与未收口任务数各一句（twin v0.5.0 起无 mema_notices，如见到该键属旧版残留，忽略）
 
 ## ①执行经验评估支线
 
@@ -41,4 +41,4 @@ description: mema-twin 夜间治理/编译会话专用：twin_nightly_compile �
 ## 治理汇总（夜间只汇总，不处置）
 
 - `pending`：归一门待裁票据非空时取明细（type_kind / raw_value / hit_count=打回次数）列入收尾汇总——这些是三维度打回待用户裁定的长尾（map/canonicalize/reject），**留用户在场时裁定，夜间不代裁**；为空跳过本调用
-- `mema_notices`：原样记录进汇总输出，夜间不处理（advisory，留白天分诊）
+- `mema_notices`：twin v0.5.0 起无 mema_notices，如见到该键属旧版残留，忽略
