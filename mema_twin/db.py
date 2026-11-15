@@ -20,6 +20,7 @@ import json
 import os
 import re
 import sqlite3
+import sys
 from pathlib import Path
 
 from . import taxonomy, tenant
@@ -77,6 +78,7 @@ CREATE TABLE IF NOT EXISTS twin_evidence(
   content TEXT NOT NULL DEFAULT '',
   tags TEXT NOT NULL DEFAULT '[]',
   source_ref TEXT NOT NULL DEFAULT '',
+  client TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'uncompiled',
   compiled_version INTEGER,
   created_at TEXT NOT NULL,
@@ -239,7 +241,8 @@ def _migrate(conn: sqlite3.Connection, key: str) -> None:
     ev_cols = {r["name"] for r in conn.execute("PRAGMA table_info(twin_evidence)")}
     for col, ddl in (("content", "TEXT NOT NULL DEFAULT ''"),
                      ("tags", "TEXT NOT NULL DEFAULT '[]'"),
-                     ("source_ref", "TEXT NOT NULL DEFAULT ''")):
+                     ("source_ref", "TEXT NOT NULL DEFAULT ''"),
+                     ("client", "TEXT NOT NULL DEFAULT ''")):
         if ev_cols and col not in ev_cols:
             try:
                 conn.execute(f"ALTER TABLE twin_evidence ADD COLUMN {col} {ddl}")
@@ -248,6 +251,32 @@ def _migrate(conn: sqlite3.Connection, key: str) -> None:
                 # column——列已在（先到者已提交），吞掉即可
                 if "duplicate column" not in str(e).lower():
                     raise
+    # v0.5.1 历史归因回填：偏好条目落库时没记调用方，用同库审计的 write 记录补。
+    # created_at 是插入时刻、审计 ts 是请求结束时刻，实测有 0-1s 偏移（uid1 精确 29、
+    # ±1s 30；uid2 68 / 70），故用 ±1s 窗口；同窗口内出现多个 client 时宁缺勿错。
+    # 只填空值（幂等）；LIMIT 5000 是锁上界——超出部分留待下个进程启动续跑。
+    if "client" in {r["name"] for r in conn.execute("PRAGMA table_info(twin_evidence)")}:
+        try:
+            if conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='twin_audit'"
+            ).fetchone() is not None:
+                conn.execute(
+                    "UPDATE twin_evidence SET client = COALESCE(("
+                    " SELECT a.client FROM twin_audit a"
+                    "  WHERE a.action='write' AND a.ok=1"
+                    "    AND a.ts >= strftime('%Y-%m-%dT%H:%M:%S+00:00', twin_evidence.created_at, '-1 second')"
+                    "    AND a.ts <= strftime('%Y-%m-%dT%H:%M:%S+00:00', twin_evidence.created_at, '+1 second')"
+                    "    AND (SELECT COUNT(DISTINCT b.client) FROM twin_audit b"
+                    "          WHERE b.action='write' AND b.ok=1 AND b.ts=a.ts)=1"
+                    "  LIMIT 1), '')"
+                    # 上界用 id 子查询而不是 UPDATE...LIMIT：标准构建未开
+                    # SQLITE_ENABLE_UPDATE_DELETE_LIMIT，后者直接语法错。
+                    " WHERE id IN (SELECT id FROM twin_evidence"
+                    "               WHERE COALESCE(client,'')='' LIMIT 5000)"
+                )
+        except sqlite3.OperationalError as e:
+            # 只读库/锁超时：回填不是迁移的必要条件，记日志后下个进程再试
+            print(f"twin_evidence client backfill skipped: {e}", file=sys.stderr)
     conn.commit()
     _migrated.add(key)
 
@@ -404,9 +433,11 @@ def set_pending(conn: sqlite3.Connection, pending_id: int, status: str,
 
 
 def _evidence_values(dims: dict, subject: str, content: str,
-                     tags_json: str = "", source_ref: str = "") -> tuple:
+                     tags_json: str = "", source_ref: str = "",
+                     client: str = "") -> tuple:
     """行值组（write 本地化与 import 共用）：dims 为 normalize 三维结果 dict，
-    pending 维度 code 列存 NULL、raw 列存原始值。"""
+    pending 维度 code 列存 NULL、raw 列存原始值。client = 调用方宿主标识
+    （v0.5.1 起落库；空串表示无头/未记录，与历史行同义）。"""
     def _code(kind: str):
         d = dims.get(kind) or {}
         return d.get("code") if d.get("ok") else None
@@ -416,21 +447,21 @@ def _evidence_values(dims: dict, subject: str, content: str,
             str((dims.get("audience") or {}).get("raw") or ""),
             str((dims.get("purpose") or {}).get("raw") or ""),
             subject or "", content or "", tags_json or "[]", source_ref or "",
-            now_iso())
+            client or "", now_iso())
 
 
 _EVIDENCE_INSERT = (
     "INSERT INTO twin_evidence"
     "(memory_id, work_type, audience, purpose,"
     " work_type_raw, audience_raw, purpose_raw, subject, content, tags,"
-    " source_ref, created_at)"
-    " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)"
+    " source_ref, client, created_at)"
+    " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)"
 )
 
 
 def add_local_evidence(conn: sqlite3.Connection, dims: dict, subject: str,
                        content: str, tags_json: str = "[]",
-                       source_ref: str = "") -> dict:
+                       source_ref: str = "", client: str = "") -> dict:
     """write 本地化入口（v0.5.0）：词法去重 + 本地发号 + 插入，单 BEGIN IMMEDIATE
     事务覆盖（R2 P2-3：去重 SELECT 与发号/插入同事务，双宿主同文并发不双插）。
 
@@ -442,7 +473,7 @@ def add_local_evidence(conn: sqlite3.Connection, dims: dict, subject: str,
 
     code = (dims.get("work_type") or {}).get("code") if dims.get("work_type", {}).get("ok") else None
     digest = hashlib.sha256((content or "").strip().encode("utf-8")).hexdigest()
-    values = _evidence_values(dims, subject, content, tags_json, source_ref)
+    values = _evidence_values(dims, subject, content, tags_json, source_ref, client)
     for _attempt in range(3):
         try:
             conn.execute("BEGIN IMMEDIATE")
@@ -480,11 +511,12 @@ def add_local_evidence(conn: sqlite3.Connection, dims: dict, subject: str,
 
 def record_evidence(conn: sqlite3.Connection, memory_id: int,
                     dims: dict, subject: str = "", content: str = "",
-                    tags_json: str = "[]", source_ref: str = "") -> None:
+                    tags_json: str = "[]", source_ref: str = "",
+                    client: str = "") -> None:
     """显式 id 直插（import 专用，v0.5.0）：迁移保原 memory_id 不断
     `<!-- src -->` 溯源。裸 INSERT，撞 UNIQUE(memory_id) 抛 IntegrityError
     由导入器计数（回填行走 UPDATE 路径，不到这里）。"""
-    values = _evidence_values(dims, subject, content, tags_json, source_ref)
+    values = _evidence_values(dims, subject, content, tags_json, source_ref, client)
     conn.execute(_EVIDENCE_INSERT, (int(memory_id), *values))
     conn.commit()
 

@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-11-16
+
+偏好归因（批次 `memory-writer-20261116`）：证据行落「调用方」标识，供 `/mema/` 记忆详情显示「写入方」。
+
+### Added
+
+- **`twin_evidence.client`**：`TEXT NOT NULL DEFAULT ''`。`pref_actions` 写入时取 `identity.effective_client(data)`（http 头权威，stdio 回落 `data.client`）落行；此前该值只喂审计，证据行无从回答「这条偏好是哪个宿主写的」。`add_local_evidence` / `record_evidence` 增 `client` 形参，默认空串（无头/导入行与历史行同义）。
+- **历史归因回填**：迁移期按同库 `twin_audit(action='write', ok=1)` 回填 `client`，窗口 ±1s（`created_at` 是插入时刻、审计 `ts` 是请求结束时刻，实测漏 3 条），同一审计秒出现多个 client 时宁缺勿错；只填空值，幂等；`LIMIT 5000` 为锁上界，余量下个进程续跑。
+- 新增 `tests/test_v051_client.py`（11 例）：建表/旧库 ALTER/写入落值/去重不改归属/回填窗口与歧义/幂等。
+
+### Notes
+
+- 回填用 `id IN (SELECT … LIMIT n)` 而非 `UPDATE … LIMIT`：标准 SQLite 构建未开 `SQLITE_ENABLE_UPDATE_DELETE_LIMIT`，后者语法错（首版实现即被新用例逮到）。
+- 去重命中不覆盖既有行 `client`：重复写入不产生新证据，改归属等于篡改历史。
+
 ## [0.5.0] — 2026-11-12
 
 拆分自持（#1604）：偏好本体从 mema 迁入 twin 自持库，mema 数据面通道整体退役。

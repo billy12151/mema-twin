@@ -118,11 +118,14 @@ def _action_write(data: dict) -> dict:
     subject = str(data.get("subject") or (
         f"受众级偏好：{dims['audience'].get('label_zh') or dims['audience'].get('raw')}"
         if audience_scoped else f"工作偏好：{dims['work_type'].get('raw')}"))
-    identity.effective_client(data)  # 身份校验保持入口同款 fail-fast（审计归因在入口层）
+    # v0.5.1：调用方宿主标识随证据行落库（此前只喂审计，证据行没有归因；
+    # 页面「写入方」显示的就是这个值）。http 头存在时头是权威，见 identity。
+    client = identity.effective_client(data) or ""
     conn = db.connect()
     try:
         res = db.add_local_evidence(conn, dims, subject=subject, content=content,
-                                    tags_json=tags_json, source_ref=source_ref)
+                                    tags_json=tags_json, source_ref=source_ref,
+                                    client=client)
         mid = res["memory_id"]
         out: dict = {"ok": True, "duplicate": res["duplicate"],
                      "memory_id": mid, "evidence_id": mid,
