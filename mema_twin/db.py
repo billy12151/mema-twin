@@ -253,7 +253,10 @@ def _migrate(conn: sqlite3.Connection, key: str) -> None:
                     raise
     # v0.5.1 历史归因回填：偏好条目落库时没记调用方，用同库审计的 write 记录补。
     # created_at 是插入时刻、审计 ts 是请求结束时刻，实测有 0-1s 偏移（uid1 精确 29、
-    # ±1s 30；uid2 68 / 70），故用 ±1s 窗口；同窗口内出现多个 client 时宁缺勿错。
+    # ±1s 30；uid2 68 / 70），故用 ±1s 窗口。
+    # 歧义判定按「同一审计秒」：b.ts=a.ts 内若出现多个 client 就跳过——这里刻意不扩到
+    # 整个 ±1s 窗口，因为两条差 1 秒的写各自有独立 created_at，扩窗口会把本可唯一定位
+    # 的行也丢掉（宁可用同秒精度，也不误归）。
     # 只填空值（幂等）；LIMIT 5000 是锁上界——超出部分留待下个进程启动续跑。
     if "client" in {r["name"] for r in conn.execute("PRAGMA table_info(twin_evidence)")}:
         try:
