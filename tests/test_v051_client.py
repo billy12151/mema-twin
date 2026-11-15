@@ -180,6 +180,20 @@ class TestBackfillOnMigrate:
         assert _client_of(conn) == ""
         conn.close()
 
+    def test_backfill_skips_cross_second_ambiguity(self, tmp_path, monkeypatch):
+        """窗口跨秒的双 client 也必须跳过。
+
+        evidence.created_at=10:00:00，窗口 [09:59:59, 10:00:01] 同时含
+        10:00:00(zcode) 与 10:00:01(workbuddy)。旧口径只校验 b.ts=a.ts，
+        守卫看不见后一个，LIMIT 1 会任取一个 → 误归。此用例锁死窗口口径。
+        """
+        _open_legacy(tmp_path, monkeypatch,
+                     ("2026-11-01T10:00:00+00:00", "zcode", 1, "write"),
+                     ("2026-11-01T10:00:01+00:00", "workbuddy", 1, "write"))
+        conn = db.connect()
+        assert _client_of(conn) == ""
+        conn.close()
+
     def test_backfill_is_idempotent(self, tmp_path, monkeypatch):
         path = _open_legacy(
             tmp_path, monkeypatch,

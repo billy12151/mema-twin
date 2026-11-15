@@ -254,10 +254,15 @@ def _migrate(conn: sqlite3.Connection, key: str) -> None:
     # v0.5.1 历史归因回填：偏好条目落库时没记调用方，用同库审计的 write 记录补。
     # created_at 是插入时刻、审计 ts 是请求结束时刻，实测有 0-1s 偏移（uid1 精确 29、
     # ±1s 30；uid2 68 / 70），故用 ±1s 窗口。
-    # 歧义判定按「同一审计秒」：b.ts=a.ts 内若出现多个 client 就跳过——这里刻意不扩到
-    # 整个 ±1s 窗口，因为两条差 1 秒的写各自有独立 created_at，扩窗口会把本可唯一定位
-    # 的行也丢掉（宁可用同秒精度，也不误归）。
-    # 只填空值（幂等）；LIMIT 5000 是锁上界——超出部分留待下个进程启动续跑。
+    # 歧义判定用**同一个 ±1s 窗口**：窗口内若出现多个 client 就跳过。早先只校验
+    # b.ts=a.ts（同一审计秒），但窗口跨秒时（如 10:00:00 的 A 与 10:00:01 的 B）
+    # 守卫看不见，LIMIT 1 无 ORDER BY 会任取一个 → 把行归给错的人。归因错误比
+    # 「未记录」更糟（用户无法分辨），故宁可少填。实测两租户窗口歧义 0 行，
+    # 收紧口径后回填量不变（30 / 70）。
+    # 只填空值（幂等）；LIMIT 5000 是锁上界，按 created_at 从新到旧取——审计表是
+    # 约 20k 行环形表，越老的行越可能已找不到对应审计，优先处理新行。
+    # 注意：若最新 5000 行全部匹配不上，本进程之后的启动会重复扫描同一批（不推进）；
+    # 这是已知上限，不是「余量自动续跑」。
     if "client" in {r["name"] for r in conn.execute("PRAGMA table_info(twin_evidence)")}:
         try:
             if conn.execute(
@@ -270,12 +275,15 @@ def _migrate(conn: sqlite3.Connection, key: str) -> None:
                     "    AND a.ts >= strftime('%Y-%m-%dT%H:%M:%S+00:00', twin_evidence.created_at, '-1 second')"
                     "    AND a.ts <= strftime('%Y-%m-%dT%H:%M:%S+00:00', twin_evidence.created_at, '+1 second')"
                     "    AND (SELECT COUNT(DISTINCT b.client) FROM twin_audit b"
-                    "          WHERE b.action='write' AND b.ok=1 AND b.ts=a.ts)=1"
+                    "          WHERE b.action='write' AND b.ok=1"
+                    "            AND b.ts >= strftime('%Y-%m-%dT%H:%M:%S+00:00', twin_evidence.created_at, '-1 second')"
+                    "            AND b.ts <= strftime('%Y-%m-%dT%H:%M:%S+00:00', twin_evidence.created_at, '+1 second'))=1"
                     "  LIMIT 1), '')"
                     # 上界用 id 子查询而不是 UPDATE...LIMIT：标准构建未开
                     # SQLITE_ENABLE_UPDATE_DELETE_LIMIT，后者直接语法错。
                     " WHERE id IN (SELECT id FROM twin_evidence"
-                    "               WHERE COALESCE(client,'')='' LIMIT 5000)"
+                    "               WHERE COALESCE(client,'')=''"
+                    "               ORDER BY created_at DESC LIMIT 5000)"
                 )
         except sqlite3.OperationalError as e:
             # 只读库/锁超时：回填不是迁移的必要条件，记日志后下个进程再试
