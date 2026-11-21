@@ -56,8 +56,9 @@ _PB_MD = ("# playbook\n\n## 工具面板\n\n"
 
 
 def _submit(key="work_report", tid=1, origin=None, content=None, **kw):
+    # v0.6 B8 后 data 顶层未知键打回——历史 helper 里的 model="test" 冗余键已删
     data = {"key": key, "content_md": content or (_PB_MD % tid),
-            "source_task_ids": [tid], "model": "test", **kw}
+            "source_task_ids": [tid], **kw}
     if origin:
         data["origin"] = origin
     return server._twin_impl("playbook_submit", data)
@@ -292,7 +293,7 @@ def test_submit_interactive_gate_violations_surface_as_warnings(env):
     t = _closed_task()
     r = server._twin_impl("playbook_submit", {
         "key": "work_report", "content_md": "no headings here",
-        "source_task_ids": [t["id"]], "model": "test"})
+        "source_task_ids": [t["id"]]})
     assert r["ok"] is True
     assert any("Markdown 标题" in w for w in r.get("warnings", []))
 

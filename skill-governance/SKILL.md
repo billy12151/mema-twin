@@ -5,9 +5,11 @@ description: mema-twin 夜间治理/编译会话专用：twin_nightly_compile �
 
 # mema-twin 夜间治理手册
 
-> 对齐服务端 **v0.5.0**。流程单一真源是 `mema_twin/scan.py` 的 `SCHEDULED_TASKS_SPEC`
-> （建任务时随 scan_notice 的 setup 下发）——与本文件不一致时**以 scan.py 为准**；
-> 动作入参与基础语义以 `twin(action="help")` 为准。本文件写执行口径与真源未展开的细节。
+> 对齐服务端 **v0.6.0**。流程单一真源是 `mema_twin/scan.py` 的 `SCHEDULED_TASKS_SPEC`
+> （建任务时随 scan_notice 的 setup 下发；v0.6 起 calls 的说明文本在 `instruction` 键、
+> `data` 只放真参数——照抄 data 不会撞未知键硬拒）——与本文件不一致时**以 scan.py 为准**；
+> 动作入参与基础语义以 `twin(action="help")` 为准（可 `help(topic=<动作名>)` 单查）。
+> 本文件写执行口径与真源未展开的细节。
 
 ## 夜间会话总则
 
@@ -19,7 +21,7 @@ description: mema-twin 夜间治理/编译会话专用：twin_nightly_compile �
 ## ①执行经验评估支线
 
 1. `status`：plan_stats.tasks_unevaluated=0 → 评估支线整体跳过（无素材不空转）
-2. `task_evaluate` **必传 `origin="scheduled"`**（唯一合法值；help 未列该参数）：调用成功即刷停转保险丝心跳（`last_scheduled_playbook_at`），与当晚有无新经验无关——**漏传等于 7 天后误报任务停转**。无 task_ids 取未评估收口任务（≤10）；响应 task_count=0 则支线结束（心跳已刷）
+2. `task_evaluate` **必传 `origin="scheduled"`**（唯一合法值）：调用成功即刷停转保险丝心跳（`last_scheduled_playbook_at`），与当晚有无新经验无关——**漏传等于 7 天后误报任务停转**。无 task_ids 取未评估收口任务（≤10，limit 实际 clamp 1..10）；响应 task_count=0 则支线结束（心跳已刷）
 3. 素材只含真实执行记录；`playbook_submit`：key 用 key_hint（或覆盖面最大的 work_type；跨类型经验用 `'global'`），source_task_ids=素材包全部任务 id；**编译产物每条必须 `<!-- task: N -->` 溯源，写不出来源的条目不得出现**
 4. **无值得沉淀的新经验不提交不落版**
 
@@ -30,8 +32,8 @@ description: mema-twin 夜间治理/编译会话专用：twin_nightly_compile �
 3. **夜间保守封套**（仅夜间；用户在场的交互式编译不受此限）：无证据动机时不做整体重组——吸收新证据、剔除作废条款、预算合并照做，大重组留给交互式编译
 4. **硬预算与落地前自检**：persona 正文 ≤8000 字符或 ≤60 条顶层列表行；受众画像 ≤4000 字符或 ≤40 条（画像留给增量条款的空间很小，长证据要抽象到口径层，别搬格式细节）。超限必须合并或淘汰并写明依据。submit **不校验预算**，超了会静默落版——草稿先写临时文件，`wc -m` 数字符、`grep -c '^- '` 数顶层条目，过线再提交，事后再用 `rm` 清掉临时件。画像（4000 字符）逼近上限时，优先压缩「版本间变更」里的历史日志（按证据分组、逐版一行，归因 id 保留不丢）与合并同源条目，别丢动作/条件/例外
 5. **同批证据内部冲突**：常见形态是「后者是对前者的分寸收窄」（如 1016「敬语用麻烦/烦请」被 1018「去 AI 味不等于口语化」收窄）——取更具体/更贴用户定调的一条为准，并在「版本间变更」里显式写「冲突裁定：X 与 Y 冲突，取 Y（理由）」，不要静默择一
-6. `submit` **必传 `origin="scheduled"`**（夜间来源标记，验证门 G1/G2 与空转阻尼仅对 scheduled 生效——**漏传等于绕过拦截**）：source_memory_ids=素材包全部在世证据 id；响应回 `supersedes`
-7. 受众画像走同一通道：`compile(work_type="aud-<受众>")` 取画像素材包（`aud-` 前缀即画像口径，**无需另传 `audience`**——help 未列该参数；夜间 spec 里带着 `audience:true`，实测省略同样正常返回，带着也无害）。画像**派生不消耗证据**（响应 `derived:true`、`evidence_marked_compiled:0`，对应偏好仍留在原类型队列里）；source_memory_ids 同样报齐素材包全部证据 id（多报/漏报/混入他受众 id 只警告不拦，次晚自愈）；audience_stale 为空则整体跳过
+6. `submit` **必传 `origin="scheduled"`**（夜间来源标记，验证门 G1/G2 与空转阻尼仅对 scheduled 生效——**漏传等于绕过拦截**）：source_memory_ids **直接复制 compile 响应的 `source_ids_suggested`**（v0.6 结构化给出，含缺正文 skipped 行，与对账集同源）；响应回 `supersedes`
+7. 受众画像走同一通道：`compile(work_type="aud-<受众>")` 取画像素材包（`aud-` 前缀即画像口径）。画像**派生不消耗证据**（响应 `derived:true`、`evidence_marked_compiled:0`，对应偏好仍留在原类型队列里）；source_memory_ids 复制画像 compile 响应的 `source_ids_suggested`（多报/漏报/混入他受众 id 只警告不拦，次晚自愈）；audience_stale 为空则整体跳过
 8. compile 响应带 `session_note`：编译会话**用完即弃**——汇总输出末尾提示"后续交付任务换新会话重新开始"（新会话 task_start 会自动注入新版）
 
 ## 验证门被拒处置（两支线同口径）

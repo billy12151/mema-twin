@@ -369,7 +369,9 @@ def _action_get(data: dict) -> dict:
         else:
             code = store.resolve_work_type_code(conn, wt)
             if not code:
-                return {"ok": False, "error": "invalid_input", "field": "work_type", "reason": "unknown code"}
+                return {"ok": False, "error": "invalid_input", "field": "work_type",
+                        "reason": "unknown code（先 twin(action=\"taxonomy\") 查码；"
+                                  "治理追加值见 pending 票据）"}
         if version is not None:
             rec = store.get_version(conn, code, version)
         else:
@@ -497,66 +499,134 @@ def _action_taxonomy(data: dict) -> dict:
     return {"ok": True, "kinds": kinds_out, "count_total": total}
 
 
+_PENDING_STATUSES = ("pending", "mapped", "canonicalized", "rejected")
+
+
 def _action_pending(data: dict) -> dict:
+    status = str(data.get("status") or "pending")
+    if status not in _PENDING_STATUSES:
+        # v0.6 A8-4：此前未知值静默返回 ok+空 items——归因误导（看起来「没有
+        # 票据」其实是「查错状态」）。打回列合法值。
+        return {"ok": False, "error": "invalid_input", "field": "status",
+                "reason": f"status 仅接受 {'|'.join(_PENDING_STATUSES)}，收到 {status!r}"}
     conn = db.connect()
     try:
-        status = str(data.get("status") or "pending")
         return {"ok": True, "status": status, "items": db.list_pending(conn, status)}
     finally:
         conn.close()
 
 
-def _action_resolve(data: dict) -> dict:
-    pid = data.get("pending_id")
-    decision = data.get("decision")
+def _resolve_ticket(conn, pid, decision, code, new_type,
+                    commit: bool = True) -> dict:
+    """单票校验+落库（v0.6 B4 从 _action_resolve 抽出，单条/批量共用）。
+    事务边界归调用方：commit=True 单条模式即时提交；commit=False 批量模式
+    外层统一 commit/rollback（db helper 的 commit 参数随之联动）。"""
     if pid is None or decision not in ("map", "canonicalize", "reject"):
         return {"ok": False, "error": "invalid_input",
                 "reason": "需要 pending_id 与 decision ∈ map|canonicalize|reject"}
-    conn = db.connect()
-    try:
-        row = conn.execute("SELECT * FROM twin_pending_values WHERE id=?", (pid,)).fetchone()
-        if not row:
-            return {"ok": False, "error": "not_found", "reason": f"pending id {pid}"}
-        if row["status"] != "pending":
-            # 对抗 review#7：已裁定的 pending 不得重复裁定（重复 map 会把同一别名挂到
-            # 第二个 canonical，归一结果由行序决定而非用户裁定）。多宿主并发同值
-            # 票据被先裁定时，后来者的正确动作是直接重试原写入（v0.3.8）
-            return {"ok": False, "error": "invalid_input",
-                    "reason": f"pending {pid} 已裁定为 {row['status']}（→{row['resolved_code']}），"
-                              "不可重复裁定——若他方已替你裁定，直接重试原写入即可"}
-        kind, raw = row["type_kind"], row["raw_value"]
-        if decision == "map":
-            code = str(data.get("code") or "").strip()
-            known = taxonomy.by_code(kind, code) or \
-                any(r["code"] == code for r in db.custom_types(conn, kind))
-            if not code or not known:
-                return {"ok": False, "error": "invalid_input", "field": "code",
-                        "reason": "map 需要已有 canonical code"}
-            db.append_alias(conn, kind, code, raw)
-            db.set_pending(conn, int(pid), "mapped", code)
-        elif decision == "canonicalize":
-            nt = data.get("new_type") or {}
-            if not isinstance(nt, dict):
-                return {"ok": False, "error": "invalid_input", "field": "new_type",
-                        "reason": "new_type 必须是对象 {code,zh,en,domain}"}
-            try:
-                db.add_canonical(conn, kind, str(nt.get("code") or ""),
-                                 str(nt.get("zh") or ""), str(nt.get("en") or ""),
-                                 str(nt.get("domain") or ""), [raw])
-            except ValueError as e:
-                return {"ok": False, "error": "invalid_input", "reason": str(e)}
-            code = str(nt.get("code") or "")
-            db.set_pending(conn, int(pid), "canonicalized", code)
-        else:
-            code = None
-            db.set_pending(conn, int(pid), "rejected", None)
-    finally:
-        conn.close()
+    row = conn.execute("SELECT * FROM twin_pending_values WHERE id=?", (pid,)).fetchone()
+    if not row:
+        return {"ok": False, "error": "not_found",
+                "reason": f"pending id {pid}"
+                          "（pending_id 见写入打回响应 fields.*.pending_id，"
+                          "或调 pending 动作查票据）"}
+    if row["status"] != "pending":
+        # 对抗 review#7：已裁定的 pending 不得重复裁定（重复 map 会把同一别名挂到
+        # 第二个 canonical，归一结果由行序决定而非用户裁定）。多宿主并发同值
+        # 票据被先裁定时，后来者的正确动作是直接重试原写入（v0.3.8）
+        return {"ok": False, "error": "invalid_input",
+                "reason": f"pending {pid} 已裁定为 {row['status']}（→{row['resolved_code']}），"
+                          "不可重复裁定——若他方已替你裁定，直接重试原写入即可"}
+    kind, raw = row["type_kind"], row["raw_value"]
+    if decision == "map":
+        code = str(code or "").strip()
+        known = taxonomy.by_code(kind, code) or \
+            any(r["code"] == code for r in db.custom_types(conn, kind))
+        if not code or not known:
+            return {"ok": False, "error": "invalid_input", "field": "code",
+                    "reason": "map 需要已有 canonical code（可用 code 见 taxonomy）"}
+        db.append_alias(conn, kind, code, raw, commit=commit)
+        db.set_pending(conn, int(pid), "mapped", code, commit=commit)
+    elif decision == "canonicalize":
+        nt = new_type or {}
+        if not isinstance(nt, dict):
+            return {"ok": False, "error": "invalid_input", "field": "new_type",
+                    "reason": "new_type 必须是对象 {code,zh,en,domain}"}
+        try:
+            db.add_canonical(conn, kind, str(nt.get("code") or ""),
+                             str(nt.get("zh") or ""), str(nt.get("en") or ""),
+                             str(nt.get("domain") or ""), [raw], commit=commit)
+        except ValueError as e:
+            return {"ok": False, "error": "invalid_input", "reason": str(e)}
+        code = str(nt.get("code") or "")
+        db.set_pending(conn, int(pid), "canonicalized", code, commit=commit)
+    else:
+        code = None
+        db.set_pending(conn, int(pid), "rejected", None, commit=commit)
     out: dict = {"ok": True, "pending_id": int(pid), "decision": decision}
+    if code is not None:
+        out["resolved_code"] = code
     if decision == "reject":
         out["note"] = ("已裁定不入体系。放弃本次写入，不得再拿原值重试"
                        "（票据会复活成新的裁定义务）")
     return out
+
+
+def _resolve_batch(tickets) -> dict:
+    """批量裁定（v0.6 B4）：单事务全落或全回滚——db helper 各自内部 commit，
+    逐票传 commit=False，任一失败显式 rollback（先前票的 alias/canonical
+    不得已落，测试钉）。错误带 failed_index（对齐 step_update 批量范式）。"""
+    if not isinstance(tickets, list) or not (1 <= len(tickets) <= 20):
+        return {"ok": False, "error": "invalid_input", "field": "tickets",
+                "reason": "tickets 需为 1..20 条的列表（每条 {pending_id, decision,"
+                          " code?|new_type?}）"}
+    conn = db.connect()
+    resolved: list[dict] = []
+    try:
+        for i, t in enumerate(tickets):
+            fail = {"failed_index": i}
+            if not isinstance(t, dict):
+                conn.rollback()
+                return {"ok": False, "error": "invalid_input", "field": "tickets",
+                        "reason": f"tickets[{i}] 必须是对象", **fail}
+            try:
+                r = _resolve_ticket(conn, t.get("pending_id"), t.get("decision"),
+                                    t.get("code"), t.get("new_type"), commit=False)
+            except ValueError as e:
+                conn.rollback()
+                return {"ok": False, "error": "invalid_input",
+                        "reason": str(e), **fail}
+            except sqlite3.Error as e:
+                # 并发窗口撞 UNIQUE（如 canonicalize 重复 code 竞态）等存储错误：
+                # 同样整笔回滚带 failed_index，不让批量半途异常逃成 internal_error
+                conn.rollback()
+                return {"ok": False, "error": "internal_error",
+                        "reason": str(e), **fail}
+            if not r.get("ok"):
+                conn.rollback()
+                r.update(fail)
+                return r
+            resolved.append(r)
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True, "resolved": resolved, "applied": len(resolved),
+            "guidance": "全部裁定完成，直接重试原写入即可"}
+
+
+def _action_resolve(data: dict) -> dict:
+    tickets = data.get("tickets")
+    if tickets is not None:
+        if "pending_id" in data or "decision" in data:
+            return {"ok": False, "error": "invalid_input",
+                    "reason": "tickets 批量与单条 pending_id/decision 互斥，二选一"}
+        return _resolve_batch(tickets)
+    conn = db.connect()
+    try:
+        return _resolve_ticket(conn, data.get("pending_id"), data.get("decision"),
+                               data.get("code"), data.get("new_type"), commit=True)
+    finally:
+        conn.close()
 
 
 def _action_void(data: dict) -> dict:
@@ -596,19 +666,90 @@ def _action_void(data: dict) -> dict:
     if out["already_void"]:
         out["note"] = "该证据已是作废状态，幂等无变更"
         return out
-    notes = ["作废不可逆（行保留、全链路排除；正文已在本库归档，需要可重写一条新偏好）。"]
+    # v0.6 B7：副作用从 note 长句拼接提为显式键（persona_stale/audience_stale），
+    # note 收敛单句——句内「；」+段间「；」双层拼接机器不可拆（评估 P2-3）。
+    # note 仍保留人读摘要；键为加法，旧宿主读 note 语义不破。
     wt = row["work_type"]
     if (row["compiled_version"] is not None and wt
             and store.classify_code(wt) == store.CODE_KIND_WORK_TYPE):
         _mark_persona_stale(wt, n)
         out["persona_stale"] = True
-        notes.append(f"{wt} 已标记 persona_stale：夜间任务将重编剔除该条款"
-                     "（成功落版即清标记）")
     if row["audience"]:
-        notes.append(f"受众 {row['audience']} 的画像计数已变化，audience_stale 将触发"
-                     "夜间重抽象（新画像不含该条款）")
-    out["note"] = "；".join(notes)
+        out["audience_stale"] = [row["audience"]]
+    out["note"] = ("作废完成（行保留、全链路排除，不可逆；正文已归档，需要可重写一条"
+                   "新偏好）")
     return out
+
+
+def _action_evidence(data: dict) -> dict:
+    """列偏好证据索引（v0.6 B3）：void 死胡同的自纠通道——此前 memory_id 未知
+    时 Agent 无任何列举手段（status 只有聚合）。只读、不回正文（content_chars
+    代替，控体积；全文走 console）。status/work_type 过滤，limit 默认 50 上限
+    200（超限打回附上限，不静默 clamp）。"""
+    status = data.get("status")
+    if status is not None and status not in ("uncompiled", "compiled", "void"):
+        return {"ok": False, "error": "invalid_input", "field": "status",
+                "reason": "status 仅接受 uncompiled|compiled|void，收到 "
+                          f"{status!r}"}
+    limit_raw = data.get("limit")
+    limit = 50
+    if limit_raw is not None:
+        if isinstance(limit_raw, bool) or not isinstance(limit_raw, (int, str)):
+            return {"ok": False, "error": "invalid_input", "field": "limit",
+                    "reason": f"invalid limit: {limit_raw!r}"}
+        try:
+            limit = int(limit_raw)
+        except ValueError:
+            return {"ok": False, "error": "invalid_input", "field": "limit",
+                    "reason": f"invalid limit: {limit_raw!r}"}
+        if limit < 1:
+            return {"ok": False, "error": "invalid_input", "field": "limit",
+                    "reason": f"limit 需 ≥1，收到 {limit}"}
+        if limit > 200:
+            return {"ok": False, "error": "invalid_input", "field": "limit",
+                    "reason": f"limit 上限 200，收到 {limit}"}
+    conn = db.connect()
+    try:
+        where, args = [], []
+        if status is not None:
+            where.append("status=?")
+            args.append(status)
+        wt = str(data.get("work_type") or "").strip()
+        if wt:
+            if wt.startswith(store.AUD_PREFIX):
+                # 受众伪类型证据行（work_type=aud-%）不过 work_type 码解析
+                #（resolve 只收 work_type 类），直接列匹配——受众证据也能按类型过滤
+                where.append("work_type=?")
+                args.append(wt)
+            else:
+                code = store.resolve_work_type_code(conn, wt)
+                if not code:
+                    return {"ok": False, "error": "invalid_input", "field": "work_type",
+                            "reason": "unknown code（先 twin(action=\"taxonomy\") 查码）"}
+                where.append("work_type=?")
+                args.append(code)
+        sql = ("SELECT memory_id, work_type, audience, purpose, subject, status,"
+               " created_at, length(content) AS content_chars FROM twin_evidence")
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY memory_id LIMIT ?"
+        args.append(limit)
+        rows = conn.execute(sql, args).fetchall()
+        # R2 对抗 R5：count 是 LIMIT 后行数，total 是过滤后总数——证据 >limit 时
+        # 宿主能看出被截断（total > count）
+        count_sql = "SELECT COUNT(*) AS c FROM twin_evidence"
+        if where:
+            count_sql += " WHERE " + " AND ".join(where)
+        total = int(conn.execute(count_sql, args[:-1]).fetchone()["c"])
+    finally:
+        conn.close()
+    items = []
+    for r in rows:
+        item = dict(r)
+        item["memory_id"] = int(item["memory_id"])
+        item["content_chars"] = int(item["content_chars"] or 0)
+        items.append(item)
+    return {"ok": True, "count": len(items), "total": total, "items": items}
 
 
 def _mark_persona_stale(code: str, memory_id: int) -> None:

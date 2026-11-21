@@ -11,34 +11,342 @@ v0.5.0 拆分（#1604）：mema notices 透传随 sink 数据面退役——偏�
 """
 from __future__ import annotations
 
+import difflib
 import json
 import sqlite3
 import time
+from typing import Annotated, Literal
 
 import anyio.to_thread
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, TextContent
+from pydantic import Field
 
 from . import audit, identity, playbook_actions, pref_actions, scan, sink, task_actions
 from . import templates, update_monitor
 from . import compile_actions, exec_actions
 from . import tenant
 
+
+def _action_help(data: dict) -> dict:
+    topic = str(data.get("topic") or "").strip()
+    if topic == scan.SCHEDULED_TASKS_TOPIC:
+        return {
+            "ok": True, "topic": scan.SCHEDULED_TASKS_TOPIC,
+            "description": "twin 定时任务 spec（单任务双支线：夜间执行经验评估 → 夜间 persona 编译）：Agent 据此在宿主平台创建等价任务。",
+            "agent_instruction": scan.AGENT_INSTRUCTION,
+            "setup": scan.SCHEDULED_TASKS_SPEC,
+            "note": "提醒自消失：夜间任务 7 天内跑过（task_evaluate origin=scheduled "
+                    "心跳）即不再提示。",
+        }
+    if topic:
+        entry = _HELP_ENTRIES.get(topic)
+        if entry is None:
+            return {"ok": False, "error": "invalid_input",
+                    "reason": f"unknown topic {topic!r}",
+                    "topics": sorted([*_HELP_ENTRIES, scan.SCHEDULED_TASKS_TOPIC])}
+        out = {"ok": True, "topic": topic, "help": entry}
+        if topic == "write":
+            # write 单查附沉淀规则文本（方案 A1：write 额外附 write_guidance，
+            # 单查也自足）
+            out["write_guidance"] = templates.WRITE_GUIDANCE
+        return out
+    return {
+        "ok": True,
+        "actions": dict(_HELP_ENTRIES),
+        "write_guidance": templates.WRITE_GUIDANCE,
+        "note": templates.STRONG_MODEL_NOTE,
+    }
+
+
+_HELP_ENTRIES: dict[str, str] = {
+    "write": "沉淀一条工作偏好（v0.5.0 起偏好本体自持本库，不经 mema）。"
+             "必填 content/work_type/audience/purpose"
+             "（先 taxonomy 查清单选码；清单无合适项的值会被整笔打回并附清单——"
+             "必须问用户：归一到已有值（resolve map）还是创建新值（resolve "
+             "canonicalize，即刻入清单），裁定后重试）；"
+             "改稿/返工现场沉淀时可传 task_id：缺省维度沿用该任务的三维度"
+             "（task_start 已归一；scope=audience 时不继承 work_type；显式传入优先，"
+             "响应 dims_inherited 列出继承项）；"
+             "可选 subject/tags/source_ref/client（多 Agent 共接时 client 填宿主标识，如 kimi/jinleai）。"
+             "对该受众的通用偏好（不限工作类型）传 scope=audience（此时 work_type 省略）。"
+             "上限：content ≤8000 字符，维度各 ≤200 字符。"
+             "同类型下内容完全相同的偏好命中词法去重：返回 ok+duplicate=true"
+             "（幂等成功），请勿重试也无需改写。",
+    "status": "查看各 work_type 的 prompt 版本概况（含体积/超预算标记）、受众画像"
+              "（audience_profiles）、需重抽象的受众（audience_stale）、条款作废待重编"
+              "（persona_stale）、pending 数量（归一门待裁票据）、未编译统计、夜间被拒计数"
+              "（nightly_rejected）、进行中任务计数、执行计划统计（plan_stats："
+              "任务/步骤各态/backfilled/open blocking 疑问/tool_usage/playbooks/"
+              "playbook_rejected/采纳率 submitted_with_plan÷tasks_submitted——"
+              "分母 0 无读数，历史 submitted 会稀释，看增量任务）"
+              "与调用审计统计（audit：总调用/失败/近 24h/top 动作，环形缓冲近 2 万条，"
+              "MEMA_TWIN_AUDIT=0 关闭）与定时任务安装提醒。",
+    "compile": "取编译素材包（旧版本 prompt 编译参考 + **全部在世证据**（全量投影，"
+               "每版从头重编，正文本地自取）+ 已作废条款清单 + 同受众画像参考 + 编译规则"
+               "（含义稳定表达自由/变更分级/硬预算）），"
+               "由当前会话模型编译；独立会话执行、收尾即弃（session_note）。参数 work_type；"
+               "传 aud-{受众} 取受众画像素材包（该受众全部证据）。"
+               "响应附 evidence_ids/source_ids_suggested/voided_ids 结构化数组"
+               "——submit 的 source_memory_ids 直接复制 source_ids_suggested"
+               "（在世全集，含缺正文 skipped 行），无需解析素材包正文。",
+    "submit": "提交编译产物落版本并写文件镜像。必填 work_type/prompt_md（≤100000 字符）；"
+              "建议带 source_memory_ids（从 compile 响应 evidence_ids 复制）与 model。"
+              "返回 supersedes（被取代的旧 active 版本）；"
+              "夜间定时任务落版必传 origin=scheduled（其余场景不要传），落版前过验证门"
+              "（素材回声/分区标题未过拒绝且 active 不变、证据不动；无新证据可吸收时空转阻尼"
+              "拒绝落版——两者都会在 status 的 nightly_rejected 累计显示）；交互式 submit "
+              "只警告不拦；证据未全覆盖只出警告；work_type 传 aud-{受众} 即受众画像落版"
+              "（derived，不消耗证据）。",
+    "rollback": "回滚 persona 版本（零阻力：无确认、无警告）。work_type 必填；"
+                "version 省略回上一版本、传 n 回指定版本；不删历史（retired 可再激活），"
+                "版本号不回收（下次 submit 继续 MAX+1）。已是 active 版本时返回 "
+                "already_active=true（幂等 no-op，非错误）。",
+    "get": "取某 work_type 的 persona prompt（DB 优先，文件镜像降级）。参数 work_type；"
+           "可选 version 取指定历史版本全文（不带未编译增补）；"
+           "work_type 传 aud-{受众} 可读受众画像（不带增补）。"
+           "读 active 时响应附 persona_supplement（未编译增补，与 prompt 冲突"
+           "以增补为准；软失败不阻断全文）——上下文被压缩/跨会话取回分身时用它。",
+    "taxonomy": "列枚举清单（动态：含治理追加别名与自建 canonical）。参数 kind ∈ "
+                "work_type|audience|purpose，或数组一次取多类、'all' 取全部"
+                "（判别式=响应有无 kinds 键；多类形状顶层 count_total，条目附 "
+                "kind 字段；数组传单元素也走多类形状）。compact 仅接受布尔 true"
+                "（精简投影 code/zh/aliases 前 5——省 token 拉取用；传 \"true\"/1 "
+                "等非布尔会被打回；完整别名面只在非 compact 响应里）。",
+    "pending": "列归一门待裁票据（打回的长尾值，含打回次数）。参数 status ∈ "
+               "pending|mapped|canonicalized|rejected（默认 pending）。",
+    "resolve": "治理待裁值。单条：pending_id + decision ∈ map(带 code)|canonicalize"
+               "(带 new_type{code,zh,en,domain})|reject"
+               "（reject=不入体系并放弃本次写入，不得拿原值重试）。"
+               "批量（v0.6）：tickets=[{pending_id, decision, code?|new_type?}]"
+               "（1..20 条，与单条 pending_id 互斥；单事务任一条失败整笔回滚带 "
+               "failed_index）；裁定后直接重试原写入。",
+    "void": "作废一条偏好证据（冲突裁定「新替旧/撤销新写的」的执行机制）。参数 memory_id；"
+            "行级作废、全链路排除、不可逆（正文在本库归档保留）；曾入编译的证据会"
+            "触发 persona_stale 夜间重编（响应 persona_stale=true 显式标记），受众证据"
+            "计数变化触发画像重抽象（响应 audience_stale 列出受众）。"
+            "memory_id 未知先调 evidence 动作列索引。",
+    "evidence": "列偏好证据索引（只读，定位 memory_id 用；不回正文全文，正文走 console）。"
+                "可选 status ∈ uncompiled|compiled|void（缺省全部）、work_type"
+                "（canonical code）、limit（默认 50，上限 200）。响应 items 含 "
+                "memory_id/work_type/audience/purpose/subject/status/created_at/"
+                "content_chars。",
+    "task_start": "开工建档（流程注入点）。必填 brief/work_type（audience/purpose 可选，"
+                  "但给了值必须在清单内——未命中整笔打回，须问用户裁定后重试）；"
+                  "上限：brief ≤2000 字符；available_tools ≤50 项、每项 ≤100 字符。"
+                  "返回该工作性质的 persona prompt 与前置清单，进行中任务自动让位。"
+                  "该工种尚无专属 persona 时注入同域 fallback（#956 拍板）：同域"
+                  "最成熟工种（活证据最多）persona 全文垫底 + 其余同域候选摘要 +"
+                  " 降级声明（格式结构可参考、有权威来源以权威为准、内容业务规则"
+                  "不适用），专属落版自动退出。"
+                  "可选 have_persona_version：同一会话此前注入过同 work_type 且版本号仍在场时申报，"
+                  "版本未变则不再重复注入全文，变了则重注入并附变更说明。"
+                  "响应另带 persona_supplement：该 work_type 未编译偏好增补"
+                  "（与 prompt 冲突以增补为准；上限 10 条）。"
+                  "client 字段同 write（http 共接时头已带则无需传）。",
+    "task_submit": "提交交付稿并收口（submit 即终点，v0.3.8 无评审环）：落盘"
+                   "deliverables/task-N.md 审计文件。必填 task_id/deliverable_md；"
+                   "可带 todos/session/note；可带 steps（v0.4.7，同 step_update "
+                   "批量结构且须属本任务）：先补打卡再收口一次往返——steps 已落库"
+                   "后被拒时响应带 steps_applied，修正后直接重试，无需重新打卡。"
+                   "交付后用户反馈走 twin.write 沉淀。",
+    "task_resume": "续作进行中任务（仅 planning，可中断可继续）。task_id；恢复 todos、"
+                   "新建 planning 任务并再注入 persona"
+                   "（含未编译增补 persona_supplement 与无专属 persona 时的"
+                   " 同域 fallback，同 task_start）。"
+                   "可选 available_tools 覆盖建档自报值（playbook 工具面板比对用）。"
+                   "have_persona_version 申报口径同 task_start；"
+                   "已交付（submitted）的返工走 task_revise。",
+    "task_revise": "已交付任务修订返工（仅 submitted）。task_id + brief/deliverable_md/"
+                   "revision_reason 至少其一；子任务回 planning 重走执行并记 lineage"
+                   "（不恢复 todos；v0.4.8 起 persona/未编译增补/受众画像/playbook"
+                   " 按 task_resume 同款注入）。可选 available_tools 覆盖沿用值。"
+                   "have_persona_version 仅当同一会话"
+                   "上文已注入该版本全文时才申报——从任务行抄号申报会短路掉全文注入"
+                   "（跨会话返工不传即自动全文重注入）。"
+                   "修订反馈中的可复用偏好走 twin.write 沉淀。",
+    "task_close": "显式关闭进行中任务（仅 planning），历史保留可审计。"
+                  "可选 outcome ∈ failed|superseded（缺省 superseded）——"
+                  "失败要显式标 failed，否则结果列与未完成任务无法区分；"
+                  "可选 reason 记录关闭缘由；"
+                  "关闭时未闭环步骤自动按 closed 跳过。",
+    "task_recent": "最近任务列表。参数 limit（默认 10）。",
+    "task_get": "取单个任务全量。task_id。",
+    "todo": "会话 todo 读写（plan-mode 同款语义：整体替换，至多一条 in_progress）。传 todos 替换，不传读取。",
+    "plan_set": "建执行计划（开工第一件事；凡建档任务默认走计划，拿不准时建）。"
+                "必填 steps（[{title, description?, depends_on?}]，"
+                "task_id 可省略：全局恰一个 planning 任务时自动回退"
+                "（响应 task_id_resolved 与 resolved_brief 回显被解析任务，供核对），"
+                "0 个或多个 planning 任务时打回并附清单；"
+                "depends_on 引用 1-based 序号，不许自引用/成环）；"
+                "可选 open_questions（[{question, step_ids?, blocking?}]，"
+                "blocking 缺省 false）——没把握、确认不了的点列在这里，要紧的"
+                "标 blocking，先与用户澄清，答复经 plan_revise(answers=…) 写回。"
+                "可选 start_first=true（v0.6，严格布尔）：计划落库即把无依赖且未被 "
+                "open blocking 疑问锚定的首步标 in_progress（省一次 step_update "
+                "往返）；全部首步被锚定时响应 start_first_skipped=true 说明原因。"
+                "响应即可开工，无审批门。重复调用=重建计划（旧未完结步骤按 "
+                "replanned 跳过，done 历史保留）。",
+    "step_update": "步骤打卡。单条：step_id/status（六态：pending/in_progress/done/"
+                   "failed/blocked/skipped）；skipped/blocked 必填 reason；"
+                   "failed 必填 reflection（服务端硬门，≤2000 字符）；"
+                   "pending 直跳 done/failed"
+                   " 自动标 backfilled（追认合法）。三门：blocking 疑问未解答、"
+                   "依赖未闭环、已有单一 in_progress 时推进会被拒（报错附具体清单"
+                   "与下一步做法）。"
+                   "同状态重复打卡幂等（in_progress→in_progress 等恒等迁移返回 "
+                   "ok + no_op 与继续执行指引，不报错不改库）。"
+                   "某步骤 in_progress 超时无推进时，其他 ok 响应会附出口指引"
+                   "（advisory：failed+reflection / plan_revise / task_close 三选一，"
+                   "阈值 MEMA_TWIN_STALL_MINUTES 分钟，默认 30；提示冷却为固定 "
+                   "30 分钟独立常量、不随阈值走；step_update 只传 "
+                   "step_id 时按 step_id 反查任务，同样送达）。"
+                   "批量（v0.4.7）：steps=[{step_id,status,reason?,reflection?}]"
+                   "（1..50 条）+ 顶层 task_id 必填（批内跨任务拒；单事务，"
+                   "任一条被拒整笔回滚，错误带 failed_index；applied=实际变更数、"
+                   "noop=幂等数分列）——与顶层 step_id/status/reason/reflection "
+                   "互斥。",
+    "plan_revise": "修订计划（仅 planning 且已建计划）。steps_add / "
+                   "steps_update（可改 title/description/depends_on/status，"
+                   "状态迁移同 step_update 规则）/ steps_remove（仅未开工且未被"
+                   "依赖可删，报错一次列全全部依赖方）/ answers（[{question_id, "
+                   "answer}] 写回 owner 答复并解锁 blocking 步骤）/ "
+                   "revision_reason 至少其一。",
+    "tool_log": "批量记录工具使用（只记失败/重试/降级与首次成功的非常规路径，"
+                "常规重复成功不记）。entries 1..50 条：[{tool ≤100 字符, purpose "
+                "≤500, outcome: success|fail|degraded, note? ≤500, "
+                "skill_digest? ≤500}]；可选 task_id。",
+    "task_evaluate": "取执行经验评估素材包（playbook 编译入口，夜间任务或手动"
+                     "触发）。可选 task_ids 显式指定（补评估），或 limit（默认 "
+                     "10，实际 clamp 1..10，水位之后的未评估收口任务）；响应 "
+                     "watermark_moved_to。夜间任务必传 origin=scheduled（心跳"
+                     "依赖它，定时任务安装提醒靠它自消失）。"
+                     "按素材包编译出 content_md 后 playbook_submit；无新经验不提交。",
+    "playbook_submit": "提交 playbook 落版。必填 key（work_type code 或 "
+                       "'global'；禁 pb-/aud- 保留前缀）/content_md/"
+                       "source_task_ids（溯源任务 id，防幻觉路径）；可选 model（编译"
+                       "模型标识，落库审计）；夜间任务 "
+                       "origin=scheduled（过验证门：溯源校验/回声/标题/空转阻尼），"
+                       "交互式违规只警告。文件镜像 playbooks/<key>/。",
+    "playbook_rollback": "回滚 playbook 版本（零阻力，同 rollback 语义）。key 必填；"
+                         "version 省略回上一版。已是 active 时响应 already_active="
+                         "true（幂等 no-op）。",
+    "help": "本帮助。全量模式（无参数）返回全部动作手册 + write_guidance；"
+            "topic=<action 名> 单查一条（省上下文，如 data={\"topic\":\"write\"}）；"
+            "topic=scheduled_tasks 取定时任务 spec。",
+}
+
+_ACTIONS = {
+    "write": pref_actions._action_write,
+    "status": pref_actions._action_status,
+    "compile": compile_actions._action_compile,
+    "submit": compile_actions._action_submit,
+    "rollback": compile_actions._action_rollback,
+    "get": pref_actions._action_get,
+    "taxonomy": pref_actions._action_taxonomy,
+    "pending": pref_actions._action_pending,
+    "resolve": pref_actions._action_resolve,
+    "void": pref_actions._action_void,
+    "evidence": pref_actions._action_evidence,
+    "task_start": task_actions._action_task_start,
+    "task_submit": task_actions._action_task_submit,
+    "task_resume": task_actions._action_task_resume,
+    "task_revise": task_actions._action_task_revise,
+    "task_close": task_actions._action_task_close,
+    "task_recent": task_actions._action_task_recent,
+    "task_get": task_actions._action_task_get,
+    "todo": task_actions._action_todo,
+    "plan_set": exec_actions._action_plan_set,
+    "step_update": exec_actions._action_step_update,
+    "plan_revise": exec_actions._action_plan_revise,
+    "tool_log": exec_actions._action_tool_log,
+    "task_evaluate": playbook_actions._action_task_evaluate,
+    "playbook_submit": playbook_actions._action_playbook_submit,
+    "playbook_rollback": playbook_actions._action_playbook_rollback,
+    "help": _action_help,
+}
+
+# B8（v0.6）：逐动作 data 白名单——顶层未知键一律打回（拼写错键静默忽略会把
+# required 错误归因误导，宿主无法自纠）。清点口径：handler 实际读取的全部键，
+# 含 data[kind] 循环取的 audience/purpose 与各处易漏键（session/interpreted_intent/
+# available_tools/task_submit.brief 等）；通用 client（stdio 形态身份，全动作可用，
+# http 头权威时仅作回退）。与 _ACTIONS 不同步即启动失败（fail-fast，防漏表动作
+# 被全量打回的事故形态）。
+_ACTION_KEYS: dict[str, frozenset[str]] = {
+    "write": frozenset({"content", "work_type", "audience", "purpose", "scope",
+                        "subject", "tags", "source_ref", "task_id", "client"}),
+    "status": frozenset({"client"}),
+    "compile": frozenset({"work_type", "client"}),
+    "submit": frozenset({"work_type", "prompt_md", "source_memory_ids", "model",
+                         "origin", "client"}),
+    "rollback": frozenset({"work_type", "version", "client"}),
+    "get": frozenset({"work_type", "version", "client"}),
+    "taxonomy": frozenset({"kind", "compact", "client"}),
+    "pending": frozenset({"status", "client"}),
+    "resolve": frozenset({"pending_id", "decision", "code", "new_type",
+                          "tickets", "client"}),
+    "void": frozenset({"memory_id", "client"}),
+    "evidence": frozenset({"status", "work_type", "limit", "client"}),
+    "task_start": frozenset({"brief", "work_type", "audience", "purpose",
+                             "available_tools", "have_persona_version",
+                             "interpreted_intent", "session", "client"}),
+    "task_submit": frozenset({"task_id", "deliverable_md", "todos", "session",
+                              "note", "steps", "brief", "client"}),
+    "task_resume": frozenset({"task_id", "todos", "session",
+                              "have_persona_version", "available_tools",
+                              "client"}),
+    "task_revise": frozenset({"task_id", "brief", "deliverable_md",
+                              "revision_reason", "session",
+                              "have_persona_version", "available_tools",
+                              "client"}),
+    "task_close": frozenset({"task_id", "outcome", "reason", "client"}),
+    "task_recent": frozenset({"limit", "client"}),
+    "task_get": frozenset({"task_id", "client"}),
+    "todo": frozenset({"todos", "session", "client"}),
+    "plan_set": frozenset({"task_id", "steps", "open_questions", "start_first",
+                           "client"}),
+    "step_update": frozenset({"step_id", "status", "reason", "reflection",
+                              "task_id", "steps", "client"}),
+    "plan_revise": frozenset({"task_id", "steps_add", "steps_update",
+                              "steps_remove", "answers", "revision_reason",
+                              "client"}),
+    "tool_log": frozenset({"entries", "task_id", "client"}),
+    "task_evaluate": frozenset({"task_ids", "limit", "origin", "client"}),
+    "playbook_submit": frozenset({"key", "content_md", "source_task_ids",
+                                  "model", "origin", "client"}),
+    "playbook_rollback": frozenset({"key", "version", "client"}),
+    "help": frozenset({"topic", "client"}),
+}
+
+if set(_ACTION_KEYS) != set(_ACTIONS):
+    raise RuntimeError(
+        "_ACTION_KEYS 与 _ACTIONS 不同步（漏表动作会被 B8 全量打回）: "
+        f"missing={sorted(set(_ACTIONS) - set(_ACTION_KEYS))} "
+        f"extra={sorted(set(_ACTION_KEYS) - set(_ACTIONS))}")
+
 mcp = FastMCP("mema-twin", stateless_http=True)  # http 模式免 initialize 直调（mema 同款）
 
 
 @mcp.tool()
-async def twin(action: str, data: dict | None = None) -> CallToolResult:
+async def twin(
+    action: Literal[*tuple(_ACTIONS)],
+    data: Annotated[dict | None, Field(
+        description="动作参数包；各 action 的参数名/必填/上限见 "
+                    "twin(action=\"help\", data={\"topic\":\"<action>\"}) 单查；"
+                    "顶层未知键会被打回")] = None,
+) -> CallToolResult:
     """个人分身 twin：按工作性质沉淀用户工作偏好，编译版本化 persona prompt，
     经交付任务流注入执行，并提供定时任务建议。
 
     动作：write / get / compile / submit / rollback / status / taxonomy / pending /
-    resolve / void / task_start / task_submit / task_resume / task_revise /
-    task_close / task_recent / task_get / todo / plan_set / step_update /
-    plan_revise / tool_log / task_evaluate / playbook_submit / playbook_rollback /
-    help。
-    先 twin(action="help") 查看各动作参数与引导。compile 返回素材包，由当前会话模型
-    编译（建议在强模型会话中执行），submit 提交回库落版本并写文件镜像。
+    resolve / void / evidence / task_start / task_submit / task_resume /
+    task_revise / task_close / task_recent / task_get / todo / plan_set /
+    step_update / plan_revise / tool_log / task_evaluate / playbook_submit /
+    playbook_rollback / help。
+    先 twin(action="help") 查看全部动作手册；twin(action="help",
+    data={"topic":"<action>"}) 单查一条省上下文。compile 返回素材包（响应附
+    evidence_ids 供 submit 复制），由当前会话模型编译（建议在强模型会话中执行），
+    submit 提交回库落版本并写文件镜像。data 顶层未知键会被打回（附 did_you_mean）。
     """
     # sync 实现体放线程池（评审轮2 P2-4）：FastMCP 对 sync 工具直接在事件循环上
     # 调用，而 compile 全量投影后逐条 read（最坏 30s/条）会独占循环、拖挂其他宿主
@@ -86,14 +394,23 @@ def _attach_twin_notices(result) -> None:
 
 
 def _twin_impl(action: str, data: dict | None = None) -> dict:
-    data = data or {}
     handler = _ACTIONS.get(action)
     if handler is None:
-        audit.record(action, False, "unknown_action", 0, data, None)
+        audit.record(action, False, "unknown_action", 0,
+                     data if isinstance(data, dict) else {}, None)
         return {"ok": False, "error": "invalid_input",
                 "reason": f"unknown action {action!r}", "actions": sorted(_ACTIONS)}
     started = time.perf_counter()
     try:
+        # data 归一（v0.6 B8）：None → 空参；非 dict 垃圾（0/""/[]/str…）结构化
+        # 打回（MCP 传输面由 arg_model 先拒为 ToolError，此分支达 console 直调与
+        # 测试）。归一必须在 identity 之前——effective_client(data) 要读 data。
+        if data is None:
+            data = {}
+        elif not isinstance(data, dict):
+            return _audited(action, "invalid_input",
+                            f"data 必须是 JSON object（收到 {type(data).__name__}）",
+                            started, data)
         # 入口统一注入请求头身份并校验宿主身份：脏/重复头、脏或不一致 data.client
         # 无论动作立即打回（fail-fast，也避免 handler 先落票据再炸留幽灵行）
         identity.set_client_header(_request_client())
@@ -116,6 +433,23 @@ def _twin_impl(action: str, data: dict | None = None) -> dict:
                 return _audited(action, "tenant_unavailable", str(e), started, data)
             except sink.SinkError as e:
                 return _audited(action, "gateway_unreachable", str(e), started, data)
+        unknown = sorted(set(data) - _ACTION_KEYS[action])
+        if unknown:
+            # difflib 近邻提示（ratio≥0.6）；无命中置 null（显式「没有像样的
+            # 近邻」，与命中区分——测试钉）
+            did_you_mean = {
+                k: (m[0] if (m := difflib.get_close_matches(
+                    k, sorted(_ACTION_KEYS[action]), n=1, cutoff=0.6)) else None)
+                for k in unknown
+            }
+            return _audited(
+                action, "invalid_input",
+                f"unknown field(s): {', '.join(unknown)}"
+                f"（动作 {action} 的合法参数见 allowed；参数结构 "
+                f"help(topic={action}) 单查）",
+                started, data,
+                extra={"field": "data", "allowed": sorted(_ACTION_KEYS[action]),
+                       "did_you_mean": did_you_mean})
         result = handler(data)
         _attach_twin_notices(result)
         _attach_stall_guidance(result, data)
@@ -128,9 +462,14 @@ def _twin_impl(action: str, data: dict | None = None) -> dict:
         return _audited(action, "tenant_unavailable", str(e), started, data)
     except ValueError as e:
         return _audited(action, "invalid_input", str(e), started, data)
-    except (TypeError, AttributeError, KeyError, OverflowError,
-            sqlite3.Error, OSError) as e:
-        # 兜底边界（review#2）：畸形参数/存储异常绝不击穿 MCP 工具面
+    except (TypeError, AttributeError, KeyError, OverflowError) as e:
+        # 兜底边界（review#2）：畸形参数绝不击穿 MCP 工具面。参数类异常附
+        # 自纠指路（v0.6 A5）；存储类异常（下方）不挂——database is locked
+        # 不是「参数结构不合规」，挂了会误导分诊。
+        return _audited(action, "internal_error",
+                        f"{type(e).__name__}: {e}（参数结构可能不合规，"
+                        f"help(topic={action}) 核对）", started, data)
+    except (sqlite3.Error, OSError) as e:
         return _audited(action, "internal_error",
                         f"{type(e).__name__}: {e}", started, data)
 
@@ -165,8 +504,9 @@ def _error_of(result) -> str | None:
 
 
 def _audited(action: str, error: str, reason: str,
-             started: float, data: dict) -> dict:
+             started: float, data: dict, extra: dict | None = None) -> dict:
     """错误分支统一记账+返回（reason 完整返回给调用方，审计里只存 error 码）。
+    extra：附加结构化键（v0.6 B8 的 allowed/did_you_mean 等），不进审计。
     记账包 try：审计异常绝不把已定型的错误响应升级成 internal_error
     （audit.record 自身已吞异常，这里是双保险——测试会 patch 掉它）。"""
     try:
@@ -174,7 +514,10 @@ def _audited(action: str, error: str, reason: str,
                      _audit_client(data))
     except Exception:  # noqa: BLE001 —— 观测旁路，不击穿工具响应
         pass
-    return {"ok": False, "error": error, "reason": reason}
+    resp = {"ok": False, "error": error, "reason": reason}
+    if extra:
+        resp.update(extra)
+    return resp
 
 
 def _elapsed_ms(started: float) -> int:
@@ -293,195 +636,6 @@ def _request_auth_token() -> str | None:
     if any(ord(ch) < 0x20 or ch == "\x7f" for ch in text):
         raise ValueError("Authorization 头非法（含控制字符）")
     return _normalize_auth_header(text)
-
-
-def _action_help(data: dict) -> dict:
-    topic = str(data.get("topic") or "").strip()
-    if topic == scan.SCHEDULED_TASKS_TOPIC:
-        return {
-            "ok": True, "topic": scan.SCHEDULED_TASKS_TOPIC,
-            "description": "twin 定时任务 spec（单任务双支线：夜间执行经验评估 → 夜间 persona 编译）：Agent 据此在宿主平台创建等价任务。",
-            "agent_instruction": scan.AGENT_INSTRUCTION,
-            "setup": scan.SCHEDULED_TASKS_SPEC,
-            "note": "提醒自消失：夜间任务 7 天内跑过（task_evaluate origin=scheduled "
-                    "心跳）即不再提示。",
-        }
-    return {
-        "ok": True,
-        "actions": {
-            "write": "沉淀一条工作偏好（v0.5.0 起偏好本体自持本库，不经 mema）。"
-                     "必填 content/work_type/audience/purpose"
-                     "（先 taxonomy 查清单选码；清单无合适项的值会被整笔打回并附清单——"
-                     "必须问用户：归一到已有值（resolve map）还是创建新值（resolve "
-                     "canonicalize，即刻入清单），裁定后重试）；"
-                     "改稿/返工现场沉淀时可传 task_id：缺省维度沿用该任务的三维度"
-                     "（task_start 已归一；scope=audience 时不继承 work_type；显式传入优先，"
-                     "响应 dims_inherited 列出继承项）；"
-                     "可选 subject/tags/source_ref/client（多 Agent 共接时 client 填宿主标识，如 kimi/jinleai）。"
-                     "对该受众的通用偏好（不限工作类型）传 scope=audience（此时 work_type 省略）。"
-                     "同类型下内容完全相同的偏好命中词法去重：返回 ok+duplicate=true"
-                     "（幂等成功），请勿重试也无需改写。",
-            "status": "查看各 work_type 的 prompt 版本概况（含体积/超预算标记）、受众画像"
-                      "（audience_profiles）、需重抽象的受众（audience_stale）、条款作废待重编"
-                      "（persona_stale）、pending 数量（归一门待裁票据）、未编译统计、夜间被拒计数"
-                      "（nightly_rejected）、进行中任务计数、执行计划统计（plan_stats："
-                      "任务/步骤各态/backfilled/open blocking 疑问/tool_usage/playbooks/"
-                      "playbook_rejected/采纳率 submitted_with_plan÷tasks_submitted——"
-                      "分母 0 无读数，历史 submitted 会稀释，看增量任务）"
-                      "与调用审计统计（audit：总调用/失败/近 24h/top 动作，环形缓冲近 2 万条，"
-                      "MEMA_TWIN_AUDIT=0 关闭）与定时任务安装提醒。",
-            "compile": "取编译素材包（旧版本 prompt 编译参考 + **全部在世证据**（全量投影，"
-                       "每版从头重编，正文本地自取）+ 已作废条款清单 + 同受众画像参考 + 编译规则"
-                       "（含义稳定表达自由/变更分级/硬预算）），"
-                       "由当前会话模型编译；独立会话执行、收尾即弃（session_note）。参数 work_type；"
-                       "传 aud-{受众} 取受众画像素材包（该受众全部证据）。",
-            "submit": "提交编译产物落版本并写文件镜像。必填 work_type/prompt_md；"
-                      "建议带 source_memory_ids 与 model。返回 supersedes（被取代的旧 active 版本）；"
-                      "夜间定时任务落版必传 origin=scheduled（其余场景不要传），落版前过验证门"
-                      "（素材回声/分区标题未过拒绝且 active 不变、证据不动；无新证据可吸收时空转阻尼"
-                      "拒绝落版——两者都会在 status 的 nightly_rejected 累计显示）；交互式 submit "
-                      "只警告不拦；证据未全覆盖只出警告；work_type 传 aud-{受众} 即受众画像落版"
-                      "（derived，不消耗证据）。",
-            "rollback": "回滚 persona 版本（零阻力：无确认、无警告）。work_type 必填；"
-                        "version 省略回上一版本、传 n 回指定版本；不删历史（retired 可再激活），"
-                        "版本号不回收（下次 submit 继续 MAX+1）。",
-            "get": "取某 work_type 的 persona prompt（DB 优先，文件镜像降级）。参数 work_type；"
-                   "可选 version 取指定历史版本全文（不带未编译增补）；"
-                   "work_type 传 aud-{受众} 可读受众画像（不带增补）。"
-                   "读 active 时响应附 persona_supplement（未编译增补，与 prompt 冲突"
-                   "以增补为准；软失败不阻断全文）——上下文被压缩/跨会话取回分身时用它。",
-            "taxonomy": "列枚举清单（动态：含治理追加别名与自建 canonical）。参数 kind ∈ "
-                        "work_type|audience|purpose，或数组一次取多类、'all' 取全部"
-                        "（判别式=响应有无 kinds 键；多类形状顶层 count_total，条目附 "
-                        "kind 字段；数组传单元素也走多类形状）。compact=true 精简投影"
-                        "（code/zh/aliases 前 5——省 token 拉取用；选码/归一请用完整版，"
-                        "完整别名面只在非 compact 响应里）。",
-            "pending": "列归一门待裁票据（打回的长尾值，含打回次数）。参数 status（默认 pending）。",
-            "resolve": "治理待裁值。pending_id + decision ∈ map(带 code)|canonicalize(带 new_type{code,zh,en,domain})|reject"
-                       "（reject=不入体系并放弃本次写入，不得拿原值重试）。",
-            "void": "作废一条偏好证据（冲突裁定「新替旧/撤销新写的」的执行机制）。参数 memory_id；"
-                    "行级作废、全链路排除、不可逆（正文在本库归档保留）；曾入编译的证据会"
-                    "触发 persona_stale 夜间重编，受众证据计数变化触发画像重抽象。",
-            "task_start": "开工建档（流程注入点）。必填 brief/work_type（audience/purpose 可选，"
-                          "但给了值必须在清单内——未命中整笔打回，须问用户裁定后重试）；"
-                          "返回该工作性质的 persona prompt 与前置清单，进行中任务自动让位。"
-                          "该工种尚无专属 persona 时注入同域 fallback（#956 拍板）：同域"
-                          "最成熟工种（活证据最多）persona 全文垫底 + 其余同域候选摘要 +"
-                          " 降级声明（格式结构可参考、有权威来源以权威为准、内容业务规则"
-                          "不适用），专属落版自动退出。"
-                          "可选 have_persona_version：同一会话此前注入过同 work_type 且版本号仍在场时申报，"
-                          "版本未变则不再重复注入全文，变了则重注入并附变更说明。"
-                          "响应另带 persona_supplement：该 work_type 未编译偏好增补"
-                          "（与 prompt 冲突以增补为准；上限 10 条）。"
-                          "client 字段同 write（http 共接时头已带则无需传）。",
-            "task_submit": "提交交付稿并收口（submit 即终点，v0.3.8 无评审环）：落盘"
-                           "deliverables/task-N.md 审计文件。必填 task_id/deliverable_md；"
-                           "可带 todos/session/note；可带 steps（v0.4.7，同 step_update "
-                           "批量结构且须属本任务）：先补打卡再收口一次往返——steps 已落库"
-                           "后被拒时响应带 steps_applied，修正后直接重试，无需重新打卡。"
-                           "交付后用户反馈走 twin.write 沉淀。",
-            "task_resume": "续作进行中任务（仅 planning，可中断可继续）。task_id；恢复 todos、"
-                           "新建 planning 任务并再注入 persona"
-                           "（含未编译增补 persona_supplement 与无专属 persona 时的"
-                           " 同域 fallback，同 task_start）。"
-                           "have_persona_version 申报口径同 task_start；"
-                           "已交付（submitted）的返工走 task_revise。",
-            "task_revise": "已交付任务修订返工（仅 submitted）。task_id + brief/deliverable_md/"
-                           "revision_reason 至少其一；子任务回 planning 重走执行并记 lineage"
-                           "（不恢复 todos；v0.4.8 起 persona/未编译增补/受众画像/playbook"
-                           " 按 task_resume 同款注入）。have_persona_version 仅当同一会话"
-                           "上文已注入该版本全文时才申报——从任务行抄号申报会短路掉全文注入"
-                           "（跨会话返工不传即自动全文重注入）。"
-                           "修订反馈中的可复用偏好走 twin.write 沉淀。",
-            "task_close": "显式关闭进行中任务（仅 planning），历史保留可审计。"
-                          "可选 outcome ∈ failed|superseded（缺省 superseded）——"
-                          "失败要显式标 failed，否则结果列与未完成任务无法区分；"
-                          "关闭时未闭环步骤自动按 closed 跳过。",
-            "task_recent": "最近任务列表。参数 limit（默认 10）。",
-            "task_get": "取单个任务全量。task_id。",
-            "todo": "会话 todo 读写（plan-mode 同款语义：整体替换，至多一条 in_progress）。传 todos 替换，不传读取。",
-            "plan_set": "建执行计划（开工第一件事；凡建档任务默认走计划，拿不准时建）。"
-                        "必填 steps（[{title, description?, depends_on?}]，"
-                        "task_id 可省略：全局恰一个 planning 任务时自动回退"
-                        "（响应 task_id_resolved 与 resolved_brief 回显被解析任务，供核对），"
-                        "0 个或多个 planning 任务时打回并附清单；"
-                        "depends_on 引用 1-based 序号，不许自引用/成环）；"
-                        "可选 open_questions（[{question, step_ids?, blocking?}]，"
-                        "blocking 缺省 false）——没把握、确认不了的点列在这里，要紧的"
-                        "标 blocking，先与用户澄清，答复经 plan_revise(answers=…) 写回。"
-                        "响应即可开工，无审批门。重复调用=重建计划（旧未完结步骤按 "
-                        "replanned 跳过，done 历史保留）。",
-            "step_update": "步骤打卡。单条：step_id/status（六态：pending/in_progress/done/"
-                           "failed/blocked/skipped）；skipped/blocked 必填 reason；"
-                           "failed 必填 reflection（服务端硬门）；pending 直跳 done/failed"
-                           " 自动标 backfilled（追认合法）。三门：blocking 疑问未解答、"
-                           "依赖未闭环、已有单一 in_progress 时推进会被拒。"
-                           "同状态重复打卡幂等（in_progress→in_progress 等恒等迁移返回 "
-                           "ok + no_op 与继续执行指引，不报错不改库）。"
-                           "某步骤 in_progress 超时无推进时，其他 ok 响应会附出口指引"
-                           "（advisory：failed+reflection / plan_revise / task_close 三选一，"
-                           "阈值 MEMA_TWIN_STALL_MINUTES 分钟，默认 30；step_update 只传 "
-                           "step_id 时按 step_id 反查任务，同样送达；同一步骤 30 分钟内"
-                           "只提示一次）。"
-                           "批量（v0.4.7）：steps=[{step_id,status,reason?,reflection?}]"
-                           "（1..50 条）+ 顶层 task_id 必填（批内跨任务拒；单事务，"
-                           "任一条被拒整笔回滚，错误带 failed_index；applied=实际变更数、"
-                           "noop=幂等数分列）——与顶层 step_id/status 互斥。",
-            "plan_revise": "修订计划（仅 planning 且已建计划）。steps_add / "
-                           "steps_update（可改 title/description/depends_on/status，"
-                           "状态迁移同 step_update 规则）/ steps_remove（仅未开工且未被"
-                           "依赖可删）/ answers（[{question_id, answer}] 写回 owner 答复"
-                           "并解锁 blocking 步骤）/ revision_reason 至少其一。",
-            "tool_log": "批量记录工具使用（只记失败/重试/降级与首次成功的非常规路径，"
-                        "常规重复成功不记）。entries 1..50 条：[{tool, purpose, "
-                        "outcome: success|fail|degraded, note?, skill_digest?}]；"
-                        "可选 task_id。",
-            "task_evaluate": "取执行经验评估素材包（playbook 编译入口，夜间任务或手动"
-                             "触发）。可选 task_ids 显式指定（补评估），或 limit（默认 "
-                             "10，水位之后的未评估收口任务）；响应 watermark_moved_to。"
-                             "按素材包编译出 content_md 后 playbook_submit；无新经验不提交。",
-            "playbook_submit": "提交 playbook 落版。必填 key（work_type code 或 "
-                               "'global'）/content_md/source_task_ids（溯源任务 id，防"
-                               "幻觉路径）；夜间任务 origin=scheduled（过验证门：溯源校验/"
-                               "回声/标题/空转阻尼），交互式违规只警告。文件镜像 "
-                               "playbooks/<key>/。",
-            "playbook_rollback": "回滚 playbook 版本（零阻力，同 rollback 语义）。key 必填；"
-                                 "version 省略回上一版。",
-            "help": "本帮助。",
-        },
-        "write_guidance": templates.WRITE_GUIDANCE,
-        "note": templates.STRONG_MODEL_NOTE,
-    }
-
-
-_ACTIONS = {
-    "write": pref_actions._action_write,
-    "status": pref_actions._action_status,
-    "compile": compile_actions._action_compile,
-    "submit": compile_actions._action_submit,
-    "rollback": compile_actions._action_rollback,
-    "get": pref_actions._action_get,
-    "taxonomy": pref_actions._action_taxonomy,
-    "pending": pref_actions._action_pending,
-    "resolve": pref_actions._action_resolve,
-    "void": pref_actions._action_void,
-    "task_start": task_actions._action_task_start,
-    "task_submit": task_actions._action_task_submit,
-    "task_resume": task_actions._action_task_resume,
-    "task_revise": task_actions._action_task_revise,
-    "task_close": task_actions._action_task_close,
-    "task_recent": task_actions._action_task_recent,
-    "task_get": task_actions._action_task_get,
-    "todo": task_actions._action_todo,
-    "plan_set": exec_actions._action_plan_set,
-    "step_update": exec_actions._action_step_update,
-    "plan_revise": exec_actions._action_plan_revise,
-    "tool_log": exec_actions._action_tool_log,
-    "task_evaluate": playbook_actions._action_task_evaluate,
-    "playbook_submit": playbook_actions._action_playbook_submit,
-    "playbook_rollback": playbook_actions._action_playbook_rollback,
-    "help": _action_help,
-}
 
 
 def main() -> None:

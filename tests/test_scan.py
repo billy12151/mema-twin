@@ -66,7 +66,8 @@ def test_spec_single_task():
     # 评估支线前置：task_evaluate 带 origin=scheduled 心跳（与有无新经验无关）
     evaluate_call = nightly["calls"][1]
     assert evaluate_call["data"]["origin"] == "scheduled"
-    assert "心跳" in evaluate_call["data"]["rule"]
+    # v0.6 A8-3：说明文本外置 instruction（data 只放真参数——B8 顶层未知键硬拒）
+    assert "心跳" in evaluate_call["instruction"]
     assert nightly["calls"][2]["data"]["origin"] == "scheduled"
     assert "twin" in scan.AGENT_INSTRUCTION
     assert "创建一个定时任务" in scan.AGENT_INSTRUCTION  # 单任务口径
@@ -75,17 +76,22 @@ def test_spec_single_task():
     assert "执行经验评估" in scan.AGENT_INSTRUCTION
     assert "每周治理扫描" not in scan.AGENT_INSTRUCTION
     # 空转阻尼与被拒语义进了 spec（宿主快照同步的对照源）
-    submit_rule = nightly["calls"][5]["data"]["rule"]
+    submit_rule = nightly["calls"][5]["instruction"]
     assert "validation_failed" in submit_rule and "no_new_evidence" in submit_rule
-    pb_rule = nightly["calls"][2]["data"]["rule"]
+    pb_rule = nightly["calls"][2]["instruction"]
     assert "validation_failed" in pb_rule and "no_new_evidence" in pb_rule
     assert nightly["calls"][2]["data"]["origin"] == "scheduled"
     assert "nightly_rejected" in submit_rule
     assert "pending_count" in submit_rule  # 汇总输出带治理计数（twin_scan 退役归置）
-    assert "保守封套" in nightly["calls"][4]["data"]["rule"]  # 夜间不做无因重组
-    pending_rule = nightly["calls"][3]["data"]["rule"]
+    assert "保守封套" in nightly["calls"][4]["instruction"]  # 夜间不做无因重组
+    pending_rule = nightly["calls"][3]["instruction"]
     assert "待裁票据" in pending_rule and "夜间不代裁" in pending_rule  # v0.3.8 晨报兜底
     assert "双跑" not in submit_rule  # v0.3.8：双跑句已删
+    # v0.6：spec 全部 data 载荷键 ∈ B8 白名单（说明文本混进 data 会被打回）
+    from mema_twin.server import _ACTION_KEYS
+    for call in nightly["calls"]:
+        bad = set(call["data"]) - _ACTION_KEYS[call["action"]]
+        assert not bad, f"{call['action']} 的 data 含非法键: {bad}"
 
 
 # ---- v0.4.3 提示抑制窗口（用户拍板：3 天） ----

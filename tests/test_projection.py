@@ -287,8 +287,8 @@ def test_void_idempotent_no_stale_remark():
 
 def test_spec_stale_trigger_wording():
     spec = scan.SCHEDULED_TASKS_SPEC["tasks"][0]
-    status_note = spec["calls"][0]["data"]["note"]
-    assert "persona_stale" in status_note  # status note 提到 stale 触发源
+    status_inst = spec["calls"][0]["instruction"]  # v0.6 A8-3：说明外置 instruction
+    assert "persona_stale" in status_inst  # status instruction 提到 stale 触发源
 
 
 def test_status_lists_persona_stale(monkeypatch):

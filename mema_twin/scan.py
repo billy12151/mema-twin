@@ -55,67 +55,76 @@ SCHEDULED_TASKS_SPEC: dict = {
                         "受众画像落版。评估支线放最前：它轻且快，防被最重的编译段"
                         "吃掉会话预算后永远轮不到（水位在，漏一晚次晚自动补）。"),
             "cadence": "daily",
+            # v0.6 A8-3（对抗 R2 #1）：data 只放真参数（B8 顶层未知键硬拒——说明
+            # 文本混进 data 会让夜间会话照抄即被打回）；执行说明一律放 instruction
+            # 键（不进 data，照抄无害）。
             "calls": [
-                {"tool": "twin", "action": "status",
-                 "data": {"note": "uncompiled 是各 work_type 未编译数（只处理 >0 的类型）；"
-                                  "audience_stale 是需重抽象的受众（证据数≠画像吸收数或尚无画像）；"
-                                  "persona_stale 是条款被作废待重编的类型（同样夜间重编落版）",
-                          "rule": "同时看 plan_stats：tasks_unevaluated=0 时评估支线整体"
-                                  "跳过（无素材不空转）；两支线都无素材则本次会话到此结束"}},
+                {"tool": "twin", "action": "status", "data": {},
+                 "instruction": ("uncompiled 是各 work_type 未编译数（只处理 >0 的类型）；"
+                                 "audience_stale 是需重抽象的受众（证据数≠画像吸收数或尚无画像）；"
+                                 "persona_stale 是条款被作废待重编的类型（同样夜间重编落版）。"
+                                 "同时看 plan_stats：tasks_unevaluated=0 时评估支线整体"
+                                 "跳过（无素材不空转）；两支线都无素材则本次会话到此结束")},
                 {"tool": "twin", "action": "task_evaluate",
-                 "data": {"origin": "scheduled",
-                          "rule": "origin=scheduled 必传——调用成功即刷新停转保险丝心跳"
-                                  "（与当晚有无新经验无关，漏传等于 7 天后误报任务停转）；"
-                                  "无 task_ids 取未评估任务（≤10）；响应 task_count=0 "
-                                  "则评估支线结束（心跳已刷）；素材只含真实执行记录，"
-                                  "编译产物每条必须 <!-- task: N --> 溯源，写不出来源"
-                                  "的条目不得出现"}},
+                 "data": {"origin": "scheduled"},
+                 "instruction": ("origin=scheduled 必传——调用成功即刷新停转保险丝心跳"
+                                 "（与当晚有无新经验无关，漏传等于 7 天后误报任务停转）；"
+                                 "无 task_ids 取未评估任务（≤10）；响应 task_count=0 "
+                                 "则评估支线结束（心跳已刷）；素材只含真实执行记录，"
+                                 "编译产物每条必须 <!-- task: N --> 溯源，写不出来源"
+                                 "的条目不得出现")},
                 {"tool": "twin", "action": "playbook_submit",
-                 "data": {"origin": "scheduled",
-                          "rule": "key 用 key_hint（或覆盖面最大的 work_type；跨类型"
-                                  "经验用 key='global'）；source_task_ids=素材包全部"
-                                  "任务 id；可能被拒：validation_failed（溯源无效/素材"
-                                  "回声/缺标题）或 no_new_evidence（空转阻尼）——如实"
-                                  "记录原因并跳过，不要为过门改产物（被拒时 active "
-                                  "未变，次晚自动重试，连续被拒在 status 的 "
-                                  "playbook_rejected 累计）；无新经验则不提交；"
-                                  "工具出错跳过并如实记录，同一项最多重试一次"}},
-                {"tool": "twin", "action": "pending",
-                 "data": {"rule": "归一门待裁票据（v0.3.8）：pending 非空时取明细"
-                                  "（type_kind/raw_value/hit_count=打回次数）列入收尾汇总——"
-                                  "这些是三维度打回待用户裁定的长尾（map/canonicalize/reject），"
-                                  "留待用户在场时裁定，夜间不代裁；为空则跳过本调用"}},
+                 "data": {"origin": "scheduled"},
+                 "instruction": ("key 用 key_hint（或覆盖面最大的 work_type；跨类型"
+                                 "经验用 key='global'）；source_task_ids=素材包全部"
+                                 "任务 id；可能被拒：validation_failed（溯源无效/素材"
+                                 "回声/缺标题）或 no_new_evidence（空转阻尼）——如实"
+                                 "记录原因并跳过，不要为过门改产物（被拒时 active "
+                                 "未变，次晚自动重试，连续被拒在 status 的 "
+                                 "playbook_rejected 累计）；无新经验则不提交；"
+                                 "工具出错跳过并如实记录，同一项最多重试一次")},
+                {"tool": "twin", "action": "pending", "data": {},
+                 "instruction": ("归一门待裁票据（v0.3.8）：pending 非空时取明细"
+                                 "（type_kind/raw_value/hit_count=打回次数）列入收尾汇总——"
+                                 "这些是三维度打回待用户裁定的长尾（map/canonicalize/reject），"
+                                 "留待用户在场时裁定，夜间不代裁；为空则跳过本调用")},
                 {"tool": "twin", "action": "compile",
-                 "data": {"rule": "严格按素材包编译规则产出新版：素材为该类型全部在世证据"
-                                  "（全量投影），与旧版本冲突以新证据为准，含义稳定表达自由，"
-                                  "文末按变更分级列出版本间变更；保守封套：无证据动机时"
-                                  "不做整体重组（吸收新证据、剔除作废条款、预算合并照做），"
-                                  "大重组留给用户在场的交互式编译"}},
+                 "data": {"work_type": "<uncompiled>0 或 persona_stale 的每个 work_type code>"},
+                 "instruction": ("data.work_type 填实际 code（上例占位）。严格按素材包编译规则"
+                                 "产出新版：素材为该类型全部在世证据（全量投影），与旧版本冲突以"
+                                 "新证据为准，含义稳定表达自由，文末按变更分级列出版本间变更；"
+                                 "保守封套：无证据动机时不做整体重组（吸收新证据、剔除作废条款、"
+                                 "预算合并照做），大重组留给用户在场的交互式编译")},
                 {"tool": "twin", "action": "submit",
-                 "data": {"origin": "scheduled",
-                          "rule": "source ids 用素材包证据 id；origin=scheduled 必传"
-                                  "（夜间来源标记，验证门 G1/G2 与空转阻尼仅对 scheduled "
-                                  "生效——漏传等于绕过拦截）；submit 可能被拒："
-                                  "validation_failed（素材回声/缺分区标题）或 "
-                                  "no_new_evidence（空转阻尼）"
-                                  "——如实记录原因并跳过，不要为过门改产物（被拒时 "
-                                  "active 未变、证据未消耗，次晚自动重试，连续被拒会在"
-                                  " status 的 nightly_rejected 累计）；"
-                                  "结束输出各类型前后版本号与吸收证据数汇总，"
-                                  "并附 status 里的 pending_count 与未收口任务数各一句；"
-                                  "工具出错跳过并如实记录，同一项最多重试一次"}},
+                 "data": {"work_type": "<同 compile 的 code>", "prompt_md": "<编译产物>",
+                          "source_memory_ids": "<compile 响应 source_ids_suggested 原样复制>",
+                          "origin": "scheduled"},
+                 "instruction": ("source_memory_ids 直接复制 compile 响应的 "
+                                 "source_ids_suggested（v0.6 起无需解析素材包正文）；"
+                                 "origin=scheduled 必传（夜间来源标记，验证门 G1/G2 与空转"
+                                 "阻尼仅对 scheduled 生效——漏传等于绕过拦截）；submit 可能"
+                                 "被拒：validation_failed（素材回声/缺分区标题）或 "
+                                 "no_new_evidence（空转阻尼）——如实记录原因并跳过，不要为"
+                                 "过门改产物（被拒时 active 未变、证据未消耗，次晚自动重试，"
+                                 "连续被拒会在 status 的 nightly_rejected 累计）；"
+                                 "结束输出各类型前后版本号与吸收证据数汇总，"
+                                 "并附 status 里的 pending_count 与未收口任务数各一句；"
+                                 "工具出错跳过并如实记录，同一项最多重试一次")},
                 {"tool": "twin", "action": "compile",
-                 "data": {"audience": True,
-                          "rule": "对 audience_stale 的每个受众调 compile(work_type="
-                                  "\"aud-{audience}\") 取画像素材包（该受众全部证据），"
-                                  "按画像规则写出受众画像"}},
+                 "data": {"work_type": "<aud-{受众}>"},
+                 "instruction": ("对 audience_stale 的每个受众调 compile(work_type="
+                                 "\"aud-{audience}\") 取画像素材包（该受众全部证据），"
+                                 "按画像规则写出受众画像")},
                 {"tool": "twin", "action": "submit",
-                 "data": {"origin": "scheduled",
-                          "rule": "受众画像 submit 用 work_type=\"aud-{audience}\"、"
-                                  "source_memory_ids=素材包全部证据 id（集合相等才免警告："
-                                  "多报/漏报/混入他受众 id 只警告不拦，次晚自愈）；"
-                                  "画像派生不消耗证据；"
-                                  "audience_stale 为空则整体跳过"}},
+                 "data": {"work_type": "<aud-{受众}>", "prompt_md": "<画像产物>",
+                          "source_memory_ids": "<画像 compile 响应 source_ids_suggested 原样复制>",
+                          "origin": "scheduled"},
+                 "instruction": ("受众画像 submit 用 work_type=\"aud-{audience}\"、"
+                                 "source_memory_ids 复制画像 compile 响应的 "
+                                 "source_ids_suggested（集合相等才免警告："
+                                 "多报/漏报/混入他受众 id 只警告不拦，次晚自愈）；"
+                                 "画像派生不消耗证据；"
+                                 "audience_stale 为空则整体跳过")},
             ],
         },
     ],

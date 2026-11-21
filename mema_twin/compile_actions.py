@@ -9,10 +9,31 @@ nightly_rejected 保留，构成质量安全网。
 from __future__ import annotations
 
 import json
+import os
 import re
 
 from . import db, flow, identity, store, taxonomy, templates
 from .pref_actions import _mark_persona_stale
+
+# v0.6 B6：persona 素材包软闸（不截断——全量投影拍板 v0.3.7 不破）。默认对齐
+# playbook 素材包既有 60k 闸先例（templates.py）；env 可调，非法值回落默认
+# （audit.py 解析先例）并在响应 warnings 提示。
+_COMPILE_BUDGET_CHARS = 60000
+
+
+def _compile_budget() -> tuple[int, str | None]:
+    raw = (os.environ.get("MEMA_TWIN_COMPILE_BUDGET_CHARS") or "").strip()
+    if not raw:
+        return _COMPILE_BUDGET_CHARS, None
+    try:
+        v = int(raw)
+        if v <= 0:
+            raise ValueError(raw)
+    except ValueError:
+        return (_COMPILE_BUDGET_CHARS,
+                f"MEMA_TWIN_COMPILE_BUDGET_CHARS={raw!r} 非法，回落默认 "
+                f"{_COMPILE_BUDGET_CHARS}")
+    return v, None
 
 
 def _read_evidence_rows(rows: list[dict]) -> tuple[list[dict], list[dict]]:
@@ -130,6 +151,22 @@ def _action_compile(data: dict) -> dict:
                                   "同屏，换会话是唯一硬隔离）；新会话 task_start 会自动注入新版"),
                  "next": "用当前会话模型按素材包编译出 prompt_md 后，调 "
                          "twin(action=\"submit\", data={work_type, prompt_md, source_memory_ids, model})"}
+    # v0.6 B1：submit 的 source_memory_ids 直接复制，无需解析素材包正文 [id] 标记
+    # （fetch-then-parse 是 G3 警告与 scheduled 阻尼「疑似漏列」的共同根源）。
+    # evidence_ids=素材包在场证据；source_ids_suggested=在世全集（含缺正文 skipped
+    # 行——G3 期望集与 submit 对账集同源，照抄即全覆盖）；voided_ids=已作废排除。
+    out["evidence_ids"] = [int(e["id"]) for e in evidence]
+    out["source_ids_suggested"] = ([int(e["id"]) for e in evidence]
+                                   + [int(s["memory_id"]) for s in skipped])
+    out["voided_ids"] = [int(r["memory_id"]) for r in (voided or [])]
+    # v0.6 B6：软闸只警告不截断（超闸 = 证据堆积信号，处置建议随 warnings 进场）
+    budget, env_warn = _compile_budget()
+    if env_warn:
+        out.setdefault("warnings", []).append(env_warn)
+    if len(material) > budget:
+        out.setdefault("warnings", []).append(
+            f"素材包 {len(material)} 字符超预算 {budget}，全量投影保留（不截断）；"
+            "建议 void/归档陈旧证据或拆分受众画像")
     if skipped:
         out["skipped_evidence"] = skipped
     return out
@@ -297,7 +334,9 @@ def _action_submit(data: dict) -> dict:
         else:
             code = store.resolve_work_type_code(conn, str(data["work_type"]))
             if not code:
-                return {"ok": False, "error": "invalid_input", "field": "work_type", "reason": "unknown code"}
+                return {"ok": False, "error": "invalid_input", "field": "work_type",
+                        "reason": "unknown code（先 twin(action=\"taxonomy\") 查码；"
+                                  "治理追加值见 pending 票据）"}
         # v0.3.7 对账（评审轮2 P1-1）：source_ids 与该 code 在世证据集合对账——
         # 去重（重复 id 虚增 evidence_count、画像 stale 永差）；多余 id（幽灵/已
         # 作废/他类型）scheduled 直接拒（确定性错误零误报，次晚自愈），交互式剔除
@@ -452,8 +491,10 @@ def _action_rollback(data: dict) -> dict:
     finally:
         conn.close()
     out["ok"] = True
-    if out.pop("already_active", None):
-        out["note"] = f"v{out['version']} 已是 active，未做变更"
+    if out.get("already_active"):
+        # v0.6 B2：显式布尔不再 pop——与 void(already_void)/step_update(no_op)
+        # 口径对齐，宿主按「ok + 显式 no-op 布尔」机器判别，不必读作文
+        out["note"] = f"v{out['version']} 已是 active，未做变更（幂等 no-op）"
     else:
         out["rolled_back_from"] = out.pop("superseded_version")
         out["guidance"] = ("已切换 active 版本。旧版本仍在库、可再 rollback 回来"

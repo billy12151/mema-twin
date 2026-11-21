@@ -473,8 +473,10 @@ def _action_playbook_rollback(data: dict) -> dict:
         target = int(target_row["version"])
         if active_row is not None and target == int(active_row["version"]):
             conn.commit()
+            # v0.6 B2：显式 no-op 布尔（对齐 persona rollback 的 already_active）
             return {"ok": True, "key": key, "version": target,
-                    "note": f"v{target} 已是 active，未做变更"}
+                    "already_active": True,
+                    "note": f"v{target} 已是 active，未做变更（幂等 no-op）"}
         ts = db.now_iso()
         conn.execute("UPDATE twin_playbooks SET status='retired'"
                      " WHERE key=? AND status='active'", (key,))

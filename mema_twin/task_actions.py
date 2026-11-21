@@ -409,7 +409,8 @@ def _action_task_submit(data: dict) -> dict:
     flow.ensure_schema()
     record = flow.get_task(int(tid))
     if not record:
-        return {"ok": False, "error": "not_found", "reason": f"task id {tid}"}
+        return {"ok": False, "error": "not_found",
+                "reason": f"task id {tid}（task_recent 可查进行中/最近任务）"}
     if record["status"] != "planning":
         return {"ok": False, "error": "invalid_input",
                 "reason": f"task {tid} 状态为 {record['status']!r}，不可提交"
@@ -485,7 +486,8 @@ def _action_task_submit(data: dict) -> dict:
                                (int(tid),)).fetchone()
             if row is None:
                 return _with_steps({"ok": False, "error": "not_found",
-                                    "reason": f"task id {tid}"})
+                                    "reason": f"task id {tid}（task_get 复核当前状态；"
+                                              "task_recent 可查最近任务）"})
             if row["status"] != "planning":
                 return _with_steps({"ok": False, "error": "invalid_input",
                                     "reason": f"task {tid} 状态为 {row['status']!r}，不可提交"
@@ -537,7 +539,8 @@ def _action_task_resume(data: dict) -> dict:
     flow.ensure_schema()
     record = flow.get_task(int(tid))
     if not record:
-        return {"ok": False, "error": "not_found", "reason": f"task id {tid}"}
+        return {"ok": False, "error": "not_found",
+                "reason": f"task id {tid}（task_recent 可查进行中/最近任务）"}
     if record["status"] not in flow._RESUMABLE_STATUSES:
         if record["status"] == "submitted":
             hint = ("已交付（submitted）的返工走 task_revise——revise 不恢复 todos，"
@@ -658,7 +661,8 @@ def _action_task_revise(data: dict) -> dict:
     flow.ensure_schema()
     record = flow.get_task(int(tid))
     if not record:
-        return {"ok": False, "error": "not_found", "reason": f"task id {tid}"}
+        return {"ok": False, "error": "not_found",
+                "reason": f"task id {tid}（task_recent 可查进行中/最近任务）"}
     if record["status"] not in flow._REVISABLE_STATUSES:
         if record["status"] == "planning":
             hint = "进行中（planning）直接继续执行或 task_resume"
@@ -769,7 +773,8 @@ def _action_task_close(data: dict) -> dict:
     flow.ensure_schema()
     record = flow.get_task(int(tid))
     if not record:
-        return {"ok": False, "error": "not_found", "reason": f"task id {tid}"}
+        return {"ok": False, "error": "not_found",
+                "reason": f"task id {tid}（task_recent 可查进行中/最近任务）"}
     if record["status"] not in flow._OPEN_STATUSES:
         return {"ok": False, "error": "invalid_input",
                 "reason": f"task {tid} 状态为 {record['status']!r}，仅进行中（planning）可关闭"}
@@ -788,7 +793,8 @@ def _action_task_close(data: dict) -> dict:
             row = conn.execute("SELECT status FROM twin_tasks WHERE id=?",
                                (int(tid),)).fetchone()
             if row is None:
-                return {"ok": False, "error": "not_found", "reason": f"task id {tid}"}
+                return {"ok": False, "error": "not_found",
+                        "reason": f"task id {tid}（task_recent 可查最近任务）"}
             return {"ok": False, "error": "invalid_input",
                     "reason": f"task {tid} 状态为 {row['status']!r}，仅进行中（planning）可关闭"}
         closed_steps = exec_actions.close_task_steps(conn, int(tid))
@@ -821,7 +827,8 @@ def _action_task_get(data: dict) -> dict:
     flow.ensure_schema()
     record = flow.get_task(int(tid))
     if not record:
-        return {"ok": False, "error": "not_found", "reason": f"task id {tid}"}
+        return {"ok": False, "error": "not_found",
+                "reason": f"task id {tid}（task_recent 可查进行中/最近任务）"}
     return {"ok": True, "task": record}
 
 

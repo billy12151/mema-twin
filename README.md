@@ -127,18 +127,19 @@ for fallback and human review).
 |------|------|
 | `write` | 沉淀一条工作偏好。必填 content/work_type/audience/purpose（未命中清单整笔打回+动态清单+裁定票据，问用户 map/canonicalize 后重试）；任务流内沉淀可传 `task_id`——缺省维度沿用该任务的三维度（scope=audience 时不继承 work_type；显式传入优先，响应 `dims_inherited` 列出继承项）；对某受众的通用偏好传 `scope=audience`（work_type 省略），进该受众画像；同 work_type 内容完全相同返回 `duplicate=true`（词法去重，幂等成功，勿重试） |
 | `get` | 取某工作性质的 persona prompt（开工前调用）；可选 `version` 取历史版本全文；`aud-{受众}` 可读受众画像；读 active 时附未编译增补 persona_supplement（v0.4.8，指定历史版本/受众画像不附） |
-| `compile` | 取编译素材包（旧版本 prompt 编译参考 + **全部在世证据**（全量投影）+ 已作废条款清单 + 编译规则（稳定律/硬预算/变更分级）），独立会话执行、做完即弃 |
-| `submit` | 提交编译产物，落版本并写镜像（返回 `supersedes`），回写证据编译标记；夜间定时任务落版传 `origin=scheduled`（过**验证门**：素材回声/缺分区标题拒绝、无新证据空转阻尼拒绝，均在 status 的 nightly_rejected 累计；证据未全覆盖与交互式违规只警告） |
-| `rollback` | 回滚 persona 版本（零阻力）：`version` 省略回上一版，传 n 回指定版；不删历史、版本号不回收 |
+| `compile` | 取编译素材包（旧版本 prompt 编译参考 + **全部在世证据**（全量投影，v0.6 起超预算只警告不截断：`MEMA_TWIN_COMPILE_BUDGET_CHARS` 默认 60000，对齐 playbook 素材闸）+ 已作废条款清单 + 编译规则（稳定律/硬预算/变更分级）），独立会话执行、做完即弃；v0.6 响应附 `evidence_ids`/`source_ids_suggested`/`voided_ids` 结构化数组——submit 的 `source_memory_ids` 直接复制 `source_ids_suggested`，无需解析素材包正文 |
+| `submit` | 提交编译产物，落版本并写镜像（返回 `supersedes`），回写证据编译标记；`prompt_md` ≤100000 字符；夜间定时任务落版传 `origin=scheduled`（过**验证门**：素材回声/缺分区标题拒绝、无新证据空转阻尼拒绝，均在 status 的 nightly_rejected 累计；证据未全覆盖与交互式违规只警告） |
+| `rollback` | 回滚 persona 版本（零阻力）：`version` 省略回上一版，传 n 回指定版；不删历史、版本号不回收；目标已是 active 时返回 `already_active=true`（v0.6 显式 no-op 布尔，非错误） |
 | `status` | 版本概况（含体积/超预算标记）、受众画像（audience_profiles）与重抽象队列（audience_stale）、条款作废待重编（persona_stale）、未编译统计、pending 数量（归一门待裁票据）、夜间被拒计数（nightly_rejected）、进行中任务计数（open_tasks）、执行计划统计（plan_stats：任务/步骤各态/backfilled/open blocking 疑问/tool_usage/playbooks/playbook_rejected/采纳率 submitted_with_plan÷tasks_submitted——分母 0 无读数，历史 submitted 会稀释、看增量任务）、定时任务安装提醒 |
-| `taxonomy` | 列枚举清单（动态：含治理追加别名与自建 canonical；kind ∈ work_type/audience/purpose） |
-| `pending` / `resolve` | 归一门待裁票据的查看与治理（map=归一并进别名表 / canonicalize=立新码入列 / reject=不入体系且不得重试原值） |
+| `taxonomy` | 列枚举清单（动态：含治理追加别名与自建 canonical；kind ∈ work_type/audience/purpose，v0.4.7 起**可传数组一次取多类或 `"all"`**——多类形状判别式=响应有无 `kinds` 键、顶层 count_total；`compact` 仅接受布尔 true） |
+| `pending` / `resolve` | 归一门待裁票据的查看与治理（map=归一并进别名表 / canonicalize=立新码入列 / reject=不入体系且不得重试原值）；pending 的 `status` ∈ pending\|mapped\|canonicalized\|rejected（其余打回）；v0.6 resolve 支持 `tickets=[{pending_id,decision,code?\|new_type?}]` 批量裁定（1..20 条，与单条互斥，单事务全落/全回滚带 `failed_index`） |
+| `evidence` | v0.6 新增：列偏好证据索引（只读，定位 `memory_id` 用，不回正文全文）；`status` ∈ uncompiled\|compiled\|void、`work_type`、`limit`（默认 50 上限 200） |
 | `task_start` | 开工建档并注入 persona prompt + 未编译增补 + active playbook（连续性分级）；`have_persona_version` 申报同会话已注入版本，未变则省略重复注入；带 audience 时注入受众画像 `audience_profile_md`/雏形；audience/purpose 可选，给了值必须在清单内；可选 `available_tools`（工具名列表，服务端与 playbook 工具面板比对回 `tool_gap`）；该工种尚无专属 persona 时注入**同域 fallback**（v0.4.5：同域最成熟工种 persona 全文垫底 + 其余候选摘要 + 降级声明，专属落版自动退出） |
-| `plan_set` | 建档任务列步骤计划（v0.4 执行计划层）：steps（title/depends_on）+ open_questions（可标 blocking），直接放行开工；重复调用即重排（未完结步骤标 skipped(replanned)，done 保留） |
+| `plan_set` | 建档任务列步骤计划（v0.4 执行计划层）：steps（title/depends_on）+ open_questions（可标 blocking），直接放行开工；重复调用即重排（未完结步骤标 skipped(replanned)，done 保留）；v0.6 可选 `start_first=true`——计划落库即把无依赖且未被 blocking 锚定的首步标 in_progress（省一次 step_update 往返；全部首步被锚定时响应 `start_first_skipped=true` 说明原因） |
 | `step_update` | 步骤状态机打卡（六态；to=in_progress 过三门：blocking 疑问→依赖→单一 in_progress）；done/failed 闭环（failed 必带 reflection；pending 直跳标 backfilled 追认） |
 | `plan_revise` | 修订单次提交：steps_remove（仅 pending 且不被本代未删步骤依赖）/ steps_update（改 deps/状态走状态机）/ steps_add / answers（open_questions 写回解锁 blocking） |
-| `tool_log` | 批量记工具经验（tool/purpose/outcome ∈ success/fail/degraded，可附 note/skill_digest），task_evaluate 素材来源 |
-| `task_submit` | 提交交付稿并收口（**submit 即终点**，v0.3.8 无评审环），落盘 `deliverables/task-N.md`；建过计划的任务收口门拦未闭环步骤；未建计划的交付附经验流失提醒（advisory：执行经验不进 playbook，重复型工作下次先 plan_set）；outcome 自动 success；open blocking 疑问仅警告；交付后用户反馈走 twin.write |
+| `tool_log` | 批量记工具经验（v0.4.7 批量：entries 1..50 条；tool/purpose/outcome ∈ success/fail/degraded，可附 note/skill_digest；字段帽 tool≤100/purpose≤500/note≤500/skill_digest≤500），task_evaluate 素材来源 |
+| `task_submit` | 提交交付稿并收口（**submit 即终点**，v0.3.8 无评审环），落盘 `deliverables/task-N.md`；建过计划的任务收口门拦未闭环步骤；未建计划的交付附经验流失提醒（advisory：执行经验不进 playbook，重复型工作下次先 plan_set）；outcome 自动 success；open blocking 疑问仅警告；交付后用户反馈走 twin.write；v0.4.7 起可带 `steps`（同 step_update 批量结构且须属本任务）先补打卡再收口一次往返，steps 已落库后被拒时响应带 `steps_applied`，修正后直接重试无需重新打卡 |
 | `task_resume` / `task_revise` / `task_close` | 续作进行中任务（仅 planning，恢复 todos + 深拷贝未完结计划到新 task_id）/ 已交付任务修订返工（仅 submitted，子任务回 planning 记 lineage + 同款深拷贝；v0.4.8 起按 task_resume 同款注入 persona/未编译增补/受众画像/playbook，不恢复 todos）/ 显式关闭进行中任务（outcome=failed\|superseded，未闭环步骤批量 skipped(closed)） |
 | `task_evaluate` | 打包水位后已闭环任务的执行记录（reflection/tool_log/步骤路径）出 playbook 素材包（夜间任务调用；水位单调，可显式补评估） |
 | `playbook_submit` / `playbook_rollback` | playbook 落版（origin=scheduled 过验证门：溯源/素材回声 G1/无标题 G2/空转阻尼；交互式只警告）与回滚（省略 version 回上一版） |
@@ -189,6 +190,19 @@ uv venv && uv pip install -e ".[test]"
 .venv/bin/pytest -q          # 跑测试
 ```
 
+**v0.6.0 行为变更（宿主适配须知）**：
+
+1. **data 顶层未知键硬拒**（v0.6 B8）：任何动作的 `data` 传入未声明键 → `invalid_input`
+   + `allowed`（合法键清单）+ `did_you_mean`（近邻提示，无命中为 null）。此前冗余键
+   静默忽略；传了宿主自定义扩展键的宿主请清理后再升级。
+2. **未知 action 错误形态变化**（A2 schema enum 副作用）：`action` 不在 27 个合法值内
+   时由 MCP 参数校验层拒为 ToolError 协议错误（此前是结构化 `invalid_input`+actions
+   清单）。合法动作清单见工具描述 enum 或 help。
+3. 响应 prose 键域冻结（B7）：新增动作的说明文字键只准复用
+   guidance/hint/note/next/session_note/warnings/stall_advisory/twin_notices 或既有
+   `*_note`/`scan_notice` 家族（persona_supplement_note/audience_profile_note/
+   fallback_persona_note/playbook_note 等已在产，豁免列举），不准发明新键族。
+
 环境变量：
 
 | 变量 | 默认 | 说明 |
@@ -206,8 +220,9 @@ uv venv && uv pip install -e ".[test]"
 | `MEMA_TWIN_UPDATE_CHECK` | 开启 | `0`/`false`/`off` 关闭版本更新检查（daemon 线程，24h 一次，失败静默） |
 | `MEMA_TWIN_UPDATE_STATE_PATH` | `~/.local/share/mema-twin/update_state.json` | 更新检查状态文件（抑制窗口/升级基线） |
 | `MEMA_TWIN_AUDIT` | 开启 | `0`/`false`/`off` 关闭 action 级审计日志（v0.4.6：每次调用落 `twin_audit` 表一行——action/ok/error/耗时/client/task_id/step_id，不记正文；环形保留近 2 万行）。观测件：写失败静默不击穿工具响应；`status` 的 `plan_stats.audit` 给计数/失败率/top 动作 |
-| `MEMA_TWIN_STALL_MINUTES` | `30` | 挂墙 advisory 阈值（分钟）：某步骤 in_progress 超过该时长无推进，后续 ok 响应附出口指引（`stall_advisory` 独立键，不占 warnings） |
+| `MEMA_TWIN_STALL_MINUTES` | `30` | 挂墙 advisory 阈值（分钟）：某步骤 in_progress 超过该时长无推进，后续 ok 响应附出口指引（`stall_advisory` 独立键，不占 warnings）。提示冷却为固定 30 分钟独立常量，不随本阈值走 |
 | `MEMA_TWIN_STALL_ADVISORY` | 开启 | `0`/`false`/`off` 单独关闭挂墙 advisory（与审计开关解耦：可只留 advisory 或只留审计） |
+| `MEMA_TWIN_COMPILE_BUDGET_CHARS` | `60000` | v0.6：persona compile 素材包软闸（字符数）。超闸**只警告不截断**（全量投影拍板不破，防证据堆积失控）；对齐 playbook 素材包 60k 先例 |
 
 ## 多 Agent 共接（http 模式）
 

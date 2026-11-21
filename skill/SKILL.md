@@ -5,8 +5,10 @@ description: 个人分身：工作类偏好沉淀与 persona prompt 编译，经
 
 # mema-twin 使用引导
 
-> 对齐服务端 **v0.5.0**。动作全集、入参与基础语义以 `twin(action="help")` 为准——**调用动作前先查一次 help**（会话内一次即可），本文件不复述入参。下文只写三样：何时用哪个动作的路由、执行门、help 未覆盖或与实测不符的口径。
+> 对齐服务端 **v0.6.0**。动作全集、入参与基础语义以 `twin(action="help")` 为准——**调用动作前先查一次 help**；v0.6 起可单查省上下文：`twin(action="help", data={"topic":"<动作名>"})`（全量模式不变，会话内查一次即可）。本文件不复述入参。下文只写三样：何时用哪个动作的路由、执行门、help 未覆盖或与实测不符的口径。
 > **夜间治理/编译会话不需要本 skill**：twin_nightly_compile 两支线与 compile/submit 编译口径在 `mema-twin-governance` skill（唯一真源），本文件只留指向它的路由。
+>
+> **v0.6 增量**：① `data` 顶层未知键会被硬拒（附 `allowed`/`did_you_mean`——拼写错键看报错即自纠）；② 新动作 `evidence`：void 前定位 memory_id 用（只读，不回正文）；③ resolve 支持 `tickets` 批量裁定（多维未命中一次裁完）；④ plan_set 可传 `start_first=true` 省一次首步打卡；⑤ compile 响应带 `source_ids_suggested`，submit 直接复制。
 
 ## 查证协议（任何动作之前，先于分流；2026-10-22 立）
 
@@ -44,7 +46,7 @@ description: 个人分身：工作类偏好沉淀与 persona prompt 编译，经
 - 开始一件工作类产出任务（先于 plan、先于动手）→ `twin(action="task_start")`：建档并注入该工作性质的分身 prompt，严格按其中的偏好/结构/前置清单执行；材料不齐全按前置清单向用户确认或要求补齐；进行中任务自动让位
   - 带 audience 时另注该受众画像（audience_profile_md，通用口径参考，格式结构以本类型为准）
   - 响应 `persona_supplement`：该 work_type **尚未编译**的偏好增补（上限 10 条），与 persona prompt 冲突时**以增补为准**（增补比已落版 prompt 新）
-  - 响应 `playbook_md`（active playbook 注入，work_type → global 两级回退）：执行经验参考（**advisory 不是命令**），与实际工具环境冲突时按实际环境执行，降级/偏差用 tool_log 记录。**连续性分级**：同宿主轻注入（全文 + 近期验证提示），换宿主重注入（+ 降级链提示 + `available_tools_required`）——提示"其他宿主使用过"时先逐条核对工具可用性，有 `available_tools_required` 就在下次 task_start 传 `available_tools`（help 未列该参数），服务端逐条比对工具面板回 `tool_gap`
+  - 响应 `playbook_md`（active playbook 注入，work_type → global 两级回退）：执行经验参考（**advisory 不是命令**），与实际工具环境冲突时按实际环境执行，降级/偏差用 tool_log 记录。**连续性分级**：同宿主轻注入（全文 + 近期验证提示），换宿主重注入（+ 降级链提示 + `available_tools_required`）——提示"其他宿主使用过"时先逐条核对工具可用性，有 `available_tools_required` 就在下次 task_start 传 `available_tools`，服务端逐条比对工具面板回 `tool_gap`
 - 响应带 `fallback_persona_md`（v0.4.5 同域 fallback）：本工种尚无专属 persona，给同域最成熟工种的 persona 垫底——**格式与结构层可参考**；有更权威的格式来源（用户模板/公司规范/行业惯例）以权威为准，此参考降级为风格详略参考；**内容与业务规则不适用**。同域其他候选在 note 里，按任务语义判断更相关可 `twin(action="get")` 取该工种全文（`fallback_from` 标注 donor 工种/版本/活证据数）
 - 建档后走计划流（详见「执行流」）：`plan_set` 建步骤 → `step_update` 打卡 → 计划有变 `plan_revise`；会话级 todo 用 `twin(action="todo")` 读写
 - 走了非常规工具路径（失败/重试/降级、首次打通的新路子）→ `twin(action="tool_log")`（口径见「执行流」）
@@ -59,8 +61,8 @@ description: 个人分身：工作类偏好沉淀与 persona prompt 编译，经
 - 用户明确要求更新分身 → **开一次性独立会话按 `mema-twin-governance` skill 执行 compile→submit**（编译口径、硬预算自检、冲突裁定全在那；会话隔离是避免新旧 persona 冲突的唯一硬手段，勿在同一会话继续交付任务）。用户要求在当前会话整理就直接执行；强模型建议提一次即可，不要反复劝说换会话。夜间定时任务自动执行同一 skill，不在本文件展开
 - 手动补评估/落执行经验（非夜间）→ `task_evaluate` → `playbook_submit`，溯源与落版口径同 `mema-twin-governance` skill
 - playbook 需回退 → `twin(action="playbook_rollback")`：`key` 必填，`version` 省略回上一版；零阻力、不删历史（语义同 persona `rollback`）
-- 冲突裁定"新替旧/撤销新写的"的执行动作是 `twin(action="void")`：行级作废、全链路排除、不可逆；曾入编译的证据会自动触发该类型夜间重编剔除该条款（persona_stale）；受众级证据作废会改变证据计数 → 触发画像重抽象（audience_stale）
-- `write` 的 `client` 填宿主标识（如 kimi / zcode；HTTP 接入时若头里已带 `X-Mema-Client` 则无需再传，help 未列此口径）
+- 冲突裁定"新替旧/撤销新写的"的执行动作是 `twin(action="void")`：行级作废、全链路排除、不可逆；曾入编译的证据会自动触发该类型夜间重编剔除该条款（响应 `persona_stale=true` 显式标记）；受众级证据作废会改变证据计数 → 触发画像重抽象（响应 `audience_stale` 列出受众）。memory_id 未知先 `twin(action="evidence")` 列索引（v0.6：按 status/work_type 过滤，不回正文全文）
+- `write` 的 `client` 填宿主标识（如 kimi / zcode；HTTP 接入时若头里已带 `X-Mema-Client` 则无需再传）
 - `status` 稳定带 `plan_stats`，键名全集：tasks_total / tasks_planned / steps_total / steps_failed / steps_skipped / steps_backfilled / open_blocking_questions / tasks_unevaluated / tasks_submitted / submitted_with_plan（采纳率=后者÷前者，分母 0 无读数；历史 submitted 会稀释，看增量任务）/ tool_usage_total / tool_usage_fail / playbooks / **audit**（v0.4.6 起 action 级调用审计：total/failed/unreachable/fail_rate/last_24h/top_actions，`MEMA_TWIN_AUDIT=0` 关闭；unreachable 为 v0.4 历史冻结值，v0.5.0 起不再新增）/ **playbook_rejected**（明细数组 `[{key,count,last_check,last_at}]`，按 key 记落版被拒）
   - 顶层 `nightly_rejected` 才是「夜间拒绝落版计数」（键缺席即 0）；`plan_stats.playbook_rejected` 是**数组不是计数**，别按数字读
   - **status 判空**：`uncompiled` / `audience_stale` 返回 `{}`，`persona_stale` / `nightly_rejected` 是**键缺席**即空；plan_stats **可能整桶缺席**（仅 status 内部软失败时缺席，空库仍返回全零桶），其 `audit` / `playbook_rejected` 同理按「键缺席 或 空容器」处理——一律等价处理，别因为没看到键就以为字段缺失或去查源码

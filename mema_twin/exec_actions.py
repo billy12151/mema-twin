@@ -224,7 +224,12 @@ def _apply_step_transition(conn, step: dict, to: str, reason: str | None,
         raise ValueError(f"invalid status: {to!r}（六态：{'/'.join(STEP_STATUSES)}）")
     rule = _TRANSITIONS.get((frm, to))
     if rule is None:
-        raise ValueError(f"步骤 #{step['id']} 不允许从 {frm!r} 迁到 {to!r}")
+        # v0.6 A5：报错附合法目标表（宿主无需重读文档即可选对下一状态）
+        allowed = sorted(t for (f, t) in _TRANSITIONS if f == frm)
+        allowed_txt = ("无（终态；可走 plan_revise 或新步骤）"
+                       if not allowed else "/".join(allowed))
+        raise ValueError(f"步骤 #{step['id']} 不允许从 {frm!r} 迁到 {to!r}"
+                         f"（{frm!r} 允许的下一状态：{allowed_txt}）")
     reason = (reason or "").strip() or None
     reflection = (reflection or "").strip() or None
     if rule.get("reason_required") and not reason:
@@ -306,7 +311,8 @@ def _task_planning_guard(conn, task_id: int, need_plan: bool = False) -> dict | 
     """task 存在且 planning；need_plan 时另要求建过计划。失败返回打回响应。"""
     status = _task_plan_status(conn, task_id)
     if status is None:
-        return {"ok": False, "error": "not_found", "reason": f"task id {task_id}"}
+        return {"ok": False, "error": "not_found",
+                "reason": f"task id {task_id}（task_recent 可查进行中/最近任务）"}
     if status != "planning":
         return {"ok": False, "error": "invalid_input",
                 "reason": f"task {task_id} 状态为 {status!r}，仅进行中（planning）可操作计划"}
@@ -487,6 +493,12 @@ def _action_plan_set(data: dict) -> dict:
                     "reason": "blocking=true 的疑问必须关联至少一个步骤"}
         parsed_q.append({"question": text, "seqs": [int(x) for x in qids],
                          "blocking": blocking})
+    # start_first（v0.6 B5）：严格布尔——blocking 同款教训（字符串 "false" 会被
+    # 误判为 true，非布尔值一律打回而非静默当 False）
+    start_first = data.get("start_first")
+    if start_first is not None and not isinstance(start_first, bool):
+        return {"ok": False, "error": "invalid_input", "field": "start_first",
+                "reason": "需是布尔值 true/false（字符串 \"true\" 不接受）"}
     flow.ensure_schema()
     conn = db.connect()
     try:
@@ -534,6 +546,39 @@ def _action_plan_set(data: dict) -> dict:
             out_q.append({"id": int(cur.lastrowid), "question": q["question"],
                           "step_ids": [id_by_seq[x] for x in q["seqs"]],
                           "blocking": bool(q["blocking"]), "status": "open"})
+        # start_first 起跑（v0.6 B5）：并入本事务、commit 前完成——另开事务会与
+        # 并发 task_start 让位/第二个 plan_set 的 replanned 竞窗产出僵尸 in_progress
+        # 步骤（对抗 R2 #5）。选步：无依赖且未被 open blocking 疑问锚定的最小 seq
+        # （锚定判定用内存 parsed_q——blocking 门在 in_progress 迁移时必查，
+        # 绕门直改会产出卡死步骤）。UPDATE 带 WHERE status='pending' 防御性复查；
+        # 未生效（候选空/行级条件未中）由 started_step_id 缺席推导，响应报
+        # start_first_skipped。
+        started_step_id: int | None = None
+        skip_reason = ""
+        if start_first is True:
+            blocked_seqs = {x for q in parsed_q if q["blocking"] for x in q["seqs"]}
+            candidates = [i + 1 for i, s in enumerate(parsed)
+                          if not s["deps_seq"] and (i + 1) not in blocked_seqs]
+            if candidates:
+                sid = id_by_seq[min(candidates)]
+                cur2 = conn.execute(
+                    "UPDATE twin_plan_steps SET status='in_progress', decided_at=?"
+                    " WHERE id=? AND status='pending'", (ts, sid))
+                started_step_id = sid if cur2.rowcount == 1 else None
+                if started_step_id is None:
+                    # R2 对抗 R3：行级条件未中（并发窗口可达）≠ 被 blocking 锚定，
+                    # 原因分两类带出响应，不误导宿主去解锁疑问
+                    probe = conn.execute(
+                        "SELECT status FROM twin_plan_steps WHERE id=?",
+                        (sid,)).fetchone()
+                    skip_reason = ("start_first 未生效：首步行级条件未中（并发窗口），"
+                                   "请 task_get 复核后 step_update(in_progress) 起跑"
+                                   if probe is not None and probe["status"] == "pending"
+                                   else "")
+            if started_step_id is None and not skip_reason:
+                skip_reason = ("start_first 未生效：无依赖首步均被 open blocking 疑问锚定"
+                               "——先经 plan_revise(answers=…) 解锁，再 "
+                               "step_update(in_progress) 起跑")
         conn.commit()
     finally:
         conn.close()
@@ -548,6 +593,12 @@ def _action_plan_set(data: dict) -> dict:
                         if replanned else ""))}
     if replanned:
         out["replanned_steps"] = replanned
+    if start_first is True:
+        if started_step_id is not None:
+            out["started_step_id"] = started_step_id
+        else:
+            out["start_first_skipped"] = True
+            out.setdefault("warnings", []).append(skip_reason)
     if resolved_brief is not None:
         # 回退路径回显被解析任务的 brief 供 agent 自查（防静默劫持语义无关的
         # 陈尸任务）；非回退路径键缺席（键缺席即否，对齐 status 判空口径）
@@ -648,7 +699,8 @@ def apply_step_entries(conn, entries, expect_task_id: int) -> tuple:
             if row is None:
                 return _abort({"ok": False, "error": "not_found",
                                "field": f"steps[{i}].step_id",
-                               "reason": f"step id {e['step_id']}"}, i)
+                               "reason": (f"step id {e['step_id']}"
+                                          "（task_get 可取本任务步骤清单核对 id）")}, i)
             step = _step_dict(row)
             if int(step["task_id"]) != int(expect_task_id):
                 return _abort({"ok": False, "error": "invalid_input",
@@ -741,7 +793,8 @@ def _action_step_update(data: dict) -> dict:
     try:
         row = conn.execute("SELECT * FROM twin_plan_steps WHERE id=?", (step_id,)).fetchone()
         if row is None:
-            return {"ok": False, "error": "not_found", "reason": f"step id {step_id}"}
+            return {"ok": False, "error": "not_found",
+                    "reason": f"step id {step_id}（task_get 可取本任务步骤清单核对 id）"}
         step = _step_dict(row)
         guard = _task_planning_guard(conn, int(step["task_id"]))
         if guard:
@@ -810,16 +863,18 @@ def _action_plan_revise(data: dict) -> dict:
                         "reason": (f"步骤 #{rid} 已开工（{row['status']}）不可删除，"
                                    "改走 step_update(skipped, reason=…) 留审计")}
             # 被任何本代未删步骤依赖 → 拒（规格 §4.5：pending 依赖方也拦，
-            # 否则删除后引用悬空、依赖门失锚）
+            # 否则删除后引用悬空、依赖门失锚）。v0.6 A5：一次列全全部依赖方
+            # （此前只报第一个命中，k 个依赖方要 k 次往返）
             users = conn.execute(
                 "SELECT id, depends_on FROM twin_plan_steps"
                 " WHERE task_id=? AND id!=?", (task_id, rid)).fetchall()
-            for u in users:
-                if rid in _loads_ids(u["depends_on"]):
-                    conn.rollback()
-                    return {"ok": False, "error": "invalid_input",
-                            "reason": (f"步骤 #{rid} 被步骤 #{u['id']} 依赖，"
-                                       "不可删除（先处理依赖方）")}
+            blockers = sorted(u["id"] for u in users
+                              if rid in _loads_ids(u["depends_on"]))
+            if blockers:
+                conn.rollback()
+                return {"ok": False, "error": "invalid_input",
+                        "reason": (f"步骤 #{rid} 被以下步骤依赖，不可删除"
+                                   f"（先处理依赖方）：{', '.join(f'#{i}' for i in blockers)}")}
             conn.execute("DELETE FROM twin_plan_steps WHERE id=?", (rid,))
             removed.append(rid)
         # ② 更新：逐条按 step_update 语义（含三门/迁移表/reflection 必填）
@@ -1064,7 +1119,8 @@ def _action_tool_log(data: dict) -> dict:
             row = conn.execute("SELECT 1 FROM twin_tasks WHERE id=?",
                                (task_id,)).fetchone()
             if row is None:
-                return {"ok": False, "error": "not_found", "reason": f"task id {task_id}"}
+                return {"ok": False, "error": "not_found",
+                        "reason": f"task id {task_id}（task_recent 可查最近任务）"}
         client = identity.effective_client(data)
         ts = db.now_iso()
         conn.executemany(

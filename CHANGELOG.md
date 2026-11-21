@@ -2,6 +2,41 @@
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-11-21
+
+Agent 调用工效改进（评估报告 `~/ZCodeProject/docs/mema-twin-agent-ergonomics-review-20261121.md`，实施级方案 v3 过 R1+R2 两轮独立评审；owner 2026-11-21 拍板 A+B 全部 13 条）。范围：全部为响应层/校验层改动，**零 DB schema 迁移**。
+
+### Changed — 宿主适配须知（行为变更）
+
+- **data 顶层未知键硬拒**（B8）：任何动作 `data` 含未声明键 → `invalid_input` + `allowed`（合法键清单）+ `did_you_mean`（difflib 近邻，无命中 null）。此前冗余键静默忽略、拼写错键报成 required 归因误导。校验位于身份/租户解析之后 handler 之前（auth 优先，拒绝全走审计）；`data` 非 dict（含 falsy 0/""/[]）先结构化打回。白名单落表口径=逐 handler 清点，`_ACTION_KEYS` 与 `_ACTIONS` 不同步启动即 fail-fast。
+- **unknown action 错误形态变化**（A2）：`action` 由 `Literal[*_ACTIONS]` 生成入参 enum（ListTools 可见），非法值改由 MCP arg_model 拒为 ToolError 协议错误（此前结构化 invalid_input+actions 清单；该分支现仅 console 直调可达）。`output_schema` 仍为 None（v0.3.11 拍板不变）。
+- **夜间 spec 载荷重构**（A8-3，对抗 R2 抓出的上线即炸项）：scan.py 9 处 calls 的说明文本（原 `"rule"`/`"note"` 键混在 data 里）全部外置 `instruction` 键，`data` 只放真参数——B8 上线前不重构会打断夜间编译/心跳；死参 `audience:true` 删除。governance SKILL「带着也无害」口径同步删除。
+
+### Added
+
+- **`help` 按 action 单查**（A1）：`{"topic":"<动作名>"}` 返回单条手册（27 动作+scheduled_tasks；unknown topic 附 topics 清单）；全量模式不变。
+- **`evidence` 列举动作**（B3，26→27）：只读列偏好证据索引（memory_id/维度/subject/status/created_at/content_chars，不回正文），`status`/`work_type`/`limit`（默认 50 上限 200）过滤——void「不在证据索引中」死胡同的自纠通道。
+- **resolve 批量裁定**（B4）：`tickets=[{pending_id,decision,code?|new_type?}]` 1..20 条，单事务全落/全回滚带 `failed_index`（db 三 helper 加 `commit` 参数联动）；与单条互斥。
+- **plan_set `start_first`**（B5）：计划落库同事务把无依赖且未被 open blocking 锚定的首步标 in_progress（响应 `started_step_id`；全锚定 → `start_first_skipped=true`+说明，不产出卡死步骤）；严格布尔校验。
+- **compile 结构化 id 数组**（B1）：响应附 `evidence_ids`/`source_ids_suggested`（在世全集，含缺正文 skipped 行，与 submit 对账集同源）/`voided_ids`——submit 的 `source_memory_ids` 直接复制，消灭 fetch-then-parse（G3 警告与 scheduled 阻尼「疑似漏列」的共同根源）。
+- **compile 素材包软闸**（B6）：`MEMA_TWIN_COMPILE_BUDGET_CHARS` 默认 60000（对齐 playbook 60k 先例），超闸只警告不截断（全量投影拍板不破）；env 非法回落默认+warnings 提示。
+- **裸报错统一补指路**（A4，≥13 处）：task_*/step/resolve/tool_log 的 not_found 与 unknown code 附「task_recent/task_get/taxonomy 可查」类下一步指引（一处 planning guard 修三动作）；plan_revise steps_remove 被依赖一次列全全部依赖方（A5）。
+- **非法迁移报错附合法目标表**（A5）：从 `_TRANSITIONS` 生成「'done' 允许的下一状态：…」；参数类 internal_error 附 help 指路、存储类不挂（区分 database is locked 与参数畸形）。
+
+### Fixed
+
+- **rollback 显式 no-op 布尔**（B2）：已 active 时不再 pop `already_active`（对齐 void/step_update 口径；playbook_rollback 同款）。
+- **void 响应副作用显式键化**（B7 第一步）：`persona_stale`/`audience_stale` 从 note 长句拼接提为结构化键，note 单句化；prose 键域冻结条款入 README。
+- **pending status 四值校验**（A8-4）：仅接受 `pending|mapped|canonicalized|rejected`（此前未知值静默返回空 items 归因误导）。
+- **help 硬限制全量载明**（A6）：write 8000/brief 2000/available_tools 帽/prompt_md 10 万/tool_log 字段帽/pb- 保留/origin=scheduled/task_evaluate clamp/taxonomy compact 严格布尔/step_update 批量互斥全集——此前只活在代码与报错里。
+- **死面清理**（A8）：README 三行 v0.4.7 滞后、examples 死配置 MEMA_TWIN_MEMA_URL 删除（保留 CLIENT_ID）、stall 阈值与冷却双常量分开表述。
+- **安装副本版本戳**（A7）：`make install-skill` 注入版本注释行 + 新 `make check-skill`（去戳 diff 全宿主副本，滞后即红）——修复 v0.4.8 安装副本教退役流程的活冲突。
+
+### Notes
+
+- `_ACTIONS`/`_action_help` 上移至工具定义前（FastMCP 装饰期即求值注解的顺序要求，R1 spike 验证）。
+- spec 重构配有扫描测试：全部 calls 的 data 键 ∈ `_ACTION_KEYS`（防再犯）。
+
 ## [0.5.1] — 2026-11-16
 
 偏好归因（批次 `memory-writer-20261116`）：证据行落「调用方」标识，供 `/mema/` 记忆详情显示「写入方」。

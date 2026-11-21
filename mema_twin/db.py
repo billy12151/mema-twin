@@ -357,7 +357,8 @@ def _ensure_type_row(conn: sqlite3.Connection, kind: str, code: str) -> sqlite3.
     ).fetchone()
 
 
-def append_alias(conn: sqlite3.Connection, kind: str, code: str, alias: str) -> list[str]:
+def append_alias(conn: sqlite3.Connection, kind: str, code: str, alias: str,
+                 commit: bool = True) -> list[str]:
     a = alias.strip()
     if not a:
         return json.loads((_ensure_type_row(conn, kind, code))["aliases"] or "[]")
@@ -380,12 +381,15 @@ def append_alias(conn: sqlite3.Connection, kind: str, code: str, alias: str) -> 
             "UPDATE twin_types SET aliases=? WHERE type_kind=? AND code=?",
             (json.dumps(aliases, ensure_ascii=False), kind, code),
         )
-        conn.commit()
+        if commit:
+            # commit=False（v0.6 B4）：resolve 批量模式外层单事务，禁中途提交
+            conn.commit()
     return aliases
 
 
 def add_canonical(conn: sqlite3.Connection, kind: str, code: str, zh: str,
-                  en: str = "", domain: str = "", aliases: list[str] | None = None) -> None:
+                  en: str = "", domain: str = "", aliases: list[str] | None = None,
+                  commit: bool = True) -> None:
     code = validate_code_segment(code)
     zh = (zh or "").strip()
     if not zh:
@@ -400,7 +404,8 @@ def add_canonical(conn: sqlite3.Connection, kind: str, code: str, zh: str,
         " VALUES(?,?,?,?,?,?,1,'active',?)",
         (kind, code, zh, en, domain, json.dumps(aliases or [], ensure_ascii=False), now_iso()),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def upsert_pending(conn: sqlite3.Connection, kind: str, raw_value: str) -> int:
@@ -432,12 +437,13 @@ def list_pending(conn: sqlite3.Connection, status: str = "pending") -> list[dict
 
 
 def set_pending(conn: sqlite3.Connection, pending_id: int, status: str,
-                resolved_code: str | None) -> None:
+                resolved_code: str | None, commit: bool = True) -> None:
     conn.execute(
         "UPDATE twin_pending_values SET status=?, resolved_code=? WHERE id=?",
         (status, resolved_code, pending_id),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 # ---- twin_evidence：偏好证据（v0.5.0 起本体自持，content 即正文）----
