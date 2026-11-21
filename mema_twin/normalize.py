@@ -97,5 +97,8 @@ def gate_reject(misses: list[dict]) -> dict | None:
         fields[m["kind"]] = {"raw": m["raw"],
                              "candidates": m.get("candidates") or [],
                              "pending_id": m["pending_id"]}
-    return {"ok": False, "error": "unmatched_value", "fields": fields,
+    return {"ok": False, "error": "unmatched_value",
+            "reason": (f"{'/'.join(fields)} 未命中清单（明细在 fields.*.candidates，"
+                       "票据 id 在 fields.*.pending_id）——按 guidance 问用户裁定后重试"),
+            "fields": fields,
             "guidance": GATE_GUIDANCE}

@@ -160,7 +160,8 @@ def _gate_dependencies(conn, step: dict) -> dict | None:
     first = open_deps[0]
     return {"ok": False, "error": "invalid_input",
             "reason": (f"步骤 #{step['id']}「{step['title']}」依赖 #{first['id']}"
-                       f"「{first['title']}」未闭环（当前 {first['status']}），不可推进"),
+                       f"「{first['title']}」未闭环（当前 {first['status']}），不可推进"
+                       f"——先 step_update(step_id={first['id']}, status=done/skipped)"),
             "open_steps": open_deps}
 
 
@@ -173,7 +174,8 @@ def _gate_single_in_progress(conn, task_id: int, exclude_step_id: int) -> dict |
         return None
     return {"ok": False, "error": "invalid_input",
             "reason": (f"该任务已有进行中步骤 #{rows[0]['id']}「{rows[0]['title']}」"
-                       "（单一 in_progress）；先将其落到 done/failed/skipped 再开新步骤"),
+                       f"（单一 in_progress）；先 step_update(step_id={rows[0]['id']}, "
+                       "status=done/failed/skipped) 收掉它，再推进本步骤"),
             "in_progress_steps": [{"id": r["id"], "title": r["title"]} for r in rows]}
 
 
