@@ -197,7 +197,8 @@ def _action_write(data: dict) -> dict:
         for kind in kinds:
             # 归一门（v0.3.8）：未命中不落库——收集后整笔打回
             r = normalize.normalize_value(kind, str(data[kind]), conn,
-                                          content=content, client=client)
+                                          content=content, client=client,
+                                          source_kind="write")
             if r.get("error"):
                 return {"ok": False, "error": "invalid_input", "field": kind, "reason": r.get("reason")}
             dims[kind] = r
@@ -659,6 +660,7 @@ def _action_pending(data: dict) -> dict:
                       "resolved_code": r["resolved_code"],
                       "created_at": r["created_at"],
                       "client": r.get("client") or "",
+                      "source_kind": r.get("source_kind") or "unknown",
                       "content_preview": snap[:200],
                       "content_chars": len(snap)})
     return {"ok": True, "status": status, "items": items}
@@ -737,9 +739,24 @@ def _resolve_ticket(conn, pid, decision, code, new_type,
     if code is not None:
         out["resolved_code"] = code
     # v0.6.2 D4：响应附快照全文（reject 也附——裁定者关票前最后一次看到内容）
+    # v0.6.3：按 source_kind 区分引导（R2 险-1 二义性——task_start 的快照是建档
+    # brief 非偏好正文，照抄 write 会产出垃圾证据）
+    source_kind = row["source_kind"] if "source_kind" in row.keys() else ""
     if snap:
         out["content_snapshot"] = snap
         out["content_chars"] = len(snap)
+        out["content_source"] = source_kind or "unknown"
+        if decision in ("map", "canonicalize", "reject"):
+            # task_start 来源的提醒在 reject 时同样附（R2 P2-1：关票前最后一次
+            # 看到内容，brief 非偏好的认知在此刻同样有价值）
+            if source_kind == "task_start":
+                out["content_source_note"] = (
+                    "此快照来自 task_start 建档 brief，是任务描述不是偏好——"
+                    "照抄 write 会产出垃圾证据；仅当其中确有可复用的偏好时，"
+                    "重写为偏好形式再 write（维度已合法化）")
+            elif source_kind == "write" and decision != "reject":
+                out["content_source_note"] = ("此快照是偏好正文，可直接照抄 write"
+                                              "（维度已合法化）")
     if decision == "reject":
         out["note"] = ("已裁定不入体系。放弃本次写入，不得再拿原值重试"
                        "（票据会复活成新的裁定义务）")

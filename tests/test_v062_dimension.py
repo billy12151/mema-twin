@@ -316,3 +316,50 @@ def test_d5_duplicate_also_hints_orphan():
 def test_d6_skill_rationale_grep():
     src = open("skill/SKILL.md", encoding="utf-8").read()
     assert "自主对齐已有口径" in src and "不需要被打断" in src
+
+
+def test_v063_source_kind_tracked_and_guided():
+    """v0.6.3 source_kind：write 与 task_start 来源分流，resolve 响应按来源
+    区别引导（R2 险-1 二义性结构化修复）。"""
+    # write 来源
+    pid_w = _make_pending()
+    r_w = _t("resolve", {"pending_id": pid_w, "decision": "map", "code": "leadership"})
+    assert r_w["ok"] and r_w.get("content_source") == "write"
+    assert "可直接照抄" in r_w.get("content_source_note", "")
+    # task_start 来源（map 后「灵能监理司」已命中，换未命中值）
+    _t("task_start", {"brief": "帮老板写一份双十一大促复盘报告", "work_type": "周报",
+                      "audience": "灵能监理司2", "purpose": "同步"})
+    items = _t("pending", {})["items"]
+    ts_ticket = next(it for it in items if it["source_kind"] == "task_start")
+    assert ts_ticket["content_preview"].startswith("帮老板写")
+    r_ts = _t("resolve", {"pending_id": ts_ticket["id"], "decision": "map",
+                          "code": "regulator"})
+    assert r_ts["ok"] and r_ts.get("content_source") == "task_start"
+    assert "不是偏好" in r_ts.get("content_source_note", "")
+    assert "垃圾证据" in r_ts.get("content_source_note", "")
+
+
+def test_v063_reject_and_unknown_forms():
+    """reject 响应 content_source 在场（含 task_start note）；旧票 unknown 形态。"""
+    _t("task_start", {"brief": "另一份 brief", "work_type": "周报",
+                      "audience": "灵能监理司3", "purpose": "同步"})
+    items = _t("pending", {})["items"]
+    ts = next(it for it in items if it["source_kind"] == "task_start")
+    r = _t("resolve", {"pending_id": ts["id"], "decision": "reject"})
+    assert r["ok"] and r.get("content_source") == "task_start"
+    assert "不是偏好" in r.get("content_source_note", "")
+    # 旧票形态（source_kind='' 的 pending 票——模拟 0.6.2 前存量）：content_source
+    # 为 unknown 且无 note
+    _t("write", {"content": "旧票正文", "work_type": "周报",
+                 "audience": "灵能监理司4", "purpose": "同步"})
+    conn = db.connect()
+    conn.execute("UPDATE twin_pending_values SET source_kind='' WHERE client=''",
+                 ())
+    conn.commit()
+    conn.close()
+    items = _t("pending", {})["items"]
+    old = next(it for it in items if it["source_kind"] == "unknown")
+    r2 = _t("resolve", {"pending_id": old["id"], "decision": "map",
+                        "code": "leadership"})
+    assert r2["ok"] and r2.get("content_source") == "unknown"
+    assert "content_source_note" not in r2  # unknown 无引导 note

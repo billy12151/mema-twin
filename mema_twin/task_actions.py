@@ -333,7 +333,8 @@ def _action_task_start(data: dict) -> dict:
                         "reason": "过长（上限 200 字符）"}
             # 归一门（v0.3.8）：未命中收集后整笔打回（建档之前，无半建任务）
             r = normalize.normalize_value(kind, raw, conn,
-                                          content=brief_for_ticket, client=client)
+                                          content=brief_for_ticket, client=client,
+                                          source_kind="task_start")
             if r.get("error"):
                 return {"ok": False, "error": "invalid_input", "field": kind,
                         "reason": r.get("reason")}

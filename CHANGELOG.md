@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [0.6.3] — 2026-11-22
+
+D4 快照二义性结构化修复（v0.6.2 R2 对抗实锤：task_start 撞票的快照是建档 brief 非偏好正文，照抄 write 会产出垃圾证据；单列小改，580 测试绿）。
+
+### Added
+
+- **twin_pending_values 加 source_kind 列**（write|task_start|空串=旧票）：撞票来源结构化标记，pending 响应 items 与 resolve 响应均带 `content_source`。
+- **resolve 响应按来源区别引导**：write 来源 → content_source_note「可直接照抄 write」；task_start 来源 → 「快照是建档 brief 非偏好——照抄 write 会产出垃圾证据，仅当含真实偏好时重写后再 write」。help pending/resolve 同步。
+
+### Notes
+
+- reject 时 content_source 同样在场（note 按 map/canonicalize 附）；无快照票据不出 content_source 键。回滚 0.6.3→0.6.2 安全（0.6.2 不读 source_kind 列）。
+
 ## [0.6.2] — 2026-11-22
 
 维度治理闭环（方案 `~/ZCodeProject/docs/mema-twin-v062-dimension-plan.md` v3，方案 R1+R2 与实施后 R1+R2 四轮独立评审）。3 个新列幂等迁移+回填，零破坏性变更。

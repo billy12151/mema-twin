@@ -18,11 +18,12 @@ from . import db, taxonomy
 
 
 def normalize_value(kind: str, raw: str, conn: Any, content: str = "",
-                    client: str = "") -> dict:
+                    client: str = "", source_kind: str = "") -> dict:
     """命中 → ok=True（code/label_zh/matched_by）；空值 → invalid_input；
     未命中 → ok=False 且带 candidates（该 kind 动态清单，DB 实时读）+ content/
-    client（v0.6.2 D4：经 miss dict 透传给 gate_reject 落票据快照与宿主归属）。
-    本函数不写 pending——票据由 gate_reject 在打回时创建，未打回则无义务。"""
+    client/source_kind（v0.6.2 D4 与 v0.6.3：经 miss dict 透传给 gate_reject 落
+    票据快照、宿主归属与快照来源）。本函数不写 pending——票据由 gate_reject 在
+    打回时创建，未打回则无义务。"""
     v = (raw or "").strip()
     if not v:
         return {"ok": False, "error": "invalid_input", "kind": kind, "reason": "empty value"}
@@ -38,7 +39,7 @@ def normalize_value(kind: str, raw: str, conn: Any, content: str = "",
                     "label_zh": row["label_zh"], "matched_by": "db_alias"}
     return {"ok": False, "kind": kind, "raw": v, "code": None,
             "matched_by": None, "candidates": candidates(kind, conn),
-            "content": content, "client": client}
+            "content": content, "client": client, "source_kind": source_kind}
 
 
 def candidates(kind: str, conn: Any) -> list[dict]:
@@ -141,7 +142,8 @@ def gate_reject(misses: list[dict]) -> dict | None:
         for m in misses:
             r2 = normalize_value(m["kind"], m["raw"], conn,
                                  content=m.get("content") or "",
-                                 client=m.get("client") or "")
+                                 client=m.get("client") or "",
+                                 source_kind=m.get("source_kind") or "")
             if r2.get("ok"):
                 m.clear()
                 m.update(r2)  # 并发他方已裁定：该维度转为命中，dims 同步
@@ -151,7 +153,8 @@ def gate_reject(misses: list[dict]) -> dict | None:
             m["pending_id"] = db.upsert_pending(
                 conn, m["kind"], m["raw"],
                 content_snapshot=m.get("content") or "",
-                client=m.get("client") or "")
+                client=m.get("client") or "",
+                source_kind=m.get("source_kind") or "")
             remaining.append(m)
     finally:
         conn.close()

@@ -241,7 +241,7 @@ def _migrate(conn: sqlite3.Connection, key: str) -> None:
             if "duplicate column" not in str(e).lower():
                 raise
     pv_cols = {r["name"] for r in conn.execute("PRAGMA table_info(twin_pending_values)")}
-    for col in ("content_snapshot", "client"):
+    for col in ("content_snapshot", "client", "source_kind"):
         if col not in pv_cols:
             try:
                 conn.execute(
@@ -436,7 +436,8 @@ def add_canonical(conn: sqlite3.Connection, kind: str, code: str, zh: str,
 
 
 def upsert_pending(conn: sqlite3.Connection, kind: str, raw_value: str,
-                   content_snapshot: str = "", client: str = "") -> int:
+                   content_snapshot: str = "", client: str = "",
+                   source_kind: str = "") -> int:
     """归一门裁定义务票据（v0.3.8）：打回时创建/续接。UNIQUE(type_kind, raw_value)
     覆盖全部状态：reject 后同值再现必须复活为 pending（hit_count 续增），否则
     INSERT 撞约束让 IntegrityError 逸出工具边界。hit_count 口径 = 打回次数。
@@ -445,17 +446,21 @@ def upsert_pending(conn: sqlite3.Connection, kind: str, raw_value: str,
 
     v0.6.2 D4：content_snapshot（打回时偏好正文全量——跨会话裁定的补写底稿）
     与 client（宿主归属）。DO UPDATE 用 COALESCE(NULLIF(?, ''), 列)——调用方
-    缺省传空串不抹已有快照（R1 P2-5）。"""
+    缺省传空串不抹已有快照（R1 P2-5）。
+
+    v0.6.3：source_kind（快照来源 write|task_start——R2 险-1 二义性结构化修复：
+    task_start 的快照是建档 brief 非偏好正文，resolve 响应按来源区别引导）。"""
     conn.execute(
         "INSERT INTO twin_pending_values(type_kind, raw_value, created_at,"
-        " content_snapshot, client)"
-        " VALUES(?,?,?,?,?)"
+        " content_snapshot, client, source_kind)"
+        " VALUES(?,?,?,?,?,?)"
         " ON CONFLICT(type_kind, raw_value) DO UPDATE SET"
         " status='pending', resolved_code=NULL, hit_count=hit_count+1,"
         " content_snapshot=COALESCE(NULLIF(?, ''), content_snapshot),"
-        " client=COALESCE(NULLIF(?, ''), client)",
-        (kind, raw_value, now_iso(), content_snapshot, client,
-         content_snapshot, client),
+        " client=COALESCE(NULLIF(?, ''), client),"
+        " source_kind=COALESCE(NULLIF(?, ''), source_kind)",
+        (kind, raw_value, now_iso(), content_snapshot, client, source_kind,
+         content_snapshot, client, source_kind),
     )
     row = conn.execute(
         "SELECT id FROM twin_pending_values WHERE type_kind=? AND raw_value=?",
