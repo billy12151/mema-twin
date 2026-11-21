@@ -173,3 +173,69 @@ def match_exact(kind: str, value: str) -> CanonicalType | None:
 def _require_kind(kind: str) -> None:
     if kind not in KINDS:
         raise ValueError(f"unknown type_kind: {kind!r}; expected one of {KINDS}")
+
+
+# v0.6.2 D1：维度选码说明（适用边界+易混淆项），≤120 字——独立 dict 注入，
+# 不改 CanonicalType 构造块（50 条含括号别名的正则注入有语法风险，R1 评审期实证）
+_DESCRIPTIONS: dict[str, str] = {
+    # ---- work_type 33 ----
+    "academic_report": "论文/学术报告/研究综述等学术文体，强调引用规范与论证结构；行业与市场研究归 research_report",
+    "bid_document": "投标/标书/询价应答等竞标文书，强调合规响应与评分点覆盖；售前方案书归 proposal",
+    "budget_proposal": "立项/预算/采购申请，面向资源审批方；执行排期归 project_plan",
+    "comm_copy": "邮件/群通告/IM 消息等日常沟通文案；对外宣传归 marketing_copy",
+    "contract_draft": "合同/协议的条款文本起草与修订；法律风险意见归 legal_opinion",
+    "creative_brief": "创意方案/策划案/内容大纲等构思阶段产物；成品投放文案归 marketing_copy",
+    "data_analysis": "基于数据的分析报告与报表解读，结论须数据支撑；市场调研归 research_report，财务口径归 financial_analysis",
+    "due_diligence": "尽调/审计类系统性核查长报告；单项法律合规意见归 legal_opinion",
+    "financial_analysis": "财务报表/估值/预算执行分析，财务口径；一般经营数据归 data_analysis",
+    "incident_report": "故障/事故的通报与专项复盘，含影响面与根因；泛经验总结归 retrospective",
+    "jd_recruit": "岗位 JD/招聘启事/面试题等招聘材料；人员评价归 performance_review",
+    "knowledge_doc": "知识库条目/wiki/最佳实践等沉淀文档；教学课件归 training_material，个人随手记归 personal_notes",
+    "legal_opinion": "法律意见/合规分析/律师函等法律专业文书；合同条款文本归 contract_draft",
+    "marketing_copy": "推广/活动/产品介绍等营销文案；新闻通稿归 press_release，口播脚本归 video_script",
+    "meeting_minutes": "会议纪要/评审记录/访谈记录等过程记录；周期性工作汇报归 work_report",
+    "official_doc": "公文/红头文件/请示/函件等正式行政文体；日常团队沟通归 comm_copy",
+    "performance_review": "绩效评语/晋升材料/推荐信等对人的评价材料；述职汇报归 work_report",
+    "personal_notes": "个人笔记/灵感/随手记，无固定结构要求；可共享的结构化知识归 knowledge_doc",
+    "policy_sop": "管理制度/SOP/流程规范等约束性文档；操作层手册归 user_manual",
+    "presentation": "PPT/发言稿/路演材料等演示文体；纯文字周期汇报归 work_report",
+    "press_release": "新闻稿/通稿/对外声明等媒体口径内容；商业推广文案归 marketing_copy",
+    "product_doc": "PRD/需求文档/MRD 等产品侧文档；技术实现侧归 software_design，测试验收归 test_report",
+    "project_plan": "项目计划/实施排期/行动计划；资源与立项申请归 budget_proposal",
+    "proposal": "方案书/解决方案/售前建议方案；竞标文书归 bid_document，需求文档归 product_doc",
+    "research_report": "调研/行业研究/竞品分析/技术调研等洞察类报告；数据分析归 data_analysis，选型结论归 tech_eval",
+    "retrospective": "复盘/经验总结类回顾文档；故障专项归 incident_report，周期汇报归 work_report",
+    "software_design": "架构设计/详细设计/接口文档等技术实现侧文档；需求侧归 product_doc",
+    "tech_eval": "技术选型/可行性分析/PoC 结论；调研过程归 research_report",
+    "test_report": "测试报告/验收报告/质量报告；故障根因归 incident_report",
+    "training_material": "课件/教程/内训讲义等教学材料；知识条目归 knowledge_doc",
+    "user_manual": "使用手册/操作指南等操作层文档；管理制度归 policy_sop",
+    "video_script": "短视频脚本/直播话术/分镜等视频文案；图文推广归 marketing_copy",
+    "work_report": "周报/月报/季度总结/述职等周期性工作汇报；经营数据分析归 data_analysis，述职演示归 presentation",
+    # ---- audience 9 ----
+    "board_investor": "董事会/投资人/股东层——决策与资本视角；内部直属上级归 direct_manager，公司高层归 leadership",
+    "direct_manager": "直属上级——进展汇报与请示的第一对象；公司高层决策层归 leadership",
+    "external_client": "外部客户/甲方——交付物与商务沟通的对象；供应商与渠道归 partner_vendor",
+    "leadership": "高层与决策层——资源/战略/取舍视角的汇报；具体执行请示归 direct_manager",
+    "partner_vendor": "合作伙伴/供应商/渠道——商务协作对象；交付客户归 external_client",
+    "public": "公开发布/大范围传播的内容；面向媒体口径的稿子可同时选 press_release 工种",
+    "regulator": "监管/审查/审计机构等外部监督方；内部合规意见归 legal_opinion",
+    "self": "自己看的记录与提醒；团队共享归 team_peers",
+    "team_peers": "团队与跨部门同事——协作与知会对象；直属上级归 direct_manager，高层归 leadership",
+    # ---- purpose 8 ----
+    "request_decision": "需要 owner/决策方拍板或给资源——结论等待方；单纯告知进展归 sync_info",
+    "sync_info": "同步进展/知会信息，无需对方行动；要资源要拍板归 request_decision",
+    "drive_action": "推动对方执行/派工/布置任务——结论期待行动；单纯告知归 sync_info",
+    "review_defense": "内容将被评审/答辩/质询——需经得起追问；存档留痕归 record_evidence",
+    "knowledge_archive": "为长期沉淀与传承而写——后人可检索复用；单纯留痕归 record_evidence",
+    "persuade_sell": "目标是说服/售卖——论点与证据服务转化；客观同步归 sync_info",
+    "collaborate_help": "向他人求助/请求协作——明确求助点；布置任务归 drive_action",
+    "record_evidence": "为留痕/备案/合规存证而写——可追溯优先；知识复用归 knowledge_archive",
+}
+
+
+def description_for(code: str) -> str:
+    """维度选码说明（v0.6.2 D1）：code 精确查，自建码走 DB description 列
+    （调用方合并），内置码查本表；无则空串。"""
+    return _DESCRIPTIONS.get(code, "")
+

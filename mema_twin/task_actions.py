@@ -313,6 +313,10 @@ def _action_task_start(data: dict) -> dict:
     flow.ensure_schema()
     conn = db.connect()
     try:
+        # v0.6.2 D4（R2 炸-2）：client 提取前置到归一门之前——票据快照需要宿主
+        # 归属；副作用（脏 client + 归一 miss 优先级变化）测试钉住
+        client = identity.effective_client(data) or ""
+        brief_for_ticket = brief
         dims: dict = {}
         misses: list[dict] = []
         for kind in taxonomy.KINDS:
@@ -328,7 +332,8 @@ def _action_task_start(data: dict) -> dict:
                 return {"ok": False, "error": "invalid_input", "field": kind,
                         "reason": "过长（上限 200 字符）"}
             # 归一门（v0.3.8）：未命中收集后整笔打回（建档之前，无半建任务）
-            r = normalize.normalize_value(kind, raw, conn)
+            r = normalize.normalize_value(kind, raw, conn,
+                                          content=brief_for_ticket, client=client)
             if r.get("error"):
                 return {"ok": False, "error": "invalid_input", "field": kind,
                         "reason": r.get("reason")}
@@ -348,7 +353,7 @@ def _action_task_start(data: dict) -> dict:
         brief=brief, status="planning", dims=dims,
         interpreted_intent=str(data.get("interpreted_intent") or "") or None,
         persona_version=(persona or {}).get("version"),
-        client=identity.effective_client(data),
+        client=client,
         session_todos=flow.current_todos(data.get("session")),
         available_tools=_coerce_available_tools(data.get("available_tools")),
     )

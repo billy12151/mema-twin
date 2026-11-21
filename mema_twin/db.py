@@ -230,6 +230,33 @@ def _migrate(conn: sqlite3.Connection, key: str) -> None:
             "UPDATE twin_types SET domain=? WHERE type_kind='work_type' AND code=? AND is_custom=0",
             (t.domain, t.code),
         )
+    # v0.6.2 D1：维度说明字段（3 个新列，R2 炸-3：ADD COLUMN 不幂等——复用
+    # twin_evidence 列的 duplicate-column 吞异常先例，防首连竞窗两线程同跑 500）
+    tt_cols = {r["name"] for r in conn.execute("PRAGMA table_info(twin_types)")}
+    if "description" not in tt_cols:
+        try:
+            conn.execute(
+                "ALTER TABLE twin_types ADD COLUMN description TEXT NOT NULL DEFAULT ''")
+        except sqlite3.OperationalError as e:
+            if "duplicate column" not in str(e).lower():
+                raise
+    pv_cols = {r["name"] for r in conn.execute("PRAGMA table_info(twin_pending_values)")}
+    for col in ("content_snapshot", "client"):
+        if col not in pv_cols:
+            try:
+                conn.execute(
+                    f"ALTER TABLE twin_pending_values ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
+    # D1 存量回填（R1 P0-1）：只补空值不覆写治理侧（v0.3.9 domain 回填先例）；
+    # 没有回填则既有部署库内置行 desc 永远空串、D1/D2 整体空转
+    for kind in ("work_type", "audience", "purpose"):
+        for t in taxonomy.all_types(kind):
+            conn.execute(
+                "UPDATE twin_types SET description=? WHERE type_kind=?"
+                " AND code=? AND is_custom=0 AND (description='' OR description IS NULL)",
+                (taxonomy.description_for(t.code), kind, t.code))
     has_tasks = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='twin_tasks'"
     ).fetchone() is not None
@@ -408,18 +435,27 @@ def add_canonical(conn: sqlite3.Connection, kind: str, code: str, zh: str,
         conn.commit()
 
 
-def upsert_pending(conn: sqlite3.Connection, kind: str, raw_value: str) -> int:
+def upsert_pending(conn: sqlite3.Connection, kind: str, raw_value: str,
+                   content_snapshot: str = "", client: str = "") -> int:
     """归一门裁定义务票据（v0.3.8）：打回时创建/续接。UNIQUE(type_kind, raw_value)
     覆盖全部状态：reject 后同值再现必须复活为 pending（hit_count 续增），否则
     INSERT 撞约束让 IntegrityError 逸出工具边界。hit_count 口径 = 打回次数。
     返回值回查而非 lastrowid：冲突走 DO UPDATE 路径时 lastrowid 不可靠（新连接
-    上是 0），同值重试会拿到脏票据 id。"""
+    上是 0），同值重试会拿到脏票据 id。
+
+    v0.6.2 D4：content_snapshot（打回时偏好正文全量——跨会话裁定的补写底稿）
+    与 client（宿主归属）。DO UPDATE 用 COALESCE(NULLIF(?, ''), 列)——调用方
+    缺省传空串不抹已有快照（R1 P2-5）。"""
     conn.execute(
-        "INSERT INTO twin_pending_values(type_kind, raw_value, created_at)"
-        " VALUES(?,?,?)"
+        "INSERT INTO twin_pending_values(type_kind, raw_value, created_at,"
+        " content_snapshot, client)"
+        " VALUES(?,?,?,?,?)"
         " ON CONFLICT(type_kind, raw_value) DO UPDATE SET"
-        " status='pending', resolved_code=NULL, hit_count=hit_count+1",
-        (kind, raw_value, now_iso()),
+        " status='pending', resolved_code=NULL, hit_count=hit_count+1,"
+        " content_snapshot=COALESCE(NULLIF(?, ''), content_snapshot),"
+        " client=COALESCE(NULLIF(?, ''), client)",
+        (kind, raw_value, now_iso(), content_snapshot, client,
+         content_snapshot, client),
     )
     row = conn.execute(
         "SELECT id FROM twin_pending_values WHERE type_kind=? AND raw_value=?",

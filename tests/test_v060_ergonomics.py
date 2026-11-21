@@ -229,7 +229,7 @@ def test_a4_resolve_map_invalid_code_lists_taxonomy():
                  "audience": "高层", "purpose": "同步"})
     pid = db.list_pending(db.connect())[0]["id"]
     r = _t("resolve", {"pending_id": pid, "decision": "map", "code": "nope"})
-    assert r["ok"] is False and "taxonomy" in r["reason"]
+    assert r["ok"] is False and "all_values" in r["reason"]
 
 
 # ---- A5 迁移合法目标 + 被依赖列全 ----

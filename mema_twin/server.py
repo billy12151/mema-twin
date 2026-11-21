@@ -73,7 +73,11 @@ _HELP_ENTRIES: dict[str, str] = {
              "同类型下内容完全相同的偏好命中词法去重：返回 ok+duplicate=true"
              "（幂等成功），请勿重试也无需改写。"
              "落库后响应可能带 similar_existing（字面相似的既有偏好，ratio≥0.82，"
-             "纯词法非语义判定，不拦截）——相似≠重复：是否 void 新写的由你/用户裁定。",
+             "纯词法非语义判定，不拦截）与 orphan_pending_tickets（你此前被拒的"
+             "挂票疑似已被本次取代——确认后 resolve(reject) 关闭，勿盲目关不同"
+             "维度的票）。维度值撞清单会整笔打回并附 all_values 全量与说明——"
+             "可以直接写不预查清单；但先查 taxonomy 再写更优：拥有完整分类视野、"
+             "自主对齐已有口径，owner 不需要被打断来裁值。",
     "status": "查看各 work_type 的 prompt 版本概况（含体积/超预算标记）、受众画像"
               "（audience_profiles）、需重抽象的受众（audience_stale）、条款作废待重编"
               "（persona_stale）、pending 数量（归一门待裁票据）、未编译统计、夜间被拒计数"
@@ -114,14 +118,22 @@ _HELP_ENTRIES: dict[str, str] = {
                 "kind 字段；数组传单元素也走多类形状）。compact 仅接受布尔 true"
                 "（精简投影 code/zh/aliases 前 5——省 token 拉取用；传 \"true\"/1 "
                 "等非布尔会被打回；完整别名面只在非 compact 响应里）。",
-    "pending": "列归一门待裁票据（打回的长尾值，含打回次数）。参数 status ∈ "
+    "pending": "列归一门待裁票据（打回的长尾值，含打回次数与宿主归属；"
+               "items 带 content_preview 前 200 字符与 content_chars——全文在 "
+               "resolve 裁定响应里取）。参数 status ∈ "
                "pending|mapped|canonicalized|rejected（默认 pending）。",
     "resolve": "治理待裁值。单条：pending_id + decision ∈ map(带 code)|canonicalize"
-               "(带 new_type{code,zh,en,domain})|reject"
+               "(带 new_type{code,zh,en,domain,description?})|reject"
                "（reject=不入体系并放弃本次写入，不得拿原值重试）。"
-               "批量（v0.6）：tickets=[{pending_id, decision, code?|new_type?}]"
-               "（1..20 条，与单条 pending_id 互斥；单事务任一条失败整笔回滚带 "
-               "failed_index）；裁定后直接重试原写入。",
+               "响应带 content_snapshot（被拒写入的正文全文）——裁定后直接照抄它 "
+               "write，跨会话积压 3 步闭环零丢失；注意 task_start 撞票的快照是"
+               "建档 brief 而非偏好正文，照抄 write 前先判断是否真是偏好。"
+               "canonicalize 相似确认门：新值与"
+               "现有值 ratio≥0.82 或精确撞别名时打回 require_confirm——对照 "
+               "all_values 确认非重复后带 confirm=true 重试。"
+               "批量（v0.6）：tickets=[{pending_id, decision, code?|new_type?, "
+               "confirm?}]（1..20 条，与单条互斥；confirm 预扫摘出疑似重复票不进"
+               "事务，余票单事务全落/全回滚带 failed_index）；裁定后直接重试原写入。",
     "void": "作废一条偏好证据（冲突裁定「新替旧/撤销新写的」的执行机制）。参数 memory_id；"
             "行级作废、全链路排除、不可逆（正文在本库归档保留）；曾入编译的证据会"
             "触发 persona_stale 夜间重编（响应 persona_stale=true 显式标记），受众证据"
@@ -292,7 +304,7 @@ _ACTION_KEYS: dict[str, frozenset[str]] = {
     "taxonomy": frozenset({"kind", "compact", "client"}),
     "pending": frozenset({"status", "client"}),
     "resolve": frozenset({"pending_id", "decision", "code", "new_type",
-                          "tickets", "client"}),
+                          "confirm", "tickets", "client"}),
     "void": frozenset({"memory_id", "client"}),
     "evidence": frozenset({"status", "work_type", "limit", "client"}),
     "task_start": frozenset({"brief", "work_type", "audience", "purpose",

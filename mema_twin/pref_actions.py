@@ -50,22 +50,19 @@ def _seen_hint(client: str, code: str, version: int | None) -> bool:
     return False
 
 
-def _similar_existing(conn, wt_code: str, exclude_id: int, new_text: str) -> list[dict]:
-    """S7 相似提示（软通道）：difflib 字面相似度——纯词法非语义判定，不拦截
-    不落票，落库后把「库里有长得像的」递给 Agent 自裁（是否 void 新写的）。
-    护栏：任一侧 >2000 字符跳过（防 8000² ratio 阻塞）、长度差 >4 倍跳过、
-    quick_ratio 预筛、最多 3 条、比对集最近 100 行、排除自身。"""
+def _rank_similar(new_text: str, items: list[dict], text_key: str,
+                  threshold: float, project: tuple[str, ...] | None = None) -> list[dict]:
+    """公共相似比对核心（v0.6.2 D5 抽取，S7/D5/normalize.similar_values 共用
+    护栏：任一侧 >2000 字符跳过、长度差 >4 倍跳过、quick 0.75 预筛、
+    ratio≥threshold、最多 3 条、按 ratio 降序）。items 需含 text_key 字段；
+    project 指定响应白名单键（None=原条目全字段——调用方必须显式投影，防
+    快照/正文全文经相似通道泄漏进响应，R1 P1-2/P1-3）。"""
     from difflib import SequenceMatcher
     if len(new_text) > _SIM_MAX_CHARS:
         return []
-    rows = conn.execute(
-        "SELECT memory_id, subject, content FROM twin_evidence"
-        " WHERE work_type=? AND status IN ('uncompiled','compiled')"
-        " AND memory_id != ? ORDER BY memory_id DESC LIMIT ?",
-        (wt_code, exclude_id, _SIM_MAX_ROWS)).fetchall()
     sim: list[dict] = []
-    for row in rows:
-        old = row["content"] or ""
+    for item in items:
+        old = item.get(text_key) or ""
         if not old or len(old) > _SIM_MAX_CHARS:
             continue
         if max(len(old), len(new_text)) > 4 * min(len(old), len(new_text)):
@@ -74,14 +71,54 @@ def _similar_existing(conn, wt_code: str, exclude_id: int, new_text: str) -> lis
         if sm.quick_ratio() < _SIM_QUICK:
             continue
         ratio = sm.ratio()
-        if ratio >= _SIM_THRESHOLD:
-            sim.append({"memory_id": int(row["memory_id"]),
-                        "subject": row["subject"] or "",
-                        "ratio": round(ratio, 2)})
+        if ratio >= threshold:
+            out = ({k: item[k] for k in project if k in item}
+                   if project else dict(item))
+            out["ratio"] = round(ratio, 2)
+            sim.append(out)
             if len(sim) >= 3:
                 break
     sim.sort(key=lambda x: -x["ratio"])
     return sim
+
+
+def _similar_existing(conn, wt_code: str, exclude_id: int, new_text: str) -> list[dict]:
+    """S7 相似提示（软通道）：difflib 字面相似度——纯词法非语义判定，不拦截
+    不落票，落库后把「库里有长得像的」递给 Agent 自裁（是否 void 新写的）。
+    护栏：任一侧 >2000 字符跳过（防 8000² ratio 阻塞）、长度差 >4 倍跳过、
+    quick_ratio 预筛、最多 3 条、比对集最近 100 行、排除自身。核心循环已抽
+    _rank_similar（D5 孤儿票共用）。"""
+    rows = conn.execute(
+        "SELECT memory_id, subject, content FROM twin_evidence"
+        " WHERE work_type=? AND status IN ('uncompiled','compiled')"
+        " AND memory_id != ? ORDER BY memory_id DESC LIMIT ?",
+        (wt_code, exclude_id, _SIM_MAX_ROWS)).fetchall()
+    items = [{"memory_id": int(r["memory_id"]),
+              "subject": r["subject"] or "",
+              "content": r["content"] or ""} for r in rows]
+    return _rank_similar(new_text, items, "content", _SIM_THRESHOLD,
+                         project=("memory_id", "subject"))
+
+
+def _orphan_tickets(conn, client: str, new_text: str) -> list[dict]:
+    """D5 孤儿票提示（v0.6.2）：同宿主此前被拒写入的挂票（有快照）与本次正文
+    相似 → 疑似已被本次取代（维度合法化后重试成功），提示 Agent 显式 reject。
+    关联口径=同 client+正文相似；mapped/canonicalized 票不进扫描（已裁定）；
+    服务端不自动关票（作废动作归 Agent——R2 险-6 guidance 提醒核维度）。
+    client 空串（stdio 无头）参与匹配：单机形态全部调用天然同宿主（R2 险-3
+    的跨宿主串扰只存在于带头 http 形态，那里 client 非空正常区分）。"""
+    if len(new_text) > _SIM_MAX_CHARS:
+        return []
+    rows = conn.execute(
+        "SELECT id AS pending_id, type_kind, raw_value, content_snapshot"
+        " FROM twin_pending_values WHERE client=? AND status='pending'"
+        " AND content_snapshot != '' ORDER BY id DESC LIMIT ?",
+        (client, _SIM_MAX_ROWS)).fetchall()
+    items = [{"pending_id": int(r["pending_id"]), "type_kind": r["type_kind"],
+              "raw_value": r["raw_value"],
+              "content_snapshot": r["content_snapshot"]} for r in rows]
+    return _rank_similar(new_text, items, "content_snapshot", _SIM_THRESHOLD,
+                         project=("pending_id", "type_kind", "raw_value"))
 
 
 def _action_write(data: dict) -> dict:
@@ -147,6 +184,11 @@ def _action_write(data: dict) -> dict:
                 "reason": "tags 必须是字符串列表"}
     user_tags = [str(t) for t in raw_tags
                  if not str(t).startswith("twin:") and str(t) != "twin-preference"]
+    # v0.6.2 D4（R2 炸-2）：client 提取前置到归一门之前——miss 经 normalize_value
+    # 带进票据（client 列），否则票据宿主归属落空串、D5 孤儿匹配上线即死。
+    # 副作用声明：脏 client + 归一 miss 的错误优先级从 unmatched_value 变
+    # invalid_input（client 校验先行），测试钉住。
+    client = identity.effective_client(data) or ""
     conn = db.connect()
     dims: dict = {}
     misses: list[dict] = []
@@ -154,7 +196,8 @@ def _action_write(data: dict) -> dict:
         kinds = ("audience", "purpose") if audience_scoped else taxonomy.KINDS
         for kind in kinds:
             # 归一门（v0.3.8）：未命中不落库——收集后整笔打回
-            r = normalize.normalize_value(kind, str(data[kind]), conn)
+            r = normalize.normalize_value(kind, str(data[kind]), conn,
+                                          content=content, client=client)
             if r.get("error"):
                 return {"ok": False, "error": "invalid_input", "field": kind, "reason": r.get("reason")}
             dims[kind] = r
@@ -183,7 +226,6 @@ def _action_write(data: dict) -> dict:
         if audience_scoped else f"工作偏好：{dims['work_type'].get('raw')}"))
     # v0.5.1：调用方宿主标识随证据行落库（此前只喂审计，证据行没有归因；
     # 页面「写入方」显示的就是这个值）。http 头存在时头是权威，见 identity。
-    client = identity.effective_client(data) or ""
     conn = db.connect()
     try:
         res = db.add_local_evidence(conn, dims, subject=subject, content=content,
@@ -197,6 +239,16 @@ def _action_write(data: dict) -> dict:
         if inherited:
             # 继承透明面：哪些维度来自任务行（显式传入的不在此列）
             out["dims_inherited"] = inherited
+        # v0.6.2 D5 孤儿票提示（插桩在 dup 分支前，两路共用——R1 P2-6）：同宿主
+        # 此前被拒的写入若与本次正文相似，疑似已被本次（维度合法化后）取代——
+        # 提示 Agent 显式 reject 关票，服务端不自动关（作废动作归 Agent）
+        orphans = _orphan_tickets(conn, client, content)
+        if orphans:
+            out["orphan_pending_tickets"] = orphans
+            out["orphan_guidance"] = (
+                "以上挂票疑似已被本次写入取代（维度已合法化）——确认后 "
+                "resolve(reject) 关闭。先核对 type_kind/raw_value 是否属本次被拒"
+                "写入的维度：不同维度的挂票可能是另一笔未完成写入，勿盲目 reject")
         if res["duplicate"]:
             out["note"] = ("同类型已存在内容完全相同的偏好（词法去重命中），本次未重复"
                            "写入；本响应即幂等成功，请勿重试、也无需改写")
@@ -539,12 +591,15 @@ def _action_taxonomy(data: dict) -> dict:
             conn.close()
         merged: dict = {}
         for r in rows:
+            desc = r["description"] if "description" in r.keys() else ""
             merged[r["code"]] = {"code": r["code"], "zh": r["label_zh"], "en": r["label_en"],
                                  "domain": r["domain"], "aliases": r["aliases"],
+                                 "description": desc or taxonomy.description_for(r["code"]),
                                  "is_custom": bool(r["is_custom"])}
         for t in taxonomy.all_types(kind):
             merged.setdefault(t.code, {"code": t.code, "zh": t.zh, "en": t.en,
                                        "domain": t.domain, "aliases": list(t.aliases),
+                                       "description": taxonomy.description_for(t.code),
                                        "is_custom": False})
         items = list(merged.values())
         if compact:
@@ -590,16 +645,34 @@ def _action_pending(data: dict) -> dict:
                 "reason": f"status 仅接受 {'|'.join(_PENDING_STATUSES)}，收到 {status!r}"}
     conn = db.connect()
     try:
-        return {"ok": True, "status": status, "items": db.list_pending(conn, status)}
+        rows = db.list_pending(conn, status)
     finally:
         conn.close()
+    # v0.6.2 D4：显式投影（防 SELECT * 泄漏全文快照，R1 P1-3）——列表带预览与
+    # 字数，全文在 resolve 响应按需取（积压批量全带会 72KB 级爆炸）
+    items = []
+    for r in rows:
+        snap = r.get("content_snapshot") or ""
+        items.append({"id": r["id"], "type_kind": r["type_kind"],
+                      "raw_value": r["raw_value"],
+                      "hit_count": r["hit_count"], "status": r["status"],
+                      "resolved_code": r["resolved_code"],
+                      "created_at": r["created_at"],
+                      "client": r.get("client") or "",
+                      "content_preview": snap[:200],
+                      "content_chars": len(snap)})
+    return {"ok": True, "status": status, "items": items}
 
 
 def _resolve_ticket(conn, pid, decision, code, new_type,
-                    commit: bool = True) -> dict:
+                    commit: bool = True, confirm: bool = False) -> dict:
     """单票校验+落库（v0.6 B4 从 _action_resolve 抽出，单条/批量共用）。
     事务边界归调用方：commit=True 单条模式即时提交；commit=False 批量模式
-    外层统一 commit/rollback（db helper 的 commit 参数随之联动）。"""
+    外层统一 commit/rollback（db helper 的 commit 参数随之联动）。
+
+    v0.6.2 D3：canonicalize 相似确认门（新 code/zh 与既有值 ratio≥0.82 或精确
+    撞别名 → 无 confirm 打回 require_confirm）；响应附 content_snapshot 全文
+    （D4：裁定后 Agent 直接照抄 write，跨会话 3 步闭环零丢失）。"""
     if pid is None or decision not in ("map", "canonicalize", "reject"):
         return {"ok": False, "error": "invalid_input",
                 "reason": "需要 pending_id 与 decision ∈ map|canonicalize|reject"}
@@ -617,27 +690,45 @@ def _resolve_ticket(conn, pid, decision, code, new_type,
                 "reason": f"pending {pid} 已裁定为 {row['status']}（→{row['resolved_code']}），"
                           "不可重复裁定——若他方已替你裁定，直接重试原写入即可"}
     kind, raw = row["type_kind"], row["raw_value"]
+    snap = row["content_snapshot"] or ""
     if decision == "map":
         code = str(code or "").strip()
         known = taxonomy.by_code(kind, code) or \
             any(r["code"] == code for r in db.custom_types(conn, kind))
         if not code or not known:
             return {"ok": False, "error": "invalid_input", "field": "code",
-                    "reason": "map 需要已有 canonical code（可用 code 见 taxonomy）"}
+                    "reason": "map 需要已有 canonical code——全部现有值见 all_values",
+                    "all_values": normalize.all_values(kind, conn)}
         db.append_alias(conn, kind, code, raw, commit=commit)
         db.set_pending(conn, int(pid), "mapped", code, commit=commit)
     elif decision == "canonicalize":
         nt = new_type or {}
         if not isinstance(nt, dict):
             return {"ok": False, "error": "invalid_input", "field": "new_type",
-                    "reason": "new_type 必须是对象 {code,zh,en,domain}"}
+                    "reason": "new_type 必须是对象 {code,zh,en,domain,description?}"}
+        desc = str(nt.get("description") or "")
+        if len(desc) > 200:
+            return {"ok": False, "error": "invalid_input", "field": "new_type.description",
+                    "reason": f"description 超出 200 字符上限（收到 {len(desc)}）"}
+        # v0.6.2 D3 相似确认门：与批量预扫共用同一 helper（R1 P1-4：单条/预扫
+        # 两份逻辑漂移导致批量别名撞检破洞——预扫放行、门内命中=整批回滚）
+        new_code = str(nt.get("code") or "").strip()
+        new_zh = str(nt.get("zh") or "").strip()
+        gate = _canonicalize_similar_gate(conn, kind, new_code, new_zh,
+                                          confirm=confirm)
+        if gate is not None:
+            gate["all_values"] = normalize.all_values(kind, conn)
+            return gate
         try:
-            db.add_canonical(conn, kind, str(nt.get("code") or ""),
-                             str(nt.get("zh") or ""), str(nt.get("en") or ""),
+            db.add_canonical(conn, kind, new_code, new_zh, str(nt.get("en") or ""),
                              str(nt.get("domain") or ""), [raw], commit=commit)
+            if desc:
+                conn.execute(
+                    "UPDATE twin_types SET description=? WHERE type_kind=? AND code=?",
+                    (desc, kind, new_code))
         except ValueError as e:
             return {"ok": False, "error": "invalid_input", "reason": str(e)}
-        code = str(nt.get("code") or "")
+        code = new_code
         db.set_pending(conn, int(pid), "canonicalized", code, commit=commit)
     else:
         code = None
@@ -645,39 +736,122 @@ def _resolve_ticket(conn, pid, decision, code, new_type,
     out: dict = {"ok": True, "pending_id": int(pid), "decision": decision}
     if code is not None:
         out["resolved_code"] = code
+    # v0.6.2 D4：响应附快照全文（reject 也附——裁定者关票前最后一次看到内容）
+    if snap:
+        out["content_snapshot"] = snap
+        out["content_chars"] = len(snap)
     if decision == "reject":
         out["note"] = ("已裁定不入体系。放弃本次写入，不得再拿原值重试"
                        "（票据会复活成新的裁定义务）")
     return out
 
 
+def _canonicalize_similar_gate(conn, kind: str, new_code: str, new_zh: str,
+                               confirm: bool) -> dict | None:
+    """D3 相似确认门（单条与批量预扫共用，R1 P1-4）：新 code/zh 对既有值
+    difflib（quick 0.75/ratio≥0.82，S7 同款常量）+ 既有正名/别名精确撞检
+    （短串 difflib 不可靠——「老板」vs「直属上级」ratio 0.28，R1 P2-2）。
+    命中且未 confirm → 打回 validation_failed（require_confirm+similar）；
+    None=放行。注意 similar 列出的是**被撞的既有码**（非新值）。"""
+    existing = normalize.all_values(kind, conn)
+    probe = new_zh or new_code
+    fuzzy = normalize.similar_values(probe, existing)
+    fuzzy_codes = {v["code"] for v in fuzzy}
+    exact_codes = [v["code"] for v in existing
+                   if (new_code and new_code == v["code"])
+                   or (new_zh and (new_zh == v["zh"]
+                       or new_zh.casefold() in _kind_aliases(conn, kind, v["code"])))]
+    similar = fuzzy + [{"code": c,
+                        "zh": next((v["zh"] for v in existing if v["code"] == c), ""),
+                        "ratio": 1.0}
+                       for c in exact_codes if c not in fuzzy_codes]
+    if not similar:
+        return None
+    if confirm is True:
+        return None  # Agent 已对照 similar 清单确认非重复（承诺语义）
+    return {"ok": False, "error": "validation_failed",
+            "require_confirm": True,
+            "similar": similar,
+            "reason": (f"新维度值与现有值疑似重复（{new_code or new_zh!r}）——对照 "
+                       "all_values 确认：确属新概念则带 confirm=true 重试（commit 语义："
+                       "已对照清单确认非重复）；与现有重复请改走 map")}
+
+
+def _kind_aliases(conn, kind: str, code: str) -> set[str]:
+    """既有码的别名集（D3 精确撞检用）：DB 行优先，内置兜底。"""
+    names: set[str] = set()
+    row = conn.execute(
+        "SELECT label_zh, aliases FROM twin_types WHERE type_kind=? AND code=?",
+        (kind, code)).fetchone()
+    if row is not None:
+        names.add(row["label_zh"] or "")
+        try:
+            names.update(json.loads(row["aliases"] or "[]"))
+        except (ValueError, TypeError):
+            pass
+    else:
+        t = taxonomy.by_code(kind, code)
+        if t:
+            names.add(t.zh or "")
+            names.update(t.aliases)
+    return {n.strip().casefold() for n in names if n}
+
+
 def _resolve_batch(tickets) -> dict:
-    """批量裁定（v0.6 B4）：单事务全落或全回滚——db helper 各自内部 commit，
-    逐票传 commit=False，任一失败显式 rollback（先前票的 alias/canonical
-    不得已落，测试钉）。错误带 failed_index（对齐 step_update 批量范式）。"""
+    """批量裁定（v0.6 B4）：两段式（v0.6.2 D3，R2 炸-1 状态机）——
+    ①confirm 预扫：相似命中且未 confirm 的票摘出为 confirm_required[] 条目
+    （带 require_confirm+all_values），不进事务；②余票进现有单事务（硬失败仍
+    整笔回滚+failed_index，对齐 step_update 批量范式）。响应三键并存：
+    resolved[] + confirm_required[] + error——混合结果如实表达。"""
     if not isinstance(tickets, list) or not (1 <= len(tickets) <= 20):
         return {"ok": False, "error": "invalid_input", "field": "tickets",
                 "reason": "tickets 需为 1..20 条的列表（每条 {pending_id, decision,"
-                          " code?|new_type?}）"}
+                          " code?|new_type?, confirm?}）"}
     conn = db.connect()
-    resolved: list[dict] = []
     try:
+        # ① confirm 预扫（只读）：canonicalize 且相似命中且未 confirm 的票摘出
+        confirm_required: list[dict] = []
+        runnable: list[tuple[int, dict]] = []
         for i, t in enumerate(tickets):
-            fail = {"failed_index": i}
             if not isinstance(t, dict):
                 conn.rollback()
                 return {"ok": False, "error": "invalid_input", "field": "tickets",
-                        "reason": f"tickets[{i}] 必须是对象", **fail}
+                        "reason": f"tickets[{i}] 必须是对象", "failed_index": i}
+            if t.get("decision") == "canonicalize":
+                row = conn.execute(
+                    "SELECT type_kind FROM twin_pending_values WHERE id=?",
+                    (t.get("pending_id"),)).fetchone()
+                kind = row["type_kind"] if row else None
+                if kind is not None:
+                    nt = t.get("new_type") or {}
+                    # 与单条模式共用相似门 helper（R1 P1-4：预扫放行/门内命中
+                    # 的漂移会让批量别名撞检整批回滚）
+                    gate = _canonicalize_similar_gate(conn, kind,
+                                                      str(nt.get("code") or "").strip(),
+                                                      str(nt.get("zh") or "").strip(),
+                                                      confirm=t.get("confirm") is True)
+                    if gate is not None:
+                        gate.pop("all_values", None)  # 批量条目体积：全量在 required 顶层附一份
+                        gate.update({"failed_index": i,
+                                     "pending_id": t.get("pending_id"),
+                                     "require_confirm": True})
+                        confirm_required.append(gate)
+                        continue
+            runnable.append((i, t))
+        # ② 余票单事务
+        resolved: list[dict] = []
+        for i, t in runnable:
+            fail = {"failed_index": i}
             try:
                 r = _resolve_ticket(conn, t.get("pending_id"), t.get("decision"),
-                                    t.get("code"), t.get("new_type"), commit=False)
+                                    t.get("code"), t.get("new_type"),
+                                    commit=False,
+                                    confirm=t.get("confirm") is True)
             except ValueError as e:
                 conn.rollback()
                 return {"ok": False, "error": "invalid_input",
                         "reason": str(e), **fail}
             except sqlite3.Error as e:
-                # 并发窗口撞 UNIQUE（如 canonicalize 重复 code 竞态）等存储错误：
-                # 同样整笔回滚带 failed_index，不让批量半途异常逃成 internal_error
                 conn.rollback()
                 return {"ok": False, "error": "internal_error",
                         "reason": str(e), **fail}
@@ -689,8 +863,13 @@ def _resolve_batch(tickets) -> dict:
         conn.commit()
     finally:
         conn.close()
-    return {"ok": True, "resolved": resolved, "applied": len(resolved),
-            "guidance": "全部裁定完成，直接重试原写入即可"}
+    out: dict = {"ok": True, "resolved": resolved, "applied": len(resolved),
+                 "guidance": "全部裁定完成，直接重试原写入即可"}
+    if confirm_required:
+        out["confirm_required"] = confirm_required
+        out["guidance"] = ("部分票疑似与现有维度重复（见 confirm_required）——对照 "
+                           "all_values 后带 confirm=true 重试该票，其余已裁定完成")
+    return out
 
 
 def _action_resolve(data: dict) -> dict:
@@ -703,7 +882,9 @@ def _action_resolve(data: dict) -> dict:
     conn = db.connect()
     try:
         return _resolve_ticket(conn, data.get("pending_id"), data.get("decision"),
-                               data.get("code"), data.get("new_type"), commit=True)
+                               data.get("code"), data.get("new_type"),
+                               commit=True,
+                               confirm=data.get("confirm") is True)
     finally:
         conn.close()
 

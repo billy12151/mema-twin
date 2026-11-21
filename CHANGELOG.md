@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+## [0.6.2] — 2026-11-22
+
+维度治理闭环（方案 `~/ZCodeProject/docs/mema-twin-v062-dimension-plan.md` v3，方案 R1+R2 与实施后 R1+R2 四轮独立评审）。3 个新列幂等迁移+回填，零破坏性变更。
+
+### Added
+
+- **维度说明字段（description）**（D1）：twin_types 加列，内置 50 项全量补写（适用边界+易混淆项，≤120 字）；canonicalize 的 new_type 支持带 description 落库（≤200 帽）；taxonomy 完整版带/compact 不带。
+- **gate 打回带全量清单**（D2）：write/task_start 撞归一门的打回 fields 附 all_values（全量现有值+说明）、similar（difflib top3 近似标注）、candidates（全量形状加法）——「看全量再决定」零前置往返。
+- **票据正文快照与宿主归属**（D4）：twin_pending_values 加 content_snapshot（打回时正文全量）/client 两列；pending 响应显式投影（preview+chars，防全文泄漏）；resolve 响应（单条/批量/reject）附 content_snapshot 全文——跨会话积压 3 步闭环（pending→resolve→write）零丢失。
+- **孤儿票提示**（D5）：write 成功时对同宿主挂票快照做相似比对（ratio≥0.82），疑似被本次取代的挂票以 orphan_pending_tickets 提示 Agent 显式 reject（服务端不自动关）。
+
+### Changed
+
+- **resolve(canonicalize) 相似确认门**（D3）：新 code/zh 与现有值 ratio≥0.82 或精确撞正名/别名 → 打回 require_confirm（带相似清单+all_values），confirm=true 放行——防清单膨胀；打回场景（Agent 刚看过全量清单）天然无相似零新增往返。批量模式两段式：confirm 预扫摘出疑似重复票不进事务，余票单事务。
+- **「写前查清单」约定保留+理由写透**（D6）：预查的真正价值是减少打断 owner 次数与防清单膨胀（API 账打平，打断权重更高）——SKILL/help 理由重写。
+- resolve(map) 无效 code 打回附 all_values（替换裸报）。
+- B8 白名单：resolve 加 confirm 键。
+
+### 已知边界与回滚（R2 对抗实测后记录）
+
+- **回滚 0.6.2→0.6.1 必须同步重发 0.6.1 SKILL 安装副本**（make install-skill）：0.6.2 SKILL 教的 all_values/similar/orphan 键在 0.6.1 响应不存在；且 0.6.1 的 pending 走 SELECT *，会回显 0.6.2 期间积累的快照全文（体积回归）；resolve 带 confirm 会被 0.6.1 按 unknown field 打回。
+- **D4 快照二义性（0.6.3 待办）**：task_start 撞票的快照是建档 brief 而非偏好正文，resolve 响应已加提示（help+响应内引导），结构化标记（source_kind 列）待 0.6.3。
+- 已知边界：D5 孤儿提示在同正文 duplicate 写入时每次都出（挂票未关前，~1.6KB/次，非死循环）；批量硬失败会丢弃 confirm_required 信息（修复硬失败票重跑即见）；canonicalize 相似门的别名检测存在「别名+后缀」绕过边界（ratio<0.82 时直过）；自建码不传 description 时 all_values 该项说明为空（help 建议 canonicalize 带说明）。
+
 ## [0.6.1] — 2026-11-21
 
 E2E 实测卡点修复 1-8（方案 `~/ZCodeProject/docs/mema-twin-v061-scan-notice-dedup-plan.md` v3，方案 R1+R2 与实施后 R1+R2 共四轮独立评审）。零 DB 迁移。

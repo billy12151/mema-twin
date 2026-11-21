@@ -134,7 +134,7 @@ for fallback and human review).
 | `rollback` | 回滚 persona 版本（零阻力）：`version` 省略回上一版，传 n 回指定版；不删历史、版本号不回收；目标已是 active 时返回 `already_active=true`（v0.6 显式 no-op 布尔，非错误） |
 | `status` | 版本概况（含体积/超预算标记）、受众画像（audience_profiles）与重抽象队列（audience_stale）、条款作废待重编（persona_stale）、未编译统计、pending 数量（归一门待裁票据）、夜间被拒计数（nightly_rejected）、进行中任务计数（open_tasks）、执行计划统计（plan_stats：任务/步骤各态/backfilled/open blocking 疑问/tool_usage/playbooks/playbook_rejected/采纳率 submitted_with_plan÷tasks_submitted——分母 0 无读数，历史 submitted 会稀释、看增量任务）、定时任务安装提醒 |
 | `taxonomy` | 列枚举清单（动态：含治理追加别名与自建 canonical；kind ∈ work_type/audience/purpose，v0.4.7 起**可传数组一次取多类或 `"all"`**——多类形状判别式=响应有无 `kinds` 键、顶层 count_total；`compact` 仅接受布尔 true） |
-| `pending` / `resolve` | 归一门待裁票据的查看与治理（map=归一并进别名表 / canonicalize=立新码入列 / reject=不入体系且不得重试原值）；pending 的 `status` ∈ pending\|mapped\|canonicalized\|rejected（其余打回）；v0.6 resolve 支持 `tickets=[{pending_id,decision,code?\|new_type?}]` 批量裁定（1..20 条，与单条互斥，单事务全落/全回滚带 `failed_index`） |
+| `pending` / `resolve` | 归一门待裁票据的查看与治理（map=归一并进别名表 / canonicalize=立新码入列（带 description 选码说明；与现有值相似需 confirm 二次确认）/ reject=不入体系且不得重试原值）；pending 的 `status` ∈ pending\|mapped\|canonicalized\|rejected（其余打回），items 带 `content_preview`/`content_chars`/`client`（v0.6.2 票据快照：被拒写入的正文全文在 resolve 响应按需取，3 步闭环零丢失）；v0.6 resolve 支持 `tickets=[...]` 批量裁定（1..20 条，与单条互斥；confirm 预扫摘出疑似重复票不进事务，余票单事务全落/全回滚带 `failed_index`） |
 | `evidence` | v0.6 新增：列偏好证据索引（只读，定位 `memory_id` 用，不回正文全文）；`status` ∈ uncompiled\|compiled\|void、`work_type`、`limit`（默认 50 上限 200） |
 | `task_start` | 开工建档并注入 persona prompt + 未编译增补 + active playbook（连续性分级）；`have_persona_version` 申报同会话已注入版本，未变则省略重复注入；带 audience 时注入受众画像 `audience_profile_md`/雏形；audience/purpose 可选，给了值必须在清单内；可选 `available_tools`（工具名列表，服务端与 playbook 工具面板比对回 `tool_gap`）；该工种尚无专属 persona 时注入**同域 fallback**（v0.4.5：同域最成熟工种 persona 全文垫底 + 其余候选摘要 + 降级声明，专属落版自动退出） |
 | `plan_set` | 建档任务列步骤计划（v0.4 执行计划层）：steps（title/depends_on）+ open_questions（可标 blocking），直接放行开工；重复调用即重排（未完结步骤标 skipped(replanned)，done 保留）；v0.6 可选 `start_first=true`——计划落库即把无依赖且未被 blocking 锚定的首步标 in_progress（省一次 step_update 往返；全部首步被锚定时响应 `start_first_skipped=true` 说明原因） |
@@ -152,9 +152,12 @@ for fallback and human review).
 
 work_type 33 项（六域：规格与执行/分析与复盘/记录与同步/说服与传播/教学与传授/法律与契约——
 按产出物目标分类，v0.3.9 重划）、
-audience 9 项、purpose 8 项（v0.3.8 删 other 杂项桶）。清单见 `mema_twin/taxonomy.py` 或
-`twin(action="taxonomy")`（动态：含自建 canonical）。后续版本可扩展；真长尾经用户
-canonicalize 立新码进清单。
+audience 9 项、purpose 8 项（v0.3.8 删 other 杂项桶）。每个维度值带 **description 选码说明**
+（v0.6.2：适用边界+易混淆项，canonicalize 立码时可带，≤200 字符）；taxonomy 完整版带
+说明、compact 不带。清单见 `mema_twin/taxonomy.py` 或 `twin(action="taxonomy")`（动态）。
+**写前不强制预查清单**（撞票打回的 fields 自带 all_values 全量+说明+similar 近似标注，
+当场裁定即可），但预查更优：Agent 拥有完整分类视野自主对齐，owner 不被打断。真长尾经
+用户 canonicalize 立新码进清单（与现有值相似时需 confirm 二次确认，防清单膨胀）。
 
 ## 快速开始（GitHub 安装）
 

@@ -276,7 +276,8 @@ def test_taxonomy_single_kind_shape_unchanged():
     assert "kinds" not in r and "count_total" not in r
     # 逐键全等（不是子集）：钉死单 kind 形状无新增多余键
     assert r["types"] and set(r["types"][0]) == {"code", "zh", "en", "domain",
-                                                 "aliases", "is_custom"}
+                                                 "aliases", "is_custom",
+                                                 "description"}  # v0.6.2 D1：+选码说明
 
 
 def test_taxonomy_kind_array_and_all_and_compact():

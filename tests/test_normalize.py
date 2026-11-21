@@ -44,8 +44,12 @@ def test_gate_reject_creates_tickets(conn):
     resp = normalize.gate_reject([m1, m2])
     assert resp["ok"] is False and resp["error"] == "unmatched_value"
     assert set(resp["fields"]) == {"work_type", "audience"}
-    assert resp["fields"]["work_type"]["candidates"] == m1["candidates"]
-    assert "必须先与用户逐个确认" in resp["guidance"] and "canonicalize" in resp["guidance"]
+    # v0.6.2 D2：candidates 升级为全量清单（含 description）——fields 与 miss 的
+    # candidates 形状同源（全量），similar/all_values 为新增键
+    assert resp["fields"]["work_type"]["candidates"][0]["description"]
+    assert resp["fields"]["work_type"]["all_values"] == resp["fields"]["work_type"]["candidates"]
+    assert isinstance(resp["fields"]["work_type"]["similar"], list)
+    assert "一次问清" in resp["guidance"] and "canonicalize" in resp["guidance"]
     rows = {r["raw_value"]: r for r in twin_db.list_pending(conn)}
     assert rows["玄幻门派设定集"]["hit_count"] == 1
     # 同值再次打回：hit_count 续增

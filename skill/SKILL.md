@@ -5,7 +5,7 @@ description: 个人分身：工作类偏好沉淀与 persona prompt 编译，经
 
 # mema-twin 使用引导
 
-> 对齐服务端 **v0.6.1**。动作全集、入参与基础语义以 `twin(action="help")` 为准——**调用动作前先查一次 help**；v0.6 起可单查省上下文：`twin(action="help", data={"topic":"<动作名>"})`（全量模式不变，会话内查一次即可）。本文件不复述入参。下文只写三样：何时用哪个动作的路由、执行门、help 未覆盖或与实测不符的口径。
+> 对齐服务端 **v0.6.2**。动作全集、入参与基础语义以 `twin(action="help")` 为准——**调用动作前先查一次 help**；v0.6 起可单查省上下文：`twin(action="help", data={"topic":"<动作名>"})`（全量模式不变，会话内查一次即可）。本文件不复述入参。下文只写三样：何时用哪个动作的路由、执行门、help 未覆盖或与实测不符的口径。
 > **夜间治理/编译会话不需要本 skill**：twin_nightly_compile 两支线与 compile/submit 编译口径在 `mema-twin-governance` skill（唯一真源），本文件只留指向它的路由。
 >
 > **v0.6 增量**：① `data` 顶层未知键会被硬拒（附 `allowed`/`did_you_mean`——拼写错键看报错即自纠）；② 新动作 `evidence`：void 前定位 memory_id 用（只读，不回正文）；③ resolve 支持 `tickets` 批量裁定（多维未命中一次裁完）；④ plan_set 可传 `start_first=true` 省一次首步打卡；⑤ compile 响应带 `source_ids_suggested`，submit 直接复制。
@@ -77,8 +77,8 @@ description: 个人分身：工作类偏好沉淀与 persona prompt 编译，经
 
 ## 三字段选码（归一门：清单硬约束，未命中必问用户）
 
-- write / task_start 之前**必须**手上有枚举清单：同一会话首次先 `twin(action="taxonomy")`（kind=work_type|audience|purpose，**可传数组或 `"all"` 一次取全**——多类形状判别式=响应有无 `kinds` 键）查清单，从清单里选最贴的 canonical code（或其别名/中文名）作为三字段的值——不要凭记忆造说法；已查过的清单会话内直接复用（清单动态：用户裁定后新码/新别名立即生效，届时重查对应 kind）。**选码/归一用完整版**（完整别名面只在完整响应里）；会话内重复拉取省 token 用 `compact=true`（code/zh/aliases 前 5）
-- 清单里确实没有合适项时，给**你认为最合适的原始值**：写入会被**整笔打回**（错误里附完整清单与 pending 票据）——此时**必须问用户**二选一：① 归一到已有值 → resolve(map)（原值进别名表，同一说法终身只问这一次）；② 创建新值 → resolve(canonicalize)（新码即刻进清单）。用户说"不在意"→ 选最贴近的已有值；用户说"这条不写"→ resolve(reject) 并放弃本次（**reject 后不得再拿原值重试**）。裁定完成后用原值重试 write/task_start 即命中；resolve 报"已裁定不可重复裁定"说明他方已裁定，直接重试写入即可
+- write / task_start 之前**必须**手上有枚举清单——先查不是为了省撞票：预查让你拥有完整分类视野，**自主对齐已有口径，owner 不需要被打断来裁值**（撞票按归一门拍板必须问 owner）；闭眼写大概率造出第二个「文档撰写」，且立新码会让体系语义密度被稀释（不可逆）。同一会话首次先 `twin(action="taxonomy")`（kind=work_type|audience|purpose，**可传数组或 `"all"` 一次取全**——多类形状判别式=响应有无 `kinds` 键）查清单，从清单里选最贴的 canonical code（或其别名/中文名）作为三字段的值——不要凭记忆造说法；已查过的清单会话内直接复用（清单动态：用户裁定后新码/新别名立即生效，届时重查对应 kind）。**选码/归一用完整版**（完整别名面只在完整响应里）；会话内重复拉取省 token 用 `compact=true`（code/zh/aliases 前 5）
+- 清单里确实没有合适项时，给**你认为最合适的原始值**：写入会被**整笔打回**（错误 fields 附 all_values 全量清单+选码说明+similar 近似标注；v0.6.2 起票据带正文快照与宿主归属，跨会话裁定也有上下文）——此时**必须问用户**二选一：① 归一到已有值 → resolve(map)（原值进别名表，同一说法终身只问这一次）；② 创建新值 → resolve(canonicalize)（新码即刻进清单）。用户说"不在意"→ 选最贴近的已有值；用户说"这条不写"→ resolve(reject) 并放弃本次（**reject 后不得再拿原值重试**）。裁定完成后用原值重试 write/task_start 即命中；resolve 报"已裁定不可重复裁定"说明他方已裁定，直接重试写入即可
 - 不要硬凑近义枚举、也不要给"其他"——枚举里没有 other，杂项不配当分类
 - 白天裁定入口：`twin(action="pending")` 列待裁票据（夜间任务晨报只汇总，**不代裁**，留你在场时裁）
 
