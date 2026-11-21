@@ -21,7 +21,7 @@ description: mema-twin 夜间治理/编译会话专用：twin_nightly_compile �
 ## ①执行经验评估支线
 
 1. `status`：plan_stats.tasks_unevaluated=0 → 评估支线整体跳过（无素材不空转）
-2. `task_evaluate` **必传 `origin="scheduled"`**（唯一合法值）：调用成功即刷停转保险丝心跳（`last_scheduled_playbook_at`），与当晚有无新经验无关——**漏传等于 7 天后误报任务停转**。无 task_ids 取未评估收口任务（≤10，limit 实际 clamp 1..10）；响应 task_count=0 则支线结束（心跳已刷）
+2. `task_evaluate` **必传 `origin="scheduled"`**（唯一合法值；夜间来源标记，验证门与空转阻尼仅对 scheduled 生效）：调用成功会清除夜编会话领走的积压提醒章（v0.6.1，把提醒还给白天的人类会话）。无 task_ids 取未评估收口任务（≤10，limit 实际 clamp 1..10）；响应 task_count=0 则支线结束
 3. 素材只含真实执行记录；`playbook_submit`：key 用 key_hint（或覆盖面最大的 work_type；跨类型经验用 `'global'`），source_task_ids=素材包全部任务 id；**编译产物每条必须 `<!-- task: N -->` 溯源，写不出来源的条目不得出现**
 4. **无值得沉淀的新经验不提交不落版**
 

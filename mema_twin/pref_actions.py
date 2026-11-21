@@ -16,9 +16,72 @@ from . import db, flow, identity, normalize, scan, store, taxonomy, templates
 _RAW_MAX_CHARS = 200      # 三维度值：短枚举说法
 _CONTENT_MAX_CHARS = 8000  # 偏好正文
 
+# S6（v0.6.1）：write hint 同 client+work_type+版本 第二次起省略——指引非契约，
+# 重复沉淀场景每次都带同一句是纯 token 税（实测卡点 6）。duplicate=true 的
+# note 不受影响（幂等提示必须保留）。进程内记忆，重启重现，容量帽防灌爆。
+_WRITE_HINT_SEEN: dict[tuple[str, str], int] = {}
+_WRITE_HINT_CAP = 4096
+
+# S7（v0.6.1）：相似提示阈值——difflib 字面相似度（纯词法，非语义判定）。
+# 0.82 实测校准（方案附记）：同义改写样例 0.93、同条增补样例 0.84（须命中）、
+# 无关样例 ~0.30（须不命中）——0.85 会漏增补型，0.82 三点全覆盖；
+# quick_ratio 0.75 预筛（quick_ratio≥ratio 恒成立，数学上无漏报）
+_SIM_THRESHOLD = 0.82
+_SIM_QUICK = 0.75
+_SIM_MAX_CHARS = 2000  # 任一侧超长跳过（防 8000² ratio 阻塞请求路径）
+_SIM_MAX_ROWS = 100    # 比对集帽：最近 100 行
+
 
 def _today() -> str:
     return _dt.date.today().isoformat()
+
+
+def _seen_hint(client: str, code: str, version: int | None) -> bool:
+    """S6：同 client+code+active 版本 已提示过 hint → True（本次省略）。
+    键含租户前缀（多租户形态同宿主跨租户不串扰——R2 险-3）。"""
+    from . import tenant as _tenant
+    key = (f"{_tenant.current_tenant() or ''}:{client or ''}", code or "")
+    if len(_WRITE_HINT_SEEN) >= _WRITE_HINT_CAP and key not in _WRITE_HINT_SEEN:
+        _WRITE_HINT_SEEN.clear()
+    ver = int(version) if version is not None else 0
+    if _WRITE_HINT_SEEN.get(key) == ver:
+        return True
+    _WRITE_HINT_SEEN[key] = ver
+    return False
+
+
+def _similar_existing(conn, wt_code: str, exclude_id: int, new_text: str) -> list[dict]:
+    """S7 相似提示（软通道）：difflib 字面相似度——纯词法非语义判定，不拦截
+    不落票，落库后把「库里有长得像的」递给 Agent 自裁（是否 void 新写的）。
+    护栏：任一侧 >2000 字符跳过（防 8000² ratio 阻塞）、长度差 >4 倍跳过、
+    quick_ratio 预筛、最多 3 条、比对集最近 100 行、排除自身。"""
+    from difflib import SequenceMatcher
+    if len(new_text) > _SIM_MAX_CHARS:
+        return []
+    rows = conn.execute(
+        "SELECT memory_id, subject, content FROM twin_evidence"
+        " WHERE work_type=? AND status IN ('uncompiled','compiled')"
+        " AND memory_id != ? ORDER BY memory_id DESC LIMIT ?",
+        (wt_code, exclude_id, _SIM_MAX_ROWS)).fetchall()
+    sim: list[dict] = []
+    for row in rows:
+        old = row["content"] or ""
+        if not old or len(old) > _SIM_MAX_CHARS:
+            continue
+        if max(len(old), len(new_text)) > 4 * min(len(old), len(new_text)):
+            continue
+        sm = SequenceMatcher(None, old, new_text)
+        if sm.quick_ratio() < _SIM_QUICK:
+            continue
+        ratio = sm.ratio()
+        if ratio >= _SIM_THRESHOLD:
+            sim.append({"memory_id": int(row["memory_id"]),
+                        "subject": row["subject"] or "",
+                        "ratio": round(ratio, 2)})
+            if len(sim) >= 3:
+                break
+    sim.sort(key=lambda x: -x["ratio"])
+    return sim
 
 
 def _action_write(data: dict) -> dict:
@@ -138,21 +201,34 @@ def _action_write(data: dict) -> dict:
             out["note"] = ("同类型已存在内容完全相同的偏好（词法去重命中），本次未重复"
                            "写入；本响应即幂等成功，请勿重试、也无需改写")
             return out
+        # S7 相似提示（软通道，不拦截）：库里有字面相似的既有偏好时递给 Agent
+        # 自裁——相似≠重复，服务端不判语义（v0.5.0 拍板），是否 void 新写的由
+        # Agent/用户裁定
+        sim = _similar_existing(conn, dims["work_type"]["code"], mid, content)
+        if sim:
+            out["similar_existing"] = sim
+        client_id = client or ""
+        wt_code = dims["work_type"]["code"]
         if audience_scoped:
             zh = dims["audience"].get("label_zh") or dims["audience"]["raw"]
-            out["hint"] = (f"已沉淀为对「{zh}」的受众级通用偏好（不绑定工作类型）；"
-                           "该受众有新证据时，夜间任务会重抽象其画像，"
-                           "对该受众的任何任务开工时自动带上")
+            hint = (f"已沉淀为对「{zh}」的受众级通用偏好（不绑定工作类型）；"
+                    "该受众有新证据时，夜间任务会重抽象其画像，"
+                    "对该受众的任何任务开工时自动带上")
+            if not _seen_hint(client_id, wt_code, None):
+                out["hint"] = hint
         else:
             active = store.get_active(conn, dims["work_type"]["code"])
-            if active and active.get("version") is not None:
-                out["hint"] = (f"{dims['work_type']['label_zh']} 已有 persona prompt v{active['version']}；"
-                               "本次偏好已入池未编译——无需立即整理，"
-                               "由用户决定何时 compile，或等定时扫描统一处理")
+            ver = active.get("version") if active else None
+            if ver is not None:
+                hint = (f"{dims['work_type']['label_zh']} 已有 persona prompt v{ver}；"
+                        "本次偏好已入池未编译——无需立即整理，"
+                        "由用户决定何时 compile，或等定时扫描统一处理")
             else:
-                out["hint"] = (f"{dims['work_type']['label_zh']} 尚无 persona prompt，"
-                               "可 twin(action=\"compile\") 生成 v1"
-                               f"（{templates.STRONG_MODEL_NOTE}）")
+                hint = (f"{dims['work_type']['label_zh']} 尚无 persona prompt，"
+                        "可 twin(action=\"compile\") 生成 v1"
+                        f"（{templates.STRONG_MODEL_NOTE}）")
+            if not _seen_hint(client_id, wt_code, ver):
+                out["hint"] = hint
     finally:
         conn.close()
     return out
@@ -339,7 +415,10 @@ def _action_status(data: dict) -> dict:
         pass  # 软失败：统计面缺失不影响其余 status 输出
     # v0.5.0：mema 桶冲突计数（open_conflicts）随 sink 数据面退役整体移除
     #（拆分后偏好不在 mema，写时语义冲突检测亦不服务 twin——见方案 §3.4）
-    notice = scan.scan_notice()
+    try:
+        notice = scan.scan_notice()
+    except Exception:  # noqa: BLE001 —— 提醒是观测件，任何故障不击穿 status（twin_notices 同款）
+        notice = None
     if notice:
         out["scan_notice"] = notice
     return out

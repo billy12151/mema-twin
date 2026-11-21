@@ -20,6 +20,25 @@ from .pref_actions import _mark_persona_stale
 # （audit.py 解析先例）并在响应 warnings 提示。
 _COMPILE_BUDGET_CHARS = 60000
 
+# S6（v0.6.1）：静态指引 note 同 client 第二次起省略——指引非契约，且素材包
+# 内嵌同句（templates.py compile_playbook_material / compile_prompt_material），
+# 抑制后信息不丢。compile 与 task_evaluate 共用同一 set。容量帽防脏 client 灌爆。
+_COMPILE_NOTE_SHOWN: set[str] = set()
+_COMPILE_NOTE_CAP = 4096
+
+
+def suppress_static_note(client: str | None, note: str) -> str | None:
+    """同 client 第二次起返回 None（省略 note 键）；首次返回原文本。
+    键含租户前缀（多租户形态同宿主跨租户不串扰——R2 险-3）。"""
+    from . import tenant as _tenant
+    key = f"{_tenant.current_tenant() or ''}:{client or ''}"
+    if key in _COMPILE_NOTE_SHOWN:
+        return None
+    if len(_COMPILE_NOTE_SHOWN) >= _COMPILE_NOTE_CAP:
+        _COMPILE_NOTE_SHOWN.clear()
+    _COMPILE_NOTE_SHOWN.add(key)
+    return note
+
 
 def _compile_budget() -> tuple[int, str | None]:
     raw = (os.environ.get("MEMA_TWIN_COMPILE_BUDGET_CHARS") or "").strip()
@@ -149,8 +168,17 @@ def _action_compile(data: dict) -> dict:
                  "session_note": ("本会话仅用于编译，完成 submit 后即弃。请告知用户："
                                   "后续交付任务建议换新会话重新开始（编译会话内新旧 persona "
                                   "同屏，换会话是唯一硬隔离）；新会话 task_start 会自动注入新版"),
-                 "next": "用当前会话模型按素材包编译出 prompt_md 后，调 "
-                         "twin(action=\"submit\", data={work_type, prompt_md, source_memory_ids, model})"}
+                 "next": ("用当前会话模型按素材包编译出 prompt_md 后，调 "
+                          "twin(action=\"submit\", data={work_type, prompt_md, "
+                          "source_memory_ids, model})——source_memory_ids 直接复制"
+                          "本响应的 source_ids_suggested 原样（勿手抄素材包正文标记，"
+                          "勿凭记忆构造）")}
+    # v0.6.1 S6：静态 note 同 client 第二次起省略（指引非契约；session_note/next
+    # 恒在）。compile 与 task_evaluate 共用同一抑制 set。
+    suppressed = suppress_static_note(identity.effective_client(data),
+                                      out.get("note"))
+    if suppressed is None:
+        out.pop("note", None)
     # v0.6 B1：submit 的 source_memory_ids 直接复制，无需解析素材包正文 [id] 标记
     # （fetch-then-parse 是 G3 警告与 scheduled 阻尼「疑似漏列」的共同根源）。
     # evidence_ids=素材包在场证据；source_ids_suggested=在世全集（含缺正文 skipped

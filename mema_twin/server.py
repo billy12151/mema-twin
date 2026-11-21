@@ -36,8 +36,7 @@ def _action_help(data: dict) -> dict:
             "description": "twin 定时任务 spec（单任务双支线：夜间执行经验评估 → 夜间 persona 编译）：Agent 据此在宿主平台创建等价任务。",
             "agent_instruction": scan.AGENT_INSTRUCTION,
             "setup": scan.SCHEDULED_TASKS_SPEC,
-            "note": "提醒自消失：夜间任务 7 天内跑过（task_evaluate origin=scheduled "
-                    "心跳）即不再提示。",
+            "note": scan.SCAN_NOTICE_NOTE,
         }
     if topic:
         entry = _HELP_ENTRIES.get(topic)
@@ -72,7 +71,9 @@ _HELP_ENTRIES: dict[str, str] = {
              "对该受众的通用偏好（不限工作类型）传 scope=audience（此时 work_type 省略）。"
              "上限：content ≤8000 字符，维度各 ≤200 字符。"
              "同类型下内容完全相同的偏好命中词法去重：返回 ok+duplicate=true"
-             "（幂等成功），请勿重试也无需改写。",
+             "（幂等成功），请勿重试也无需改写。"
+             "落库后响应可能带 similar_existing（字面相似的既有偏好，ratio≥0.82，"
+             "纯词法非语义判定，不拦截）——相似≠重复：是否 void 新写的由你/用户裁定。",
     "status": "查看各 work_type 的 prompt 版本概况（含体积/超预算标记）、受众画像"
               "（audience_profiles）、需重抽象的受众（audience_stale）、条款作废待重编"
               "（persona_stale）、pending 数量（归一门待裁票据）、未编译统计、夜间被拒计数"
@@ -172,7 +173,10 @@ _HELP_ENTRIES: dict[str, str] = {
                   "关闭时未闭环步骤自动按 closed 跳过。",
     "task_recent": "最近任务列表。参数 limit（默认 10）。",
     "task_get": "取单个任务全量。task_id。",
-    "todo": "会话 todo 读写（plan-mode 同款语义：整体替换，至多一条 in_progress）。传 todos 替换，不传读取。",
+    "todo": "会话 todo 读写（plan-mode 同款语义：整体替换，至多一条 in_progress）。"
+            "session 用于会话 todo/任务流隔离，仅 task_start/task_resume/"
+            "task_revise/task_submit/todo 五动作接受；plan/step 族与治理动作"
+            "不消费（传了会被未知键门打回）。传 todos 替换，不传读取。",
     "plan_set": "建执行计划（开工第一件事；凡建档任务默认走计划，拿不准时建）。"
                 "必填 steps（[{title, description?, depends_on?}]，"
                 "task_id 可省略：全局恰一个 planning 任务时自动回退"
@@ -182,6 +186,8 @@ _HELP_ENTRIES: dict[str, str] = {
                 "可选 open_questions（[{question, step_ids?, blocking?}]，"
                 "blocking 缺省 false）——没把握、确认不了的点列在这里，要紧的"
                 "标 blocking，先与用户澄清，答复经 plan_revise(answers=…) 写回。"
+                "注意 open_questions 的 step_ids 入参用**步骤序号**（1-based），"
+                "响应里同名键是**全局步骤 id**（同名异义，换算以响应 seq_map 为准）。"
                 "可选 start_first=true（v0.6，严格布尔）：计划落库即把无依赖且未被 "
                 "open blocking 疑问锚定的首步标 in_progress（省一次 step_update "
                 "往返）；全部首步被锚定时响应 start_first_skipped=true 说明原因。"
@@ -190,6 +196,8 @@ _HELP_ENTRIES: dict[str, str] = {
     "step_update": "步骤打卡。单条：step_id/status（六态：pending/in_progress/done/"
                    "failed/blocked/skipped）；skipped/blocked 必填 reason；"
                    "failed 必填 reflection（服务端硬门，≤2000 字符）；"
+                   "可选 task_id：传了即校验步骤归属本任务（步骤 id 全局连发，防"
+                   "猜错 id 误标他任务步骤——v0.6.1）；"
                    "pending 直跳 done/failed"
                    " 自动标 backfilled（追认合法）。三门：blocking 疑问未解答、"
                    "依赖未闭环、已有单一 in_progress 时推进会被拒（报错附具体清单"
@@ -219,8 +227,8 @@ _HELP_ENTRIES: dict[str, str] = {
     "task_evaluate": "取执行经验评估素材包（playbook 编译入口，夜间任务或手动"
                      "触发）。可选 task_ids 显式指定（补评估），或 limit（默认 "
                      "10，实际 clamp 1..10，水位之后的未评估收口任务）；响应 "
-                     "watermark_moved_to。夜间任务必传 origin=scheduled（心跳"
-                     "依赖它，定时任务安装提醒靠它自消失）。"
+                     "watermark_moved_to。夜间任务必传 origin=scheduled（夜间"
+                     "来源标记；调用成功会清除夜编领走的积压提醒章）。"
                      "按素材包编译出 content_md 后 playbook_submit；无新经验不提交。",
     "playbook_submit": "提交 playbook 落版。必填 key（work_type code 或 "
                        "'global'；禁 pb-/aud- 保留前缀）/content_md/"

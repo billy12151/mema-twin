@@ -60,8 +60,10 @@ for fallback and human review).
   （v0.4.8 起 revise 链路同款注入 persona/未编译增补/受众画像/playbook）。
 - **定时任务挂 Agent 端（单一夜间编译任务）**：twin 自身不起调度；status 里的
   scan_notice 提醒 Agent 征询用户后在宿主平台建夜间 persona 编译任务（每天：吸收未编译
-  偏好、作废条款重编、受众画像重抽象），近期在转则提醒自消失；夜间任务 7 天没跑过会
-  重新出现（停转保险丝，mema 首装提醒同款模式）。
+  偏好、作废条款重编、受众画像重抽象）。v0.6.1 起提醒为**积压驱动**：存在待编译积压
+  （未编译偏好/条款待重编/画像待重抽象/经验待评估）且超过 3 天未落版消化才提醒
+  （积压明细随 backlog 字段在场），消化即自消失；夜间任务会话领走的章当晚由
+  task_evaluate(origin=scheduled) 清除，白天人类会话重新可见。
 - **新偏好即时生效**：task_start/task_resume 注入 persona 时同步携带该工作性质的
   未编译偏好增补（persona_supplement，冲突以增补为准，上限 10 条）；夜间定时任务把
   增补自动编译进新版本。（v0.3.8 删双跑提议：rollback 免费且可逆，事前确认无价值。）
@@ -243,7 +245,8 @@ MEMA_TWIN_TRANSPORT=http .venv/bin/mema-twin   # 监听 127.0.0.1:8765/mcp
 同款语义——`data.client` 与头不一致直接打回，`data.client` 只在 stdio 无头时
 作为显式归属手段，兜底回落 `MEMA_TWIN_CLIENT_ID` env）。脏值/重复头/非字符串
 一律打回，不会静默记错归属；http 绑定仅允许 loopback（X-Mema-* 头不是鉴权，
-对外暴露等于开放身份伪造）。会话 todo / 任务流按 `session` 参数隔离。stdio 模式
+对外暴露等于开放身份伪造）。会话 todo / 任务流按 `session` 参数隔离（仅
+task_start/task_resume/task_revise/task_submit/todo 五动作接受该参数）。stdio 模式
 不受影响，仍是单机默认。
 
 ## 远端部署（多租户 sidecar 形态）

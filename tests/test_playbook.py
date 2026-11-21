@@ -334,29 +334,18 @@ def test_playbook_material_total_cap(env):
     assert len(m) < 65_000
 
 
-def test_evaluate_origin_heartbeat(env):
-    # v0.4.1 合并单任务：task_evaluate(origin=scheduled) 调用成功即刷心跳——
-    # 与当晚有无新经验无关（task_count=0 也刷）
+def test_evaluate_origin_clears_night_stamp(env):
+    # v0.6.1 S8：task_evaluate(origin=scheduled) 改为夜编清章——夜编会话领走的
+    # 积压提醒章当晚作废（R2 炸-2）；心跳 meta 已退役不再写入
+    from mema_twin import scan
+    flow.set_meta(scan.SCAN_NOTICE_SHOWN_KEY, "2026-11-21T00:00:00+00:00")
     r = server._twin_impl("task_evaluate", {"origin": "scheduled"})
     assert r["ok"] and r["task_count"] == 0
-    conn = flow.db.connect()
-    try:
-        hb = flow.get_meta("last_scheduled_playbook_at")
-    finally:
-        conn.close()
-    assert hb
-    # 非法 origin 打回；交互式（无 origin）不刷心跳
+    assert flow.get_meta(scan.SCAN_NOTICE_SHOWN_KEY) is None  # 清章
+    assert flow.get_meta("last_scheduled_playbook_at") is None  # 心跳退役
+    # 非法 origin 打回；交互式（无 origin）不清章
+    flow.set_meta(scan.SCAN_NOTICE_SHOWN_KEY, "2026-11-21T00:00:00+00:00")
     bad = server._twin_impl("task_evaluate", {"origin": "manual"})
     assert bad["ok"] is False and "origin" in bad["reason"]
-    conn = flow.db.connect()
-    try:
-        before = flow.get_meta("last_scheduled_playbook_at")
-    finally:
-        conn.close()
     server._twin_impl("task_evaluate", {})
-    conn = flow.db.connect()
-    try:
-        after = flow.get_meta("last_scheduled_playbook_at")
-    finally:
-        conn.close()
-    assert after == before  # 交互式调用不动心跳
+    assert flow.get_meta(scan.SCAN_NOTICE_SHOWN_KEY) == "2026-11-21T00:00:00+00:00"

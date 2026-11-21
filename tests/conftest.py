@@ -22,6 +22,11 @@ def _isolated_twin_db(tmp_path, monkeypatch):
     monkeypatch.setenv("MEMA_TWIN_DELIVERABLES_DIR", str(tmp_path / "deliverables"))
     from mema_twin import exec_actions as _ea
     _ea._noop_counts.clear()  # 进程级计数跨用例串扰（每用例 step id 从 1 重来）
+    # v0.6.1 S6：write hint / compile 静态 note 抑制态同款清空（R1 P1-2）
+    from mema_twin import pref_actions as _pa
+    _pa._WRITE_HINT_SEEN.clear()
+    from mema_twin import compile_actions as _ca
+    _ca._COMPILE_NOTE_SHOWN.clear()
     flow._schema_ready.clear()
     audit._audit_ready.clear()
     audit._advisory_cooldown.clear()

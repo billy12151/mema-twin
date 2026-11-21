@@ -476,6 +476,16 @@ _EVIDENCE_INSERT = (
 )
 
 
+def _dedup_digest(text: str) -> str:
+    """去重键（v0.6.1 S7 规范化升级）：NFKC 归一（全角→半角等）→ 连续空白压一
+    → strip 后 sha256。落库 content 仍原样存——只影响比对键，判重面变宽
+    （全角/多空白变体命中 duplicate），措辞改写仍不判重（语义检测缺位拍板不变）。"""
+    import hashlib
+    import unicodedata
+    normalized = " ".join(unicodedata.normalize("NFKC", text or "").split())
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
 def add_local_evidence(conn: sqlite3.Connection, dims: dict, subject: str,
                        content: str, tags_json: str = "[]",
                        source_ref: str = "", client: str = "") -> dict:
@@ -486,10 +496,8 @@ def add_local_evidence(conn: sqlite3.Connection, dims: dict, subject: str,
     丢写且重试永不触发）——裸 INSERT + 撞号回退重试。返回
     {"duplicate": bool, "memory_id": int, "evidence_id": int}；duplicate=True 时
     memory_id/evidence_id 为既有行 id。"""
-    import hashlib
-
     code = (dims.get("work_type") or {}).get("code") if dims.get("work_type", {}).get("ok") else None
-    digest = hashlib.sha256((content or "").strip().encode("utf-8")).hexdigest()
+    digest = _dedup_digest(content)
     values = _evidence_values(dims, subject, content, tags_json, source_ref, client)
     for _attempt in range(3):
         try:
@@ -503,8 +511,7 @@ def add_local_evidence(conn: sqlite3.Connection, dims: dict, subject: str,
                         "SELECT memory_id, id, content FROM twin_evidence"
                         " WHERE work_type=? AND status IN ('uncompiled','compiled')",
                         (code,)).fetchall():
-                    other = hashlib.sha256(
-                        (row["content"] or "").strip().encode("utf-8")).hexdigest()
+                    other = _dedup_digest(row["content"] or "")
                     if other == digest:
                         conn.rollback()
                         # evidence_id 沿历史契约 = memory_id（对外稳定标识；行自增

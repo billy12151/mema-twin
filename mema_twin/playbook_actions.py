@@ -14,7 +14,7 @@ import re
 import sqlite3
 from pathlib import Path
 
-from . import db, exec_actions, flow, identity, store, templates, tenant
+from . import db, exec_actions, flow, identity, scan, store, templates, tenant
 
 
 def _playbook_mirror_dir(conn: sqlite3.Connection, key: str) -> Path:
@@ -84,7 +84,7 @@ def _action_task_evaluate(data: dict) -> dict:
     origin = data.get("origin")
     if origin is not None and origin != "scheduled":
         return {"ok": False, "error": "invalid_input", "field": "origin",
-                "reason": "origin 仅接受 scheduled（夜间定时任务心跳/来源标记），交互式不要传"}
+                "reason": "origin 仅接受 scheduled（夜间定时任务来源标记），交互式不要传"}
     limit_raw = data.get("limit")
     limit = _EVAL_LIMIT
     if limit_raw is not None:
@@ -178,17 +178,28 @@ def _action_task_evaluate(data: dict) -> dict:
     finally:
         conn.close()
     if origin == "scheduled":
-        # 心跳（v0.4.1 合并单任务）：合并夜间任务每晚必调 task_evaluate(origin=
-        # scheduled)，调用成功即证明任务在转——与当晚有无新经验无关，是单键
-        # 停转保险丝的依据；编译支线连续无素材也不会误报
+        # 夜编清章（v0.6.1 S8，替代旧心跳写入——R2 炸-2 收口为**条件清**）：
+        # 仅当积压已消化（无超窗信号）才清章——积压未消化时保留章（白天 3 天
+        # 静默由盖章保证，避免日频骚扰），夜编收尾汇总已记积压供人类可见
         flow.ensure_schema()
-        flow.set_meta("last_scheduled_playbook_at", db.now_iso())
+        if flow.get_meta(scan.SCAN_NOTICE_SHOWN_KEY) is not None:
+            conn = db.connect()
+            try:
+                overdue = scan.overdue_signals(scan.backlog_signals(conn))
+            finally:
+                conn.close()
+            if not overdue:
+                flow.delete_meta(scan.SCAN_NOTICE_SHOWN_KEY)
+    from . import compile_actions as _ca
+    client = identity.effective_client(data)
     out: dict = {"ok": True, "task_count": len(tasks), "material": material,
                  "key_hint": key_hint,
-                 "note": templates.STRONG_MODEL_NOTE,
+                 "note": _ca.suppress_static_note(client, templates.STRONG_MODEL_NOTE),
                  "next": ("按素材包编译规则产出 content_md 后调 twin(action="
                           "\"playbook_submit\", data={key, content_md, "
                           "source_task_ids, model})；无值得沉淀的新经验则不提交")}
+    if out.get("note") is None:
+        out.pop("note", None)  # S6：省略而非传 null（键缺席即否）
     if max_id:
         out["watermark_moved_to"] = max_id
     return out
@@ -380,9 +391,6 @@ def _action_playbook_submit(data: dict) -> dict:
                            "后续 task_start 自动注入。")
     if warnings:
         rec.setdefault("warnings", []).extend(warnings)
-    if origin == "scheduled":
-        flow.ensure_schema()
-        flow.set_meta("last_scheduled_playbook_at", db.now_iso())
     flow.ensure_schema()
     if flow.get_meta(f"playbook_reject:{key}") is not None:
         flow.delete_meta(f"playbook_reject:{key}")

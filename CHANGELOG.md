@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+## [0.6.1] — 2026-11-21
+
+E2E 实测卡点修复 1-8（方案 `~/ZCodeProject/docs/mema-twin-v061-scan-notice-dedup-plan.md` v3，方案 R1+R2 与实施后 R1+R2 共四轮独立评审）。零 DB 迁移。
+
+### Changed — 行为变更
+
+- **scan_notice 判据切换为积压驱动**（卡点 8，owner 方向）：旧「夜间任务 7 天没跑心跳」判据退役（心跳 meta 不再写入）——手动编译勤但没建任务的库不再被重复打扰、评估积压（消化走 playbook 落版）不再漏报。新判据：存在积压（未编译偏好/条款待重编/画像待重抽象/经验待评估）且其逐信号锚距今 >3 天才提醒；响应附 `backlog` 明细与 `overdue_signals`。**夜编清章**：夜间会话领走的提醒章由 task_evaluate(origin=scheduled) 当晚清除，白天人类会话重新可见。AGENT_INSTRUCTION 加无人值守分支（不提问/不建任务）。
+- **write 去重键规范化**（卡点 7）：比对键 NFKC 归一+空白压一（落库仍原样）——全角/多空白变体开始命中 duplicate=true。
+- **单条 step_update 的 task_id 从静默忽略变校验**（卡点 1/3）：传了即校验步骤归属，不符打回附正确归属与 task_get 指路；不传行为不变。
+
+### Added
+
+- **similar_existing 相似提示**（卡点 7）：write 落库后 difflib 快扫同工种在世证据（字面相似 ratio≥0.82，纯词法非语义判定，不拦截不落票），`similar_existing:[{memory_id,subject,ratio}]` 最多 3 条；护栏：任一侧 >2000 字符跳过/长度差 >4 倍跳过/最近 100 行帽/quick_ratio 预筛。
+- **plan_set `seq_map`**（卡点 2）：序号→全局步骤 id 换算表；help 明示 open_questions 的 step_ids 入参=序号、响应=全局 id（同名异义）。
+- **scan_notice `backlog`/`overdue_signals`**：提醒携带积压明细，Agent 免二次查询。
+
+### Fixed
+
+- 卡点 4：help 明示 `session` 仅 task_start/task_resume/task_revise/task_submit/todo 五动作接受（plan/step 族不消费，传了会被 B8 打回）。
+- 卡点 5：compile 的 next 文案明示「source_memory_ids 直接复制 source_ids_suggested 原样」。
+- 卡点 6：write hint / compile note / task_evaluate note 同 client 第二次起省略（指引非契约；duplicate note/session_note/next 恒在，submit/playbook_submit 的 session_note 不压；client=宿主/进程归属——跨会话共享抑制、重启重现，与 session 的会话隔离语义不同）。
+- 脏时间戳锚（旧 meta rec.at 任意文本）不再炸 status（锚解析失败视为不超窗；scan_notice 挂载加观测件旁路）。
+- make check-skill 版本戳机制沿用；SKILL 安装副本同步重发。
+- **回滚注意**：0.6.1 运行期间心跳 meta 停更，回滚 0.6.0 后至次夜真实心跳前 scan_notice 会按旧判据出现 ≤24h 假提醒窗（噪音，勿照办建任务）；可手动 flow.set_meta("last_scheduled_playbook_at", now) 消除。
+
 ## [0.6.0] — 2026-11-21
 
 Agent 调用工效改进（评估报告 `~/ZCodeProject/docs/mema-twin-agent-ergonomics-review-20261121.md`，实施级方案 v3 过 R1+R2 两轮独立评审；owner 2026-11-21 拍板 A+B 全部 13 条）。范围：全部为响应层/校验层改动，**零 DB schema 迁移**。

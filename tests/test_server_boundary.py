@@ -1,4 +1,5 @@
 """review#2/#10/#11 + 第二轮对抗性 review 回归。"""
+import datetime as _dt
 import pytest
 
 from mema_twin import db, flow, server
@@ -587,17 +588,44 @@ def test_task_resume_empty_persona_supplement():
 
 
 def test_notice_suppressed_by_scheduled_compile():
-    """v0.4.1 单键保险丝：persona scheduled submit 不消提醒（心跳键未动），
-    task_evaluate(origin=scheduled) 心跳才消。"""
-    from mema_twin import scan
-    assert scan.scan_notice() is not None
+    """v0.6.1 积压驱动：scheduled submit 落版=消化（积压清零）→ 提醒自消失；
+    task_evaluate(origin=scheduled) 夜编清章让白天重新可见。"""
+    from mema_twin import scan, db as _db
+    conn = _db.connect()
+    old = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=4)
+           ).replace(microsecond=0).isoformat()
+    conn.execute(
+        "INSERT INTO twin_evidence(memory_id, work_type, work_type_raw, content,"
+        " created_at) VALUES(900001, 'work_report', '周报', '待编译正文', ?)", (old,))
+    conn.commit()
+    conn.close()
+    assert scan.scan_notice() is not None  # 积压超窗 → 提醒
     server._twin_impl("submit", {"work_type": "周报", "prompt_md": "# v1", "model": "m",
-                           "origin": "scheduled"})
-    flow.delete_meta(scan.SCAN_NOTICE_SHOWN_KEY)  # 重置 v0.4.3 抑制盖章，模拟 3 天后
-    assert scan.scan_notice() is not None  # 老形态编译任务过不了单键保险丝
-    r = server._twin_impl("task_evaluate", {"origin": "scheduled"})
-    assert r["ok"]
-    assert scan.scan_notice() is None  # 心跳刷新（与当晚有无新经验无关）
+                           "origin": "scheduled",
+                           "source_memory_ids": [900001]})
+    assert scan.scan_notice() is None  # 消化即自消失（积压清零，与章无关）
+    # 夜编清章=条件清（R2 炸-2 收口）：积压未消化 → 章保留（SNOOZE 节律）；
+    # 积压已消化 → evaluate(scheduled) 清章。再造积压 + 章在 → 不清
+    conn = _db.connect()
+    conn.execute(
+        "INSERT INTO twin_evidence(memory_id, work_type, work_type_raw, content,"
+        " created_at) VALUES(900002, 'work_report', '周报', '又一条待编译', ?)", (old,))
+    conn.commit()
+    conn.close()
+    assert scan.scan_notice() is None  # 积压在但章仍在 SNOOZE 窗内
+    server._twin_impl("task_evaluate", {"origin": "scheduled"})
+    assert flow.get_meta(scan.SCAN_NOTICE_SHOWN_KEY) is not None  # 积压未消化不清章
+    # 消化全部积压 → 无超窗信号 → 清章
+    conn = _db.connect()
+    conn.execute("DELETE FROM twin_evidence WHERE memory_id IN (900001,900002)")
+    conn.commit()
+    conn.close()
+    server._twin_impl("task_evaluate", {"origin": "scheduled"})
+    assert flow.get_meta(scan.SCAN_NOTICE_SHOWN_KEY) is None
+    conn = _db.connect()
+    conn.execute("DELETE FROM twin_evidence WHERE memory_id IN (900001,900002)")
+    conn.commit()
+    conn.close()
 
 
 # ---- 轮2 对抗性 review 修复的回归 ----
@@ -892,16 +920,43 @@ def test_rollback_audience_profile():
     assert g["prompt_md"] == "# 画像v1"
 
 
-def test_aud_scheduled_submit_refreshes_night_signal():
-    from mema_twin import scan
-    assert scan.scan_notice() is not None
+def test_aud_scheduled_submit_clears_audience_backlog():
+    """v0.6.1 S8：audience_stale 信号在画像落版（计数追平）后消失——aud scheduled
+    submit=消化（R2 炸-1 修复回归：锚=active 画像 created_at，非最老证据）。"""
+    from mema_twin import scan, db as _db
+    conn = _db.connect()
+    old = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=4)
+           ).replace(microsecond=0).isoformat()
+    conn.execute(
+        "INSERT INTO twin_evidence(memory_id, work_type, work_type_raw, audience,"
+        " audience_raw, content, created_at)"
+        " VALUES(900003, 'work_report', '周报', 'leadership', '高层', '高层向偏好', ?)",
+        (old,))
+    conn.commit()
+    conn.close()
+    assert scan.scan_notice() is not None  # 无画像 → audience_stale（锚=最老证据）
     server._twin_impl("submit", {"work_type": "aud-leadership", "prompt_md": "# 画像",
-                           "model": "m", "origin": "scheduled", "source_memory_ids": []})
-    # 受众型 scheduled submit 同样只刷 compile 键：保险丝仍亮（v0.4.1 单键口径）
-    flow.delete_meta(scan.SCAN_NOTICE_SHOWN_KEY)  # 重置抑制盖章，模拟 3 天后
-    assert scan.scan_notice() is not None
-    server._twin_impl("task_evaluate", {"origin": "scheduled"})  # 心跳
-    assert scan.scan_notice() is None
+                           "model": "m", "origin": "scheduled",
+                           "source_memory_ids": [900003]})
+    assert scan.scan_notice() is None  # 画像落版计数追平 → 信号消失
+    # 再写一条受众证据：锚=active 画像 created_at（数月龄老证据不触发误报）
+    conn = _db.connect()
+    fresh = _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0).isoformat()
+    conn.execute(
+        "INSERT INTO twin_evidence(memory_id, work_type, work_type_raw, audience,"
+        " audience_raw, content, created_at)"
+        " VALUES(900004, 'work_report', '周报', 'leadership', '高层', '新一条', ?)",
+        (fresh,))
+    conn.commit()
+    conn.close()
+    s = server._twin_impl("status", {})
+    assert s["audience_stale"]["leadership"]["evidence"] == 2  # 差 1 条 → stale 在
+    assert scan.scan_notice() is None  # 锚=画像落版时刻（刚落版）→ 不超窗不提醒
+    conn = _db.connect()
+    conn.execute("DELETE FROM twin_evidence WHERE memory_id IN (900003,900004)")
+    conn.execute("DELETE FROM twin_prompt_versions WHERE work_type='aud-leadership'")
+    conn.commit()
+    conn.close()
 
 
 def test_stale_ignores_worktype_null_rows(monkeypatch):

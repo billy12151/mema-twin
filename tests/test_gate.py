@@ -1,5 +1,6 @@
 """v0.3.7 验证门（瘦身版）：G1/G2 拦 scheduled、G3/G4 只警告、空转阻尼、
 nightly_reject 计数生命周期、零副作用。"""
+import datetime as _dt
 import json
 
 import pytest
@@ -56,14 +57,29 @@ def test_scheduled_no_headings_blocked():
 
 
 def test_rejected_submit_no_side_effects():
-    from mema_twin import scan
+    """submit 被拒零副作用：active 未变、证据未消耗；v0.6.1 起提醒判据与提交
+    无关（积压驱动），被拒不改变提醒状态。"""
+    from mema_twin import scan, db as _db
+    # 造超窗积压（老 uncompiled 证据）
+    conn = _db.connect()
+    old = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=4)
+           ).replace(microsecond=0).isoformat()
+    conn.execute(
+        "INSERT INTO twin_evidence(memory_id, work_type, work_type_raw, content,"
+        " created_at) VALUES(900001, 'work_report', '周报', '待编译正文', ?)", (old,))
+    conn.commit()
+    conn.close()
     assert scan.scan_notice() is not None
     r = server._twin_impl("submit", {"work_type": "周报", "prompt_md": "无标题稿",
                                "origin": "scheduled", "source_memory_ids": []})
     assert r["ok"] is False
     flow.delete_meta(scan.SCAN_NOTICE_SHOWN_KEY)  # 重置 v0.4.3 抑制盖章，模拟 3 天后
-    assert scan.scan_notice() is not None  # 未刷夜间在转信号
+    assert scan.scan_notice() is not None  # 积压仍在（被拒不消化）→ 持续提醒
     assert flow.get_meta("persona_origin:work_report:1") is None
+    conn = _db.connect()
+    conn.execute("DELETE FROM twin_evidence WHERE memory_id=900001")
+    conn.commit()
+    conn.close()
 
 
 def test_g1_selflock_downgrades_when_active_carries_marker():

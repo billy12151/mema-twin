@@ -5,7 +5,7 @@ description: 个人分身：工作类偏好沉淀与 persona prompt 编译，经
 
 # mema-twin 使用引导
 
-> 对齐服务端 **v0.6.0**。动作全集、入参与基础语义以 `twin(action="help")` 为准——**调用动作前先查一次 help**；v0.6 起可单查省上下文：`twin(action="help", data={"topic":"<动作名>"})`（全量模式不变，会话内查一次即可）。本文件不复述入参。下文只写三样：何时用哪个动作的路由、执行门、help 未覆盖或与实测不符的口径。
+> 对齐服务端 **v0.6.1**。动作全集、入参与基础语义以 `twin(action="help")` 为准——**调用动作前先查一次 help**；v0.6 起可单查省上下文：`twin(action="help", data={"topic":"<动作名>"})`（全量模式不变，会话内查一次即可）。本文件不复述入参。下文只写三样：何时用哪个动作的路由、执行门、help 未覆盖或与实测不符的口径。
 > **夜间治理/编译会话不需要本 skill**：twin_nightly_compile 两支线与 compile/submit 编译口径在 `mema-twin-governance` skill（唯一真源），本文件只留指向它的路由。
 >
 > **v0.6 增量**：① `data` 顶层未知键会被硬拒（附 `allowed`/`did_you_mean`——拼写错键看报错即自纠）；② 新动作 `evidence`：void 前定位 memory_id 用（只读，不回正文）；③ resolve 支持 `tickets` 批量裁定（多维未命中一次裁完）；④ plan_set 可传 `start_first=true` 省一次首步打卡；⑤ compile 响应带 `source_ids_suggested`，submit 直接复制。
@@ -67,10 +67,10 @@ description: 个人分身：工作类偏好沉淀与 persona prompt 编译，经
   - 顶层 `nightly_rejected` 才是「夜间拒绝落版计数」（键缺席即 0）；`plan_stats.playbook_rejected` 是**数组不是计数**，别按数字读
   - **status 判空**：`uncompiled` / `audience_stale` 返回 `{}`，`persona_stale` / `nightly_rejected` 是**键缺席**即空；plan_stats **可能整桶缺席**（仅 status 内部软失败时缺席，空库仍返回全零桶），其 `audit` / `playbook_rejected` 同理按「键缺席 或 空容器」处理——一律等价处理，别因为没看到键就以为字段缺失或去查源码
 - `status` 返回 scan_notice 时：按其 agent_instruction 询问用户是否创建/更新夜间任务（当前 spec 是单一任务 `twin_nightly_compile`，**从响应的 setup.tasks 取 spec 原文**建到宿主平台，不要凭记忆写）。处置口径四条：
-  - **更新现有任务，不要再建第二个**：只建「纯 persona 编译」旧形态永远过不了停转保险丝，会被持续引导升级成合并 spec（两支线：评估在前、编译在后，缺评估支线心跳就刷不上）
+  - **更新现有任务，不要再建第二个**：提醒是积压驱动的（v0.6.1）——有积压超 3 天未消化才出；缺评估支线的纯编译任务会让未评估任务积压不消化、持续提醒，升级成合并 spec（两支线：评估在前、编译在后）后按积压消化节奏自消失
   - 夜间任务的 prompt 指到 **`mema-twin-governance` skill**（夜间会话只读它）
-  - 提示出现后 **3 天内全局静默属正常**（多宿主最多 3 天问一次，由第一个看到的 agent 提问；7 天内任务跑过即自消失）
-  - 换 client/宿主跑同一任务可能仍被判"没跑过"，照常更新任务即可
+  - 提示出现后 **3 天内全局静默属正常**（多宿主最多 3 天问一次，由第一个看到的 agent 提问；积压消化即自消失——v0.6.1 积压驱动判据）
+  - 夜间任务会话领走的章当晚自动清除（task_evaluate origin=scheduled），白天人类会话重新可见
 - **首次**交付产出物时提醒一次（不是每次）：后续修改尽量交给 Agent 而非手动改，每次修改都是一次偏好沉淀机会
 - 用户要求撤销/回退某版分身 → `twin(action="rollback")`：零阻力直接执行（不删历史、版本号不回收），**不要建议重新编译代替回滚**
 - 用户问"现在分身长什么样 / 把 vN 给我看看" → `twin(action="get")` 读 persona 全文（work_type 传 `aud-<受众>` 读受众画像）。读 active 时响应附未编译增补 `persona_supplement`（v0.4.8 起，指定历史版本/受众画像不附）——上下文被压缩后取回分身就用它，别只拿 prompt 全文漏了增补

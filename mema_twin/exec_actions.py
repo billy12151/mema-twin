@@ -586,6 +586,9 @@ def _action_plan_set(data: dict) -> dict:
         conn.close()
     out: dict = {"ok": True, "task_id": task_id, "replanned": replanned > 0,
                  "steps": out_steps, "open_questions": out_q,
+                 # v0.6.1 S2：序号→全局步骤 id 换算表（open_questions 入参
+                 # step_ids 用序号、响应里同名键是全局 id——同名异义，以此为准）
+                 "seq_map": {str(s["seq"]): s["id"] for s in out_steps},
                  "guidance": (
                      "计划已建，可直接开工（无需等确认）。步骤推进用 step_update；"
                      "对没把握、或你确认不了的点已列入 open_questions（要紧的标了 "
@@ -797,6 +800,25 @@ def _action_step_update(data: dict) -> dict:
         if row is None:
             return {"ok": False, "error": "not_found",
                     "reason": f"step id {step_id}（task_get 可取本任务步骤清单核对 id）"}
+        # v0.6.1 S1：可选 task_id 归属校验——步骤 id 全局连发，凭记忆猜 id 会
+        # 误标他任务步骤（实测卡点 1/3）；批量分支早有 expect_task_id 同款校验，
+        # 单条补齐（不传 task_id 行为完全不变）。
+        if data.get("task_id") is not None:
+            try:
+                claim_tid = _coerce_task_id(data)
+            except ValueError as e:
+                return {"ok": False, "error": "invalid_input", "reason": str(e)}
+            if not _task_plan_status(conn, claim_tid):
+                return {"ok": False, "error": "not_found",
+                        "reason": (f"task id {claim_tid}"
+                                   "（task_recent 可查进行中/最近任务）")}
+            step_tid = int(row["task_id"])
+            if step_tid != claim_tid:
+                return {"ok": False, "error": "invalid_input",
+                        "reason": (f"步骤 #{step_id} 属于任务 #{step_tid}，与传参 "
+                                   f"task_id={claim_tid} 不符——步骤 id 可能猜错："
+                                   f"twin(action=\"task_get\", data={{\"task_id\": "
+                                   f"{step_tid}}}) 核对，或 task_recent 查最近任务")}
         step = _step_dict(row)
         guard = _task_planning_guard(conn, int(step["task_id"]))
         if guard:
