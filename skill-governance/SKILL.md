@@ -22,7 +22,7 @@ description: mema-twin 夜间治理/编译会话专用：twin_nightly_compile �
 
 1. `status`：plan_stats.tasks_unevaluated=0 → 评估支线整体跳过（无素材不空转）
 2. `task_evaluate` **必传 `origin="scheduled"`**（唯一合法值；夜间来源标记，验证门与空转阻尼仅对 scheduled 生效）：调用成功会清除夜编会话领走的积压提醒章（v0.6.1，把提醒还给白天的人类会话）。无 task_ids 取未评估收口任务（≤10，limit 实际 clamp 1..10）；响应 task_count=0 则支线结束
-3. 素材只含真实执行记录；**分流判据**（v0.6.7）：playbook 只收执行路径/工具用法/踩坑规避——判据是「这条经验删掉后交付物本身会变差吗」：会（产出物的结构/口径/措辞要求）→ 不是 playbook 条目，不立条，此类偏好属 twin.write 沉淀（persona 侧）；不会（只是干活更快/少踩坑）→ 属 playbook。`playbook_submit`：key 用 key_hint（或覆盖面最大的 work_type；跨类型经验用 `'global'`），source_task_ids=素材包全部任务 id；**编译产物每条必须 `<!-- task: N -->` 溯源，写不出来源的条目不得出现**
+3. 素材只含真实执行记录；**分流判据**（v0.6.7）：playbook 只收执行路径/工具用法/踩坑规避——判据是「这条经验删掉后交付物本身会变差吗」：会（产出物的结构/口径/措辞要求）→ 不是 playbook 条目，不立条，此类偏好属 twin.write 沉淀（persona 侧）；不会（只是干活更快/少踩坑）→ 属 playbook。**可复用性判据**：服务端报错文案已自解释的一次性失误自愈（传错参照报错改对）不立条——报错本身会教后续宿主；值得记录的是报错无法自解释、需额外环境知识的坑；同型失误高频复现在收尾汇总标「接口易用性信号」（那是服务端改进项而非经验）。`playbook_submit`：key 用 key_hint（或覆盖面最大的 work_type；跨类型经验用 `'global'`），source_task_ids=素材包全部任务 id；**编译产物每条必须 `<!-- task: N -->` 溯源，写不出来源的条目不得出现**
 4. **无值得沉淀的新经验不提交不落版**
 
 ## ②persona 编译支线

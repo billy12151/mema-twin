@@ -249,7 +249,9 @@ _HELP_ENTRIES: dict[str, str] = {
                      "来源标记；调用成功会清除夜编领走的积压提醒章）。"
                      "按素材包编译出 content_md 后 playbook_submit；无新经验不提交。"
                      "分流判据：playbook 只收执行路径/工具用法/踩坑规避，产出物的"
-                     "结构/口径/措辞类偏好属 twin.write（persona 侧），不要立条。",
+                     "结构/口径/措辞类偏好属 twin.write（persona 侧），不要立条；"
+                     "服务端报错已自解释的一次性失误自愈（传错参照报错改对）也不立条，"
+                     "值得记录的是报错无法自解释、需额外环境知识的坑。",
     "playbook_submit": "提交 playbook 落版。必填 key（work_type code 或 "
                        "'global'；禁 pb-/aud- 保留前缀）/content_md/"
                        "source_task_ids（溯源任务 id，防幻觉路径）；可选 model（编译"
