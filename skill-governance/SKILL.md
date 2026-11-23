@@ -5,7 +5,7 @@ description: mema-twin 夜间治理/编译会话专用：twin_nightly_compile �
 
 # mema-twin 夜间治理手册
 
-> 对齐服务端 **v0.6.0**。流程单一真源是 `mema_twin/scan.py` 的 `SCHEDULED_TASKS_SPEC`
+> 对齐服务端 **v0.6.3**。流程单一真源是 `mema_twin/scan.py` 的 `SCHEDULED_TASKS_SPEC`
 > （建任务时随 scan_notice 的 setup 下发；v0.6 起 calls 的说明文本在 `instruction` 键、
 > `data` 只放真参数——照抄 data 不会撞未知键硬拒）——与本文件不一致时**以 scan.py 为准**；
 > 动作入参与基础语义以 `twin(action="help")` 为准（可 `help(topic=<动作名>)` 单查）。
