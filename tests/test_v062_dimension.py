@@ -437,12 +437,13 @@ def test_v065_audience_version_declaration():
     t1 = _t("task_start", {"brief": "任务一", "work_type": "周报", "audience": "高层"})
     assert t1["audience_profile_md"]  # 首次全文注入
     v = t1["audience_profile_version"]
-    # 同会话第二任务：申报同版本 → 短路（无 md）
+    # 同会话第二任务：申报 {受众码: 版本} 身份+版本双匹配 → 短路（无 md）
     t2 = _t("task_start", {"brief": "任务二", "work_type": "周报", "audience": "高层",
                            "have_persona_version": 1,
-                           "have_audience_version": v})
+                           "have_audience_versions": {"leadership": v}})
     assert t2.get("audience_profile_unchanged") is True
     assert t2.get("audience_profile_version") == v
+    assert t2.get("audience_profile_code") == "leadership"
     assert "audience_profile_md" not in t2
     # 申报旧版本（画像重编后）→ 全文重注入附变更说明
     _t("write", {"content": "高层偏好了结论表格式汇报", "work_type": "周报",
@@ -453,23 +454,30 @@ def test_v065_audience_version_declaration():
                        "source_memory_ids": ra["source_ids_suggested"]})
     assert s2["ok"] and s2["version"] == 2
     t3 = _t("task_start", {"brief": "任务三", "work_type": "周报", "audience": "高层",
-                           "have_persona_version": 1, "have_audience_version": v})
+                           "have_persona_version": 1,
+                           "have_audience_versions": {"leadership": v}})
     assert t3["audience_profile_md"]  # 版本变了 → 全文重注入
     assert "变更为 v2" in t3.get("audience_profile_note", "")
     # 未申报 → 全文照旧（宁重复不缺席）
     t4 = _t("task_start", {"brief": "任务四", "work_type": "周报", "audience": "高层"})
-    assert t4["audience_profile_md"]
+    assert t4["audience_profile_md"]  # 未申报 → 全文照旧
 
 
 def test_v065_have_audience_strict_coerce():
+    """v0.6.7 形态：dict 矫正（脏值打回 field 归因 have_audience_versions）；
+    旧单值键已废弃 → B8 unknown field 打回。"""
     _t("write", {"content": "c", "work_type": "周报", "audience": "灵能监理司",
                  "purpose": "同步"})
     r = _t("task_start", {"brief": "b", "work_type": "周报", "audience": "高层",
-                          "have_audience_version": "true"})
-    assert r["ok"] is False and r.get("field") == "have_audience_version"
+                          "have_audience_versions": {"leadership": "true"}})
+    assert r["ok"] is False and r.get("field") == "have_audience_versions"
     r2 = _t("task_start", {"brief": "b", "work_type": "周报", "audience": "高层",
-                           "have_audience_version": 0})
+                           "have_audience_versions": {"leadership": 0}})
     assert r2["ok"] is False
+    # 旧单值键已废弃：B8 按 unknown field 打回（显式迁移信号）
+    old = _t("task_start", {"brief": "b", "work_type": "周报", "audience": "高层",
+                            "have_audience_version": 1})
+    assert old["ok"] is False and "unknown field" in old["reason"]
 
 
 def test_v065_task_start_guidance_suppressed_second_call():

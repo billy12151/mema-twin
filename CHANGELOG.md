@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+## [0.6.7] — 2026-11-23
+
+**P0 修复（部署后对抗 review 实锤复现）**：v0.6.5 的 have_audience_version 申报只比版本号不绑受众身份——同会话换受众且版本撞号（生产现成撞号对：direct_manager v5 == self v5）时静默谎报 unchanged，宿主拿上一受众画像执行新受众任务。
+
+### Changed（破坏性：参数形状变更）
+
+- **have_audience_version（单值）废弃 → have_audience_versions（{受众码: 版本号} dict）**：短路必须**受众身份+版本双匹配**；宿主带上会话已注入的全部 {受众: 版本}，换受众回来也能安全短路。旧单值键按 B8 unknown field 打回（显式迁移信号；jingleAI 需移除旧参改传 dict）。
+- 短路响应回显 `audience_profile_code`（宿主可核对身份）。
+
+### Fixed
+
+- help task_start 补 have_audience_versions 说明（v0.6.5 漏写——宿主顺 help 链读到空）。
+- `mema_twin.__version__` 哑雷修正（0.5.1 → 0.6.7，落后 5 版无消费方）。
+
+### 已知边界（v0.6.4 review 记录）
+
+- tool_gap 归一只修**形态差**（twin.*、write/write_file）；**语义差**（中英命名如「JoySpace 上传」vs create_joyspace_page、CLI-vs-宿主工具名）修不了——product_doc playbook 对 jingleAI 仍 3 条误报。演进方向（待办）：面板条目带机器可读工具标识（编译规则层）。CLI 类条目（draw.io/OfficeCLI）对有 bash 的宿主属可证伪误报，暂接受（advisory 面）。
+- 复合面板条目（write / edit / read）原子匹配=漏报方向：宿主缺 edit 无提示。
+- audit 表无参数摘要列，静默错注类事故不可审计（待办）。
+
 ## [0.6.6] — 2026-11-23
 
 jingleAI 反馈第三弹处置（两采纳三否决——过度裁内容会打折扣执行，owner 警告在先）。586 测试绿。
