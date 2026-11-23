@@ -29,6 +29,8 @@ def _isolated_twin_db(tmp_path, monkeypatch):
     _ca._COMPILE_NOTE_SHOWN.clear()
     from mema_twin import pref_actions as _pa2
     _pa2._TS_GUIDANCE_SEEN.clear()
+    from mema_twin import task_actions as _ta
+    _ta._AUD_UNKNOWN_NOTE_SEEN.clear()  # v0.6.9 码表教学 note 频控态
     flow._schema_ready.clear()
     audit._audit_ready.clear()
     audit._advisory_cooldown.clear()

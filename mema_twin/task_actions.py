@@ -145,13 +145,40 @@ def _normalize_have_auds(raw: dict | None) -> tuple[dict | None, list[str]]:
 
 _AUD_UNKNOWN_MAX = 10
 _AUD_UNKNOWN_KEY_CHARS = 64
+_AUD_UNKNOWN_NOTE_SEEN: set[str] = set()
+_AUD_UNKNOWN_NOTE_CAP = 4096
 
 
-def _attach_aud_unknown_warning(out: dict, unknown: list[str]) -> None:
-    """未识别申报键警告（v0.6.8，jingleAI #1）：回显原样键+实时合法码清单，
-    teach-until-fixed——逐调用可见直至改对（自然出口），不受 S6 静态抑制
-    （事实数据非固定说教）。回显有体积帽（前 10 条/单键 64 字符，对齐
-    audit._FIELD_MAX 先例）。忽略键不影响本次任务（declared miss → 全文照注）。"""
+def _aud_unknown_note_full() -> str:
+    """全量教学 note（合法码 code（zh）实时清单）。独立函数便于「先构建后占位」
+    ——DB 瞬断异常时不留已占位未送达的假指针态（实施后 R1/R2 P2-1）。"""
+    conn = db.connect()
+    try:
+        codes = "、".join(f"{r['code']}（{r['zh']}）" if r.get("zh") else r["code"]
+                          for r in normalize.all_values("audience", conn))
+    finally:
+        conn.close()
+    return ("以上申报键不是合法受众码，已忽略（不影响本次任务）；"
+            "申报键用受众裸码（aud-<合法裸码> 形态会被自动归一；"
+            "中文名/别名不用于申报）——权威裸码见响应回显 "
+            "audience_profile_code；合法受众码："
+            + codes + "。结构见 help(topic=task_start)")
+
+
+def _attach_aud_unknown_warning(out: dict, unknown: list[str],
+                                data: dict | None = None) -> None:
+    """未识别申报键警告（v0.6.8，jingleAI #1）：回显原样键+合法码清单，
+    teach-until-fixed 直至改对。ignored/total 是事实数据逐调用保留；码表教学
+    note 走 S6 频控（v0.6.9，owner 提：循环场景每次吐 ~300 字符码表不划算）——
+    同 client 首次全量教学，第二次起换指针（独立 seen-set，租户前缀隔离；
+    不复用 compile_actions 共用 set——task_start guidance 每次建档先占位会把
+    首次码表错杀成指针，实施中实踩）。指针自带 taxonomy 实时重取指引（实施后
+    R2 P1-1：上下文压缩场景此前响应不可见、help 不含码表）。
+    频控豁免（实施后 R2 P1-2）：http 多宿主形态（tenant 已路由）而 client 缺失
+    时不占槽——无头宿主共键互串假指针，宁重复不缺席；stdio 单进程单宿主无此
+    问题，无 client 也占槽（循环省钱场景主战场）。占位在码表构建成功之后
+    （R1/R2 P2-1：DB 瞬断不留已占位未送达态）。回显有体积帽（前 10 条/单键
+    64 字符）。忽略键不影响本次任务（declared miss → 全文照注）。"""
     if not unknown:
         return
     # lone surrogate 消毒（实施后 R2 P1-1）：http 入口 json.loads 接受 \udXXX
@@ -163,19 +190,25 @@ def _attach_aud_unknown_warning(out: dict, unknown: list[str]) -> None:
             for u in unknown[:_AUD_UNKNOWN_MAX]]
     shown = [u if len(u) <= _AUD_UNKNOWN_KEY_CHARS
              else u[:_AUD_UNKNOWN_KEY_CHARS] + "…" for u in safe]
-    conn = db.connect()
-    try:
-        codes = "、".join(f"{r['code']}（{r['zh']}）" if r.get("zh") else r["code"]
-                          for r in normalize.all_values("audience", conn))
-    finally:
-        conn.close()
+    from . import tenant as _tenant
+    tenant_id = _tenant.current_tenant()
+    client = identity.effective_client(data or {})
+    # http 多宿主（tenant 已路由）而 client 缺失 → 不占槽不频控；stdio（无
+    # tenant）进程即宿主，无 client 也占槽
+    key = (f"{tenant_id}:{client}"
+           if (client or tenant_id is None) else None)
+    if key is not None and key in _AUD_UNKNOWN_NOTE_SEEN:
+        note = ("以上申报键不是合法受众码，已忽略（不影响本次任务）；实时合法码"
+                "清单可 twin(action=\"taxonomy\", kind=\"audience\") 重取"
+                "（结构见 help(topic=task_start)）。")
+    else:
+        note = _aud_unknown_note_full()
+        if key is not None:
+            if len(_AUD_UNKNOWN_NOTE_SEEN) >= _AUD_UNKNOWN_NOTE_CAP:
+                _AUD_UNKNOWN_NOTE_SEEN.clear()
+            _AUD_UNKNOWN_NOTE_SEEN.add(key)
     out["have_audience_versions_unknown"] = {
-        "ignored": shown, "total": len(unknown),
-        "note": ("以上申报键不是合法受众码，已忽略（不影响本次任务）；"
-                 "申报键用受众裸码（aud-<合法裸码> 形态会被自动归一；"
-                 "中文名/别名不用于申报）——权威裸码见响应回显 "
-                 "audience_profile_code；合法受众码："
-                 + codes + "。结构见 help(topic=task_start)"),
+        "ignored": shown, "total": len(unknown), "note": note,
     }
 
 
@@ -536,7 +569,7 @@ def _action_task_start(data: dict) -> dict:
         playbook_actions.inject_playbook(pb_conn, out, code, data)
     finally:
         pb_conn.close()
-    _attach_aud_unknown_warning(out, aud_unknown)
+    _attach_aud_unknown_warning(out, aud_unknown, data)
     return out
 
 
@@ -785,7 +818,7 @@ def _action_task_resume(data: dict) -> dict:
         playbook_actions.inject_playbook(pb_conn, out, resume_code, pb_data)
     finally:
         pb_conn.close()
-    _attach_aud_unknown_warning(out, aud_unknown)
+    _attach_aud_unknown_warning(out, aud_unknown, data)
     return out
 
 
@@ -922,7 +955,7 @@ def _action_task_revise(data: dict) -> dict:
         playbook_actions.inject_playbook(pb_conn, out, code, pb_data)
     finally:
         pb_conn.close()
-    _attach_aud_unknown_warning(out, aud_unknown)
+    _attach_aud_unknown_warning(out, aud_unknown, data)
     return out
 
 

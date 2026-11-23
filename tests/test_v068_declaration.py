@@ -207,6 +207,8 @@ def test_v068_warning_on_resume_and_revise():
                            "have_audience_versions": {"cto": 1}})
     assert r["ok"] is True
     assert r["have_audience_versions_unknown"]["ignored"] == ["cto"]
+    # resume 是本测试首个 attach → 全量码表；seen 槽跨动作共享
+    assert "leadership（" in r["have_audience_versions_unknown"]["note"]
     # resume 让位换代：交付与返工都对准新代任务行
     sub = _t("task_submit", {"task_id": r["new_task_id"], "deliverable_md": "# 交付"})
     assert sub["ok"], sub
@@ -214,6 +216,9 @@ def test_v068_warning_on_resume_and_revise():
                             "have_audience_versions": {"cto": 1}})
     assert rv["ok"] is True
     assert rv["have_audience_versions_unknown"]["ignored"] == ["cto"]
+    # 同 client 第二次（revise）→ 指针（含 taxonomy 重取指引，R2 P1-1）
+    assert "taxonomy" in rv["have_audience_versions_unknown"]["note"]
+    assert "leadership（" not in rv["have_audience_versions_unknown"]["note"]
 
 
 # ---- 16 lone surrogate 消毒（实施后 R2 P1）：回显 JSON-safe，http 序列化不炸 ----
@@ -234,3 +239,43 @@ def test_v068_b8_unknown_key_surrogate_sanitized():
     r = _t("task_start", {"brief": "b", "work_type": "周报", "bogus\ud800key": 1})
     assert r["ok"] is False and "unknown field" in r["reason"]
     _json.dumps(r, ensure_ascii=False)
+
+
+# ---- 17（v0.6.9）码表教学 note S6 频控：同 client 二次起换指针 ----
+
+def test_v068_warning_note_suppressed_second_call():
+    _mk_profile()
+    t1 = _ts(have_audience_versions={"cto": 1})
+    assert "leadership（" in t1["have_audience_versions_unknown"]["note"]  # 首次全量码表
+    t2 = _ts(have_audience_versions={"cto": 1})
+    w2 = t2["have_audience_versions_unknown"]
+    assert "help(topic=task_start)" in w2["note"]  # 二次起一句话指针
+    assert "taxonomy" in w2["note"]  # 指针带实时重取指引（R2 P1-1：压缩自足）
+    assert "leadership（" not in w2["note"]  # 码表不重复
+    assert w2["ignored"] == ["cto"] and w2["total"] == 1  # 事实数据照旧
+    assert t2["audience_profile_md"]  # 短路兜底不变（宁重复不缺席）
+
+
+# ---- 18/19（实施后 R2）频控边界：http 无头宿主豁免 / 跨租户独立槽 ----
+
+def test_v069_http_anonymous_hosts_always_full(monkeypatch):
+    """http 多宿主形态（tenant 已路由）client 缺失 → 不占槽恒全量（R2 P1-2）。"""
+    from mema_twin import task_actions as ta, tenant as tenant_mod
+    monkeypatch.setattr(tenant_mod, "current_tenant", lambda: "u1")
+    for _ in range(2):
+        out = {}
+        ta._attach_aud_unknown_warning(out, ["cto"], {})
+        assert "leadership（" in out["have_audience_versions_unknown"]["note"]
+
+
+def test_v069_cross_tenant_frequency_isolated(monkeypatch):
+    """跨租户同 client 独立 seen 槽（R2 P2-3 补钉）。"""
+    from mema_twin import task_actions as ta, tenant as tenant_mod
+    monkeypatch.setattr(tenant_mod, "current_tenant", lambda: "u1")
+    o1 = {}
+    ta._attach_aud_unknown_warning(o1, ["cto"], {"client": "alpha"})
+    assert "leadership（" in o1["have_audience_versions_unknown"]["note"]
+    monkeypatch.setattr(tenant_mod, "current_tenant", lambda: "u2")
+    o2 = {}
+    ta._attach_aud_unknown_warning(o2, ["cto"], {"client": "alpha"})
+    assert "leadership（" in o2["have_audience_versions_unknown"]["note"]  # u2:alpha 首次
