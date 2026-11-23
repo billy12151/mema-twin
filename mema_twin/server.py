@@ -160,6 +160,15 @@ _HELP_ENTRIES: dict[str, str] = {
                   "不适用），专属落版自动退出。"
                   "可选 have_persona_version：同一会话此前注入过同 work_type 且版本号仍在场时申报，"
                   "版本未变则不再重复注入全文，变了则重注入并附变更说明。"
+                  "可选 have_audience_versions：对象 {受众码: 版本号}——键=受众裸码"
+                  "（如 direct_manager；aud-<合法裸码> 形态会被自动归一；中文名/别名"
+                  "不用于申报），值=该受众画像版本号。同一会话此前注入过该受众画像全文且"
+                  "版本仍在场时申报，版本未变则不再重复注入全文（只回 "
+                  "audience_profile_code / audience_profile_version / "
+                  "audience_profile_unchanged 三键），变了则重注入并附变更说明；"
+                  "不申报=照常全文注入（宁重复不缺席）；上文已不可见（被上下文压缩）"
+                  "就不要申报。申报键不合法不影响本次任务——未识别键会被忽略并在"
+                  "响应 have_audience_versions_unknown 警告。"
                   "响应另带 persona_supplement：该 work_type 未编译偏好增补"
                   "（与 prompt 冲突以增补为准；上限 10 条）。"
                   "client 字段同 write（http 共接时头已带则无需传）。",
@@ -174,7 +183,8 @@ _HELP_ENTRIES: dict[str, str] = {
                    "（含未编译增补 persona_supplement 与无专属 persona 时的"
                    " 同域 fallback，同 task_start）。"
                    "可选 available_tools 覆盖建档自报值（playbook 工具面板比对用）。"
-                   "have_persona_version / have_audience_versions 申报口径同 task_start；"
+                   "have_persona_version / have_audience_versions 申报口径同 task_start"
+                   "（受众键=受众裸码）；"
                    "已交付（submitted）的返工走 task_revise。",
     "task_revise": "已交付任务修订返工（仅 submitted）。task_id + brief/deliverable_md/"
                    "revision_reason 至少其一；子任务回 planning 重走执行并记 lineage"
@@ -183,6 +193,9 @@ _HELP_ENTRIES: dict[str, str] = {
                    "have_persona_version 仅当同一会话"
                    "上文已注入该版本全文时才申报——从任务行抄号申报会短路掉全文注入"
                    "（跨会话返工不传即自动全文重注入）。"
+                   "have_audience_versions 申报口径同 task_start（键=受众裸码），"
+                   "同款告诫：跨会话返工上文不可见就不要申报——从旧响应抄号申报会"
+                   "短路掉全文注入。"
                    "修订反馈中的可复用偏好走 twin.write 沉淀。",
     "task_close": "显式关闭进行中任务（仅 planning），历史保留可审计。"
                   "可选 outcome ∈ failed|superseded（缺省 superseded）——"
@@ -466,6 +479,10 @@ def _twin_impl(action: str, data: dict | None = None) -> dict:
                 return _audited(action, "gateway_unreachable", str(e), started, data)
         unknown = sorted(set(data) - _ACTION_KEYS[action])
         if unknown:
+            # lone surrogate 消毒（v0.6.8 实施后 R2 P1-1 同源兜底）：键含 \udXXX
+            # 转义时 reason/did_you_mean 原样回显会在 http 序列化层炸掉响应；
+            # encode(replace) 置换单个 '?'（aud 申报警告同款）
+            unknown = [u.encode("utf-8", "replace").decode("utf-8") for u in unknown]
             # difflib 近邻提示（ratio≥0.6）；无命中置 null（显式「没有像样的
             # 近邻」，与命中区分——测试钉）
             did_you_mean = {

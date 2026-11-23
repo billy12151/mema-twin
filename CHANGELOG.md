@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+## [0.6.8] — 2026-11-23
+
+jingleAI 0.6.7 实测反馈三则（#1 未识别申报键静默、#2 aud- 前缀双形态混淆、#4 help 缺形状说明）。方案双轮评审修订后实施（R2 P0：归一域漏自建受众码；R2 P1-2 设计反转：放弃别名匹配防漂移假短路）。
+
+### Added
+
+- **申报键未知码警告**：task_start/task_resume/task_revise 响应新增 `have_audience_versions_unknown`（ignored 前 10 条/单键 64 字符帽 + total + 实时合法码清单 note）——未识别键**不硬拒任务**（申报是省 token 优化，兜底=画像全文照注，宁重复不缺席），逐调用可见直至改对；不受 S6 静态抑制。
+- help(task_start) 补 `have_audience_versions` 形状段（键=受众裸码、aud- 自动归一、短路回显三键、宁重复不缺席）——0.6.7 CHANGELOG 声称补过、实际只改了 task_resume 指针，本次补真实缺口；task_revise 补同口径+跨会话抄号告诫。
+
+### Changed
+
+- **aud- 前缀自动归一**：申报键 `aud-direct_manager` 静默剥前缀归一为 `direct_manager`（保留命名空间双射，宿主从 get/自救指引抄 aud- 形态零成本兼容）。归一域只认**精确裸码（内置 ∪ 治理自建码）**——中文名/别名不用于申报（别名表随发版漂移→撞号假短路→画像静默缺席，v0.6.7 P0 同类）；同码多版取 max 胜出（与键序无关，跨语言宿主安全）。
+- 键分类与值校验下沉 `_normalize_have_audience_versions`（连库取自建码；先分类后校验——未识别键不论值好坏一律软忽略，识别键坏值仍硬拒）。
+
+### Fixed（实施后对抗 review）
+
+- **lone surrogate 炸 http 序列化（R2 P1）**：未知申报键/B8 未知 data 键回显原样放行 `\udXXX` 转义键时，http 部署形态的 SDK 序列化层抛 PydanticSerializationError——宿主拿不到响应、任务已建档、警告永不可见（JS 宿主 JSON.stringify 可无意触发）。回显前 encode/decode 置换 U+FFFD 保证 JSON-safe（B8 同源隐患一并兜底）。
+- 警告 note 合法码清单补 zh 对照（`code（zh）` 联合列出，R2 P2-4）；「aud- 前缀会被自动归一」措辞收窄为「aud-<合法裸码>」（R1 P2-3，`aud-高层` 等非法余数仍进 unknown）。
+
 ## [0.6.7] — 2026-11-23
 
 **P0 修复（部署后对抗 review 实锤复现）**：v0.6.5 的 have_audience_version 申报只比版本号不绑受众身份——同会话换受众且版本撞号（生产现成撞号对：direct_manager v5 == self v5）时静默谎报 unchanged，宿主拿上一受众画像执行新受众任务。

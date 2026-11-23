@@ -86,10 +86,10 @@ def _coerce_have_version(data: dict) -> int | None:
     return n
 
 
-def _coerce_have_audience_versions(data: dict) -> dict[str, int] | None:
-    """have_audience_versions 矫正（v0.6.7，取代 0.6.5 单值形态——R2 review P0：
-    单值只比版本号不绑受众身份，同会话换受众+撞号会静默谎报 unchanged）。
-    形态 {受众码: 版本号}（码非空串、版本 ≥1）；脏值打回。缺省 None=未申报。
+def _coerce_have_audience_versions(data: dict) -> dict | None:
+    """have_audience_versions 形态门（v0.6.7 起取代 0.6.5 单值形态；v0.6.8 起
+    只管形态：非 dict 打回，dict 原样透传——键分类与值校验下沉
+    _normalize_have_audience_versions，需连库取自建受众码）。缺省 None=未申报。
     宿主带上会话已注入过的全部 {受众: 版本}，换受众回来也能安全短路。"""
     v = data.get("have_audience_versions")
     if v is None:
@@ -99,20 +99,84 @@ def _coerce_have_audience_versions(data: dict) -> dict[str, int] | None:
             "have_audience_versions 必须是对象 {受众码: 版本号}（如 "
             '{\"leadership\": 9}）——单值 have_audience_version 已废弃（无受众'
             "身份绑定，换受众+版本撞号会静默错注入）")
+    return v
+
+
+def _normalize_have_audience_versions(conn, raw: dict) -> tuple[dict | None, list[str]]:
+    """申报键分类+归一（v0.6.8，jingleAI #1/#2；R2 P1-2 收窄域）：只认精确
+    裸码（内置 ∪ DB 自建，_is_known_audience 与归一门同判定）+ `aud-` 保留
+    前缀剥壳（store.classify_code 同款双射，无漂移）；中文名/别名不用于申报
+    （别名表随发版漂移→同字面跨版归到不同码→撞号假短路→画像静默缺席，与
+    v0.6.7 P0 同类）。未识别键**不论值好坏**一律进 unknown 软忽略（先分类后
+    校验——申报是省 token 优化，兜底=全文重发，宁重复不缺席；识别键的坏值
+    仍硬拒）。同码多版 max 胜出（与键序无关，跨语言宿主安全）。"""
+    unknown: list[str] = []
     out: dict[str, int] = {}
-    for code, ver in v.items():
-        if not isinstance(code, str) or not code.strip():
-            raise ValueError(f"have_audience_versions 的受众码需是非空字符串: {code!r}")
+    for key, ver in raw.items():
+        k = key.strip() if isinstance(key, str) else None
+        if k and not store._is_known_audience(conn, k) and k.startswith("aud-"):
+            k = k[4:]  # aud- 前缀剥壳归一（宿主从 get/自救指引抄 aud- 形态而来）
+        if not k or not store._is_known_audience(conn, k):
+            unknown.append(key if isinstance(key, str) else str(key))
+            continue
         if isinstance(ver, bool) or not isinstance(ver, (int, str)):
-            raise ValueError(f"have_audience_versions[{code}] 需是版本号整数: {ver!r}")
+            raise ValueError(f"have_audience_versions[{k}] 需是版本号整数: {ver!r}")
         try:
             n = int(ver)
         except ValueError:
-            n = None
-        if n is None or n < 1 or (str(n) != str(ver).strip() and not isinstance(ver, int)):
-            raise ValueError(f"invalid have_audience_versions[{code}]: {ver!r}")
-        out[code.strip()] = n
-    return out or None
+            raise ValueError(f"invalid have_audience_versions[{k}]: {ver!r}") from None
+        if n < 1 or (str(n) != str(ver).strip() and not isinstance(ver, int)):
+            raise ValueError(f"invalid have_audience_versions[{k}]: {ver!r}")
+        out[k] = max(n, out.get(k, 0))
+    return (out or None), unknown
+
+
+def _normalize_have_auds(raw: dict | None) -> tuple[dict | None, list[str]]:
+    """_normalize_have_audience_versions 的连库包装：ValueError 由调用方转
+    invalid_input；须在任何建档副作用之前调用（坏值打回不落半建任务）。"""
+    if not raw:
+        return None, []
+    conn = db.connect()
+    try:
+        return _normalize_have_audience_versions(conn, raw)
+    finally:
+        conn.close()
+
+
+_AUD_UNKNOWN_MAX = 10
+_AUD_UNKNOWN_KEY_CHARS = 64
+
+
+def _attach_aud_unknown_warning(out: dict, unknown: list[str]) -> None:
+    """未识别申报键警告（v0.6.8，jingleAI #1）：回显原样键+实时合法码清单，
+    teach-until-fixed——逐调用可见直至改对（自然出口），不受 S6 静态抑制
+    （事实数据非固定说教）。回显有体积帽（前 10 条/单键 64 字符，对齐
+    audit._FIELD_MAX 先例）。忽略键不影响本次任务（declared miss → 全文照注）。"""
+    if not unknown:
+        return
+    # lone surrogate 消毒（实施后 R2 P1-1）：http 入口 json.loads 接受 \udXXX
+    # 转义，原样回显会让 SDK 序列化层炸掉整个响应（任务已建档、警告永不可见，
+    # 重试无限循环）——encode(replace) 把非法码点置换为单个 '?' 保证 JSON-safe
+    # （surrogatepass+replace 会得到逐字节三连 U+FFFD，不如 '?' 可读；B8 回显
+    # 同款兜底见 server.py）
+    safe = [u.encode("utf-8", "replace").decode("utf-8")
+            for u in unknown[:_AUD_UNKNOWN_MAX]]
+    shown = [u if len(u) <= _AUD_UNKNOWN_KEY_CHARS
+             else u[:_AUD_UNKNOWN_KEY_CHARS] + "…" for u in safe]
+    conn = db.connect()
+    try:
+        codes = "、".join(f"{r['code']}（{r['zh']}）" if r.get("zh") else r["code"]
+                          for r in normalize.all_values("audience", conn))
+    finally:
+        conn.close()
+    out["have_audience_versions_unknown"] = {
+        "ignored": shown, "total": len(unknown),
+        "note": ("以上申报键不是合法受众码，已忽略（不影响本次任务）；"
+                 "申报键用受众裸码（aud-<合法裸码> 形态会被自动归一；"
+                 "中文名/别名不用于申报）——权威裸码见响应回显 "
+                 "audience_profile_code；合法受众码："
+                 + codes + "。结构见 help(topic=task_start)"),
+    }
 
 
 def _persona_injection(persona: dict | None, have: int | None) -> dict:
@@ -369,6 +433,11 @@ def _action_task_start(data: dict) -> dict:
     except ValueError as e:
         return {"ok": False, "error": "invalid_input",
                 "field": "have_audience_versions", "reason": str(e)}
+    try:
+        have_auds, aud_unknown = _normalize_have_auds(have_auds)
+    except ValueError as e:
+        return {"ok": False, "error": "invalid_input",
+                "field": "have_audience_versions", "reason": str(e)}
     flow.ensure_schema()
     conn = db.connect()
     try:
@@ -467,6 +536,7 @@ def _action_task_start(data: dict) -> dict:
         playbook_actions.inject_playbook(pb_conn, out, code, data)
     finally:
         pb_conn.close()
+    _attach_aud_unknown_warning(out, aud_unknown)
     return out
 
 
@@ -612,6 +682,11 @@ def _action_task_resume(data: dict) -> dict:
     except ValueError as e:
         return {"ok": False, "error": "invalid_input",
                 "field": "have_audience_versions", "reason": str(e)}
+    try:
+        have_auds, aud_unknown = _normalize_have_auds(have_auds)
+    except ValueError as e:
+        return {"ok": False, "error": "invalid_input",
+                "field": "have_audience_versions", "reason": str(e)}
     flow.ensure_schema()
     record = flow.get_task(int(tid))
     if not record:
@@ -710,6 +785,7 @@ def _action_task_resume(data: dict) -> dict:
         playbook_actions.inject_playbook(pb_conn, out, resume_code, pb_data)
     finally:
         pb_conn.close()
+    _attach_aud_unknown_warning(out, aud_unknown)
     return out
 
 
@@ -737,6 +813,11 @@ def _action_task_revise(data: dict) -> dict:
                 "field": "have_persona_version", "reason": str(e)}
     try:
         have_auds = _coerce_have_audience_versions(data)
+    except ValueError as e:
+        return {"ok": False, "error": "invalid_input",
+                "field": "have_audience_versions", "reason": str(e)}
+    try:
+        have_auds, aud_unknown = _normalize_have_auds(have_auds)
     except ValueError as e:
         return {"ok": False, "error": "invalid_input",
                 "field": "have_audience_versions", "reason": str(e)}
@@ -841,6 +922,7 @@ def _action_task_revise(data: dict) -> dict:
         playbook_actions.inject_playbook(pb_conn, out, code, pb_data)
     finally:
         pb_conn.close()
+    _attach_aud_unknown_warning(out, aud_unknown)
     return out
 
 
