@@ -372,12 +372,35 @@ def _audit_stats() -> dict:
 
 
 def _action_status(data: dict) -> dict:
+    # v0.6.4（owner 拍板）：版本/画像明细**永远只回当前行**（active；无 active
+    # 回最高版本）——全量历史没有真实消费方（夜间任务只看 uncompiled/stale
+    # 信号；宿主只要 active+体积；人工增长曲线走 console 直连；rollback 版本
+    # 发现有兜底：省略 version 回上一版、报错自带可用列表、get(version=) 按需）。
+    # 响应 17KB→KB 级；历史明细经 get(version=) 按需取。数组缩短对按键消费的
+    # 宿主是安全变化。
     conn = db.connect()
     try:
         rows = conn.execute(
             "SELECT work_type, version, model, status, evidence_count, created_at, prompt_md"
             " FROM twin_prompt_versions ORDER BY work_type, version",
         ).fetchall()
+        # v0.6.4：每工种只留当前行（active 优先，无 active 回最高版本）——
+        # Python 后滤，实现简单性优先（86 行上限无性能压力）
+        keep: dict[str, dict] = {}
+        order: list[str] = []
+        for r in rows:
+            wt = r["work_type"]
+            cur = keep.get(wt)
+            if cur is None:
+                keep[wt] = dict(r)
+                order.append(wt)
+                continue
+            better = ((r["status"] == "active" and cur["status"] != "active")
+                      or (r["status"] == cur["status"]
+                          and r["version"] > cur["version"]))
+            if better:
+                keep[wt] = dict(r)
+        rows = [keep[wt] for wt in order]
         versions: dict = {}
         audience_profiles: dict = {}
         for r in rows:
@@ -387,7 +410,7 @@ def _action_status(data: dict) -> dict:
                                   {"work_type": r["work_type"], "active": None, "versions": []})
             item = dict(r)
             size = len(item.pop("prompt_md") or "")
-            item["size_chars"] = size  # v0.3.9：每个版本行带体积——status 即得完整增长曲线
+            item["size_chars"] = size  # v0.6.4：当前行体积；完整增长曲线走 console 直连
             v["versions"].append(item)
             if r["status"] == "active":
                 v["active"] = r["version"]

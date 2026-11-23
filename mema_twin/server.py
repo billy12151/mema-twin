@@ -78,7 +78,10 @@ _HELP_ENTRIES: dict[str, str] = {
              "维度的票）。维度值撞清单会整笔打回并附 all_values 全量与说明——"
              "可以直接写不预查清单；但先查 taxonomy 再写更优：拥有完整分类视野、"
              "自主对齐已有口径，owner 不需要被打断来裁值。",
-    "status": "查看各 work_type 的 prompt 版本概况（含体积/超预算标记）、受众画像"
+    "status": "查看各 work_type 的 prompt 版本概况（v0.6.4 起版本/画像明细"
+              "只含**当前行**——active 优先；历史版本经 get(version=) 按需查，"
+              "rollback 版本发现免查：省略 version 即回上一版；体积/超预算标记）"
+              "、受众画像"
               "（audience_profiles）、需重抽象的受众（audience_stale）、条款作废待重编"
               "（persona_stale）、pending 数量（归一门待裁票据）、未编译统计、夜间被拒计数"
               "（nightly_rejected）、进行中任务计数、执行计划统计（plan_stats："

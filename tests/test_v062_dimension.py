@@ -363,3 +363,59 @@ def test_v063_reject_and_unknown_forms():
                         "code": "leadership"})
     assert r2["ok"] and r2.get("content_source") == "unknown"
     assert "content_source_note" not in r2  # unknown 无引导 note
+
+
+def test_v064_tool_gap_normalized():
+    """v0.6.4 tool_gap 归一：twin.* 前缀特判 + 归一双向子串——jingleAI 实测
+    14 条全量误报（mema-twin-twin vs twin.plan_set、write vs write_file）修复。"""
+    from mema_twin.playbook_actions import _tool_available
+    host = ["mema-twin-twin", "bash", "read", "write"]
+    # twin.* 前缀：宿主挂 twin 工具即可用
+    assert _tool_available("twin.plan_set", host)
+    assert _tool_available("twin", host)
+    # 归一双向子串：write_file vs write 命中
+    assert _tool_available("write_file", host)
+    assert _tool_available("read", host)
+    # 真缺口仍报
+    assert not _tool_available("sqlite3-cli", host)
+    assert not _tool_available("ripgrep-absolute-name", host)
+    # 已知过宽（文档化行为，勿当 bug 修）：短 token 子串误命中——方向是
+    # 少报缺口（gap 纯 advisory，注入面本就要求宿主按实际环境降级），
+    # 好于 v0.6.3 前的全量误报
+    assert _tool_available("read", ["threadreader"])  # read ⊂ threadreader
+    assert _tool_available("write", ["rewrite"])
+
+
+def _compile_submit():
+    """两轮 compile+submit 产出 v1/v2（供 status 当前行断言）。"""
+    for i in (1, 2):
+        _t("write", {"content": f"偏好{i}", "work_type": "周报",
+                     "audience": "高层", "purpose": "同步"})
+        r = _t("compile", {"work_type": "周报"})
+        s = _t("submit", {"work_type": "周报",
+                          "prompt_md": f"# v{i}\n\n## 分区\n\n正文",
+                          "source_memory_ids": r["source_ids_suggested"]})
+        assert s["ok"], s
+
+
+def test_v064_status_current_row_only():
+    """v0.6.4（owner 拍板）：status 版本明细**永远只回当前行**（active 优先，
+    无 active 回最高版本）——全量历史无真实消费方；latest_only 参数已撤
+    （传了按 B8 未知键拒）。"""
+    _compile_submit()
+    st = _t("status", {})
+    wt = next(p for p in st["prompts"] if p["work_type"] == "work_report")
+    assert len(wt["versions"]) == 1 and wt["versions"][0]["status"] == "active"
+    assert wt["active"] == 2 and wt["versions"][0]["version"] == 2
+    # 画像侧与 versions 共用同一过滤循环（代码路径覆盖，无需重复数据断言）
+    # 参数已撤：latest_only 按 B8 未知键拒（allowed 只剩 client——参数不存在了）
+    bad = _t("status", {"latest_only": True})
+    assert bad["ok"] is False and "unknown field" in bad["reason"]
+    assert "latest_only" not in bad["allowed"]
+    # rollback 后 status 回低版本 active 行（P1：当前行制下回滚语义钉死）
+    rb = _t("rollback", {"work_type": "周报", "version": 1})
+    assert rb["ok"] and rb["version"] == 1
+    st2 = _t("status", {})
+    wt3 = next(p for p in st2["prompts"] if p["work_type"] == "work_report")
+    assert len(wt3["versions"]) == 1
+    assert wt3["versions"][0]["version"] == 1 and wt3["active"] == 1

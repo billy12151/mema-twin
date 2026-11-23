@@ -514,6 +514,29 @@ def _action_playbook_rollback(data: dict) -> dict:
 
 # ---- 注入面（task_start / task_resume 调用；v3.3 ⑤ 连续性分级）----
 
+def _tool_available(panel_name: str, host_tools: list) -> bool:
+    """v0.6.4 tool_gap 归一：面板条目名与宿主工具名的形态差不再算缺口。
+    两条规则：① `twin.` 前缀（或裸 twin）条目 = 本 twin 服务自身 action，
+    宿主工具列表里存在含 twin 的名称即可用（MCP 单工具接入形态）；
+    ② 其余条目做归一化（小写、剥分隔符）双向子串匹配——`write_file` vs
+    `write`、`rg` vs `ripgrep` 均命中；真缺口（宿主完全没有相近工具）仍报。"""
+    def norm(s: str) -> str:
+        return re.sub(r"[\s_\-.]+", "", s.lower())
+
+    p = panel_name.strip()
+    pl = p.lower()
+    if pl == "twin" or pl.startswith("twin."):
+        return any("twin" in norm(str(h)) for h in host_tools)
+    pn = norm(p)
+    if not pn:
+        return True
+    for h in host_tools:
+        hn = norm(str(h))
+        if hn and (pn in hn or hn in pn):
+            return True
+    return False
+
+
 def inject_playbook(conn, out: dict, code: str | None, data: dict) -> None:
     """两级回退取 active playbook（本类型 → global），按 last_used_client 连续性
     分级注入；换 client 时响应要求 available_tools 自报（下一次 task_start 生效）。
@@ -551,7 +574,12 @@ def inject_playbook(conn, out: dict, code: str | None, data: dict) -> None:
         needed = set(re.findall(templates.TOOL_PANEL_LINE_RE,
                                 pb["content_md"]))
         if needed:
-            gap = sorted(needed - {str(t).strip() for t in available})
+            # v0.6.4 tool_gap 归一（jingleAI 实测 14 条全量误报）：面板条目是
+            # 字面名，与宿主工具名形态不同（twin.plan_set vs mema-twin-twin、
+            # write_file vs write）——字面集合差会把本工具自身 action 与真实
+            # 在场工具全算缺口，反向刺激宿主反复传 available_tools。
+            gap = sorted(n for n in needed
+                         if not _tool_available(n, available))
             if gap:
                 out["tool_gap"] = gap
     conn.execute("UPDATE twin_playbooks SET last_used_client=?, last_used_at=?"

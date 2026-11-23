@@ -108,18 +108,22 @@ def test_status_size_and_budget_flag():
     assert ppt["over_budget"] is True
 
 
-def test_status_per_version_size_curve():
-    """v0.3.9 可见面：每个版本行都带 size_chars（增长曲线完整）。"""
+def test_status_current_row_size_visible():
+    """v0.6.4（取代 v0.3.9 增长曲线拍板，owner 2026-11-22）：status 版本明细
+    只回当前行——active 行仍带 size_chars/over_budget；历史曲线观测走 console
+    （DB 直连），历史版本经 get(version=N) 按需查。"""
+    sizes = []
     for i in range(1, 4):
         server._twin_impl("submit", {"work_type": "周报",
                                       "prompt_md": f"# v{i}\n\n" + "规则。\n" * i * 100,
                                       "model": "m"})
-    s = server._twin_impl("status", {})
-    p = next(x for x in s["prompts"] if x["work_type"] == "work_report")
-    sizes = [v["size_chars"] for v in p["versions"]]
-    assert len(sizes) == 3
+        s = server._twin_impl("status", {})
+        p = next(x for x in s["prompts"] if x["work_type"] == "work_report")
+        assert len(p["versions"]) == 1  # 永远只回当前行
+        assert p["versions"][0]["version"] == i  # 当前行随提交推进
+        sizes.append(p["size_chars"])
     assert all(isinstance(x, int) and x > 0 for x in sizes)
-    assert sizes == sorted(sizes)  # 同素材递增提交，曲线单调
+    assert sizes == sorted(sizes)  # 逐点可见，体积单调；全曲线走 console
 
 
 def test_domain_migration_from_old_seven(tmp_path, monkeypatch):
