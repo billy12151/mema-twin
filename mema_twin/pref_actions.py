@@ -21,6 +21,21 @@ _CONTENT_MAX_CHARS = 8000  # 偏好正文
 # note 不受影响（幂等提示必须保留）。进程内记忆，重启重现，容量帽防灌爆。
 _WRITE_HINT_SEEN: dict[tuple[str, str], int] = {}
 _WRITE_HINT_CAP = 4096
+# v0.6.5：task_start 建档路由指引同 client 第二次起省略（S6 同型——指引非
+# 契约；同宿主重复建档时每次 330B 是纯重复税）
+_TS_GUIDANCE_SEEN: set[str] = set()
+_TS_GUIDANCE_CAP = 4096
+
+
+def _suppress_task_start_guidance(client: str) -> bool:
+    """True=本次省略 guidance（同 client 已提示过）。"""
+    key = f"{tenant.current_tenant() or ''}:{client or ''}"
+    if key in _TS_GUIDANCE_SEEN:
+        return True
+    if len(_TS_GUIDANCE_SEEN) >= _TS_GUIDANCE_CAP:
+        _TS_GUIDANCE_SEEN.clear()
+    _TS_GUIDANCE_SEEN.add(key)
+    return False
 
 # S7（v0.6.1）：相似提示阈值——difflib 字面相似度（纯词法，非语义判定）。
 # 0.82 实测校准（方案附记）：同义改写样例 0.93、同条增补样例 0.84（须命中）、

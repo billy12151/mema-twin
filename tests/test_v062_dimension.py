@@ -470,3 +470,13 @@ def test_v065_have_audience_strict_coerce():
     r2 = _t("task_start", {"brief": "b", "work_type": "周报", "audience": "高层",
                            "have_audience_version": 0})
     assert r2["ok"] is False
+
+
+def test_v065_task_start_guidance_suppressed_second_call():
+    """v0.6.5：task_start 建档路由指引同 client 第二次起省略（S6 同型）。"""
+    t1 = _t("task_start", {"brief": "任务一", "work_type": "周报", "audience": "高层"})
+    assert t1["guidance"] and "plan_set" in t1["guidance"]  # 首次在场
+    t2 = _t("task_start", {"brief": "任务二", "work_type": "周报", "audience": "高层"})
+    assert "guidance" not in t2  # 第二次省略（路由指引宿主已知晓）
+    # 其余注入面不受影响
+    assert t2["task_id"] > t1["task_id"]

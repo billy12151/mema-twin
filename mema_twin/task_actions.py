@@ -302,7 +302,10 @@ def _audience_payload(audience: str | None, exclude_work_type: str | None,
                    "audience_profile_note": (
                        f"以上为对当前受众的通用口径{tag}：口径/详略/禁忌类可参考，"
                        "格式与结构以本类型为准；冲突时优先级：本类型增补 > 类型 persona > "
-                       "受众画像（若会话中后续注入更高版本画像，以更新者为准）")}
+                       "受众画像（若会话中后续注入更高版本画像，以更新者为准）；"
+                       "若上文不可见（已被上下文压缩），twin(action=\"get\", data="
+                       f"{{\"work_type\": \"aud-{audience}\"}}) 取全文")}
+
             if declarable and have_audience_version != v:
                 out["audience_profile_note"] = (
                     f"画像已从 v{have_audience_version} 变更为 v{v}，以本次注入为准；"
@@ -403,17 +406,23 @@ def _action_task_start(data: dict) -> dict:
         "ok": True, "task_id": record["id"], "status": "planning",
         "superseded_open_tasks": superseded,
         "dimensions": dims,
-        "guidance": (
-            "任务已建档。凡建档任务默认属于重复执行型工作：开工前先 "
-            "twin(action=\"plan_set\") 列出步骤计划，再逐步执行（step_update 打卡，"
-            "跳过打卡直接完成的属追认，服务端会标 backfilled，不影响收口）。"
-            "仅无重复执行价值的一次性事务（问候、查即时信息、无产出物的一问一答）"
-            "不需要建档，既已建档即默认走计划。拿不准要不要建计划时，建。"
-            "计划中有没把握、或你确认不了的点，写进 plan_set 的 open_questions"
-            "（要紧的标 blocking=true）先与用户澄清——答复经 plan_revise(answers=…)"
-            " 写回。完成后 twin(action=\"task_submit\") 交付收口"
-            "（未闭环步骤会被拦）。"),
+        "guidance": None,  # v0.6.5：同 client 第二次起省略（S6 同型，见下）
     }
+    if out["guidance"] is None:
+        from . import compile_actions as _ca
+        if _ca.suppress_static_note(identity.effective_client(data), "x") is None:
+            out.pop("guidance", None)
+        else:
+            out["guidance"] = (
+                "任务已建档。凡建档任务默认属于重复执行型工作：开工前先 "
+                "twin(action=\"plan_set\") 列出步骤计划，再逐步执行（step_update 打卡，"
+                "跳过打卡直接完成的属追认，服务端会标 backfilled，不影响收口）。"
+                "仅无重复执行价值的一次性事务（问候、查即时信息、无产出物的一问一答）"
+                "不需要建档，既已建档即默认走计划。拿不准要不要建计划时，建。"
+                "计划中有没把握、或你确认不了的点，写进 plan_set 的 open_questions"
+                "（要紧的标 blocking=true）先与用户澄清——答复经 plan_revise(answers=…)"
+                " 写回。完成后 twin(action=\"task_submit\") 交付收口"
+                "（未闭环步骤会被拦）。")
     # 受众画像注入：与 persona/增补独立，任何分支都随响应进场（audience 未归一则空）
     aud_dim = dims.get("audience") or {}
     aud_code = aud_dim.get("code") if aud_dim.get("ok") else None

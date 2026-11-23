@@ -27,6 +27,8 @@ def _isolated_twin_db(tmp_path, monkeypatch):
     _pa._WRITE_HINT_SEEN.clear()
     from mema_twin import compile_actions as _ca
     _ca._COMPILE_NOTE_SHOWN.clear()
+    from mema_twin import pref_actions as _pa2
+    _pa2._TS_GUIDANCE_SEEN.clear()
     flow._schema_ready.clear()
     audit._audit_ready.clear()
     audit._advisory_cooldown.clear()
