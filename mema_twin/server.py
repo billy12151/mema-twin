@@ -247,7 +247,9 @@ _HELP_ENTRIES: dict[str, str] = {
                      "10，实际 clamp 1..10，水位之后的未评估收口任务）；响应 "
                      "watermark_moved_to。夜间任务必传 origin=scheduled（夜间"
                      "来源标记；调用成功会清除夜编领走的积压提醒章）。"
-                     "按素材包编译出 content_md 后 playbook_submit；无新经验不提交。",
+                     "按素材包编译出 content_md 后 playbook_submit；无新经验不提交。"
+                     "分流判据：playbook 只收执行路径/工具用法/踩坑规避，产出物的"
+                     "结构/口径/措辞类偏好属 twin.write（persona 侧），不要立条。",
     "playbook_submit": "提交 playbook 落版。必填 key（work_type code 或 "
                        "'global'；禁 pb-/aud- 保留前缀）/content_md/"
                        "source_task_ids（溯源任务 id，防幻觉路径）；可选 model（编译"
