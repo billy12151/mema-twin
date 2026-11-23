@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [0.6.4] — 2026-11-23
+
+真实宿主（jingleAI task 1143 全链路实测）反馈优化，两处小修 + 一项内容治理（零代码）。583 测试绿。
+
+### Changed
+
+- **tool_gap 归一**：playbook 工具面板条目与宿主 available_tools 的比对从字面集合差改为归一匹配——`twin.` 前缀条目（本服务自身 action）宿主挂 twin 工具即可用；其余条目小写剥分隔符双向子串（`write_file` vs `write` 命中）。修 jingleAI 实测 14 条全量误报（真实在场工具被报缺口、反向刺激宿主反复传参）。已知过宽（短 token 子串误命中→少报缺口）为文档化行为：gap 是纯 advisory 信号，少报好于误报。
+- **status 当前行制**（owner 拍板，取代 v0.3.9「增长曲线」拍板）：版本/画像明细**只回当前行**（active 优先，无 active 回最高版本）——全量历史无真实消费方（夜间任务只看 uncompiled/stale 信号；宿主只要 active+体积；rollback 版本发现有兜底：省略 version 回上一版/报错自带可用列表/get(version=N) 按需）。响应 ~17KB→KB 级；完整增长曲线观测走 console（DB 直连）。
+
+### Content governance（零代码）
+
+- global playbook v4 落版：剔除工种特异条目（sales-poster 重复条目删除、sessions_spawn/cloc 一次性经验删除）；电商资质两条挪入 marketing_copy v2（溯源 1123）。话术润色条目暂留 global（溯源任务 96 已不存在，待有 comm_copy 执行记录再挪）。draw.io 保留（owner 拍板）。
+
 ## [0.6.3] — 2026-11-22
 
 D4 快照二义性结构化修复（v0.6.2 R2 对抗实锤：task_start 撞票的快照是建档 brief 非偏好正文，照抄 write 会产出垃圾证据；单列小改，580 测试绿）。
