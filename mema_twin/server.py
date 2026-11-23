@@ -174,7 +174,7 @@ _HELP_ENTRIES: dict[str, str] = {
                    "（含未编译增补 persona_supplement 与无专属 persona 时的"
                    " 同域 fallback，同 task_start）。"
                    "可选 available_tools 覆盖建档自报值（playbook 工具面板比对用）。"
-                   "have_persona_version 申报口径同 task_start；"
+                   "have_persona_version / have_audience_version 申报口径同 task_start；"
                    "已交付（submitted）的返工走 task_revise。",
     "task_revise": "已交付任务修订返工（仅 submitted）。task_id + brief/deliverable_md/"
                    "revision_reason 至少其一；子任务回 planning 重走执行并记 lineage"
@@ -315,16 +315,17 @@ _ACTION_KEYS: dict[str, frozenset[str]] = {
     "evidence": frozenset({"status", "work_type", "limit", "client"}),
     "task_start": frozenset({"brief", "work_type", "audience", "purpose",
                              "available_tools", "have_persona_version",
-                             "interpreted_intent", "session", "client"}),
+                             "have_audience_version", "interpreted_intent",
+                             "session", "client"}),
     "task_submit": frozenset({"task_id", "deliverable_md", "todos", "session",
                               "note", "steps", "brief", "client"}),
     "task_resume": frozenset({"task_id", "todos", "session",
-                              "have_persona_version", "available_tools",
-                              "client"}),
+                              "have_persona_version", "have_audience_version",
+                              "available_tools", "client"}),
     "task_revise": frozenset({"task_id", "brief", "deliverable_md",
                               "revision_reason", "session",
-                              "have_persona_version", "available_tools",
-                              "client"}),
+                              "have_persona_version", "have_audience_version",
+                              "available_tools", "client"}),
     "task_close": frozenset({"task_id", "outcome", "reason", "client"}),
     "task_recent": frozenset({"limit", "client"}),
     "task_get": frozenset({"task_id", "client"}),

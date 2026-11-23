@@ -86,6 +86,23 @@ def _coerce_have_version(data: dict) -> int | None:
     return n
 
 
+def _coerce_have_audience_version(data: dict) -> int | None:
+    """have_audience_version 矫正（v0.6.5，#895 同款）：int / 数字串，≥1；
+    脏值打回。缺省 None=未申报（全文注入）。"""
+    v = data.get("have_audience_version")
+    if v is None:
+        return None
+    if isinstance(v, bool) or not isinstance(v, (int, str)):
+        raise ValueError("have_audience_version 需是版本号整数")
+    try:
+        n = int(v)
+    except ValueError:
+        n = None
+    if n is None or n < 1 or (str(n) != str(v).strip() and not isinstance(v, int)):
+        raise ValueError(f"invalid have_audience_version: {v!r}")
+    return n
+
+
 def _persona_injection(persona: dict | None, have: int | None) -> dict:
     """task_start/task_resume 共用的注入分支（#895，agent 申报式短路）。
 
@@ -257,10 +274,16 @@ def _fallback_payload(code: str | None) -> dict:
         conn.close()
 
 
-def _audience_payload(audience: str | None, exclude_work_type: str | None) -> dict:
+def _audience_payload(audience: str | None, exclude_work_type: str | None,
+                      have_audience_version: int | None = None) -> dict:
     """受众画像注入（v0.3.6）：画像全文优先，未编出时雏形垫底；受众未归一或
     无素材返回 {}（软失败）。优先级链在 note 里显式声明：本类型增补 > 类型
-    persona > 受众画像/雏形（类型 persona 编译素材含受众参考，分辨率更高）。"""
+    persona > 受众画像/雏形（类型 persona 编译素材含受众参考，分辨率更高）。
+
+    v0.6.5（jingleAI 实测反馈）：have_audience_version 申报短路（#895
+    have_persona_version 同款范式）——同会话已注入同版本画像时不再重复注入
+    全文；不等（中途重编/回滚）→ 全文重注入附变更说明；雏形/镜像降级（无
+    版本身份）不可申报，全文照旧；未申报 → 全文照旧（宁重复不缺席）。"""
     if not audience:
         return {}
     conn = db.connect()
@@ -268,12 +291,22 @@ def _audience_payload(audience: str | None, exclude_work_type: str | None) -> di
         profile = store.get_active(conn, store.audience_profile_code(audience))
         if profile is not None and (profile.get("prompt_md") or "").strip():
             v = profile.get("version")
+            declarable = (not profile.get("from_mirror") and v is not None
+                          and have_audience_version is not None)
+            if declarable and have_audience_version == v:
+                return {"audience_profile_version": v,
+                        "audience_profile_unchanged": True}
             tag = f"画像 v{v}" if v is not None else "画像（镜像降级读取）"
             out = {"audience_profile_md": profile["prompt_md"],
+                   "audience_profile_version": v,
                    "audience_profile_note": (
                        f"以上为对当前受众的通用口径{tag}：口径/详略/禁忌类可参考，"
                        "格式与结构以本类型为准；冲突时优先级：本类型增补 > 类型 persona > "
                        "受众画像（若会话中后续注入更高版本画像，以更新者为准）")}
+            if declarable and have_audience_version != v:
+                out["audience_profile_note"] = (
+                    f"画像已从 v{have_audience_version} 变更为 v{v}，以本次注入为准；"
+                    + out["audience_profile_note"])
             return out
         rows = db.audience_evidence(conn, audience,
                                     exclude_work_type=exclude_work_type)
@@ -310,6 +343,11 @@ def _action_task_start(data: dict) -> dict:
     except ValueError as e:
         return {"ok": False, "error": "invalid_input",
                 "field": "have_persona_version", "reason": str(e)}
+    try:
+        have_aud = _coerce_have_audience_version(data)
+    except ValueError as e:
+        return {"ok": False, "error": "invalid_input",
+                "field": "have_audience_version", "reason": str(e)}
     flow.ensure_schema()
     conn = db.connect()
     try:
@@ -380,7 +418,7 @@ def _action_task_start(data: dict) -> dict:
     aud_dim = dims.get("audience") or {}
     aud_code = aud_dim.get("code") if aud_dim.get("ok") else None
     if aud_code:
-        out.update(_audience_payload(aud_code, code))
+        out.update(_audience_payload(aud_code, code, have_audience_version=have_aud))
     if persona:
         out.update(_persona_injection(persona, have))
         out.update(supplement)
@@ -542,6 +580,11 @@ def _action_task_resume(data: dict) -> dict:
     except ValueError as e:
         return {"ok": False, "error": "invalid_input",
                 "field": "have_persona_version", "reason": str(e)}
+    try:
+        have_aud = _coerce_have_audience_version(data)
+    except ValueError as e:
+        return {"ok": False, "error": "invalid_input",
+                "field": "have_audience_version", "reason": str(e)}
     flow.ensure_schema()
     record = flow.get_task(int(tid))
     if not record:
@@ -613,7 +656,8 @@ def _action_task_resume(data: dict) -> dict:
         out.setdefault("warnings", []).append("原任务没有 todos——可能已全部完成")
     aud_code = record.get("audience")
     if aud_code:
-        out.update(_audience_payload(aud_code, resume_code))
+        out.update(_audience_payload(aud_code, resume_code,
+                                     have_audience_version=have_aud))
     if persona:
         out.update(_persona_injection(persona, have))
         out.update(supplement)
@@ -664,6 +708,11 @@ def _action_task_revise(data: dict) -> dict:
     except ValueError as e:
         return {"ok": False, "error": "invalid_input",
                 "field": "have_persona_version", "reason": str(e)}
+    try:
+        have_aud = _coerce_have_audience_version(data)
+    except ValueError as e:
+        return {"ok": False, "error": "invalid_input",
+                "field": "have_audience_version", "reason": str(e)}
     flow.ensure_schema()
     record = flow.get_task(int(tid))
     if not record:
@@ -737,7 +786,8 @@ def _action_task_revise(data: dict) -> dict:
     supplement = _supplement_payload(code, persona) if code else {}
     aud_code = record.get("audience")
     if aud_code:
-        out.update(_audience_payload(aud_code, code))
+        out.update(_audience_payload(aud_code, code,
+                                     have_audience_version=have_aud))
     if persona:
         out.update(_persona_injection(persona, have))
         out.update(supplement)

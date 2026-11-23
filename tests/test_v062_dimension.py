@@ -419,3 +419,54 @@ def test_v064_status_current_row_only():
     wt3 = next(p for p in st2["prompts"] if p["work_type"] == "work_report")
     assert len(wt3["versions"]) == 1
     assert wt3["versions"][0]["version"] == 1 and wt3["active"] == 1
+
+
+def test_v065_audience_version_declaration():
+    """v0.6.5（jingleAI 反馈）：have_audience_version 申报短路——同会话已注入
+    同版本画像不再重复注入全文；不等回全文附变更说明；雏形/未申报照旧。"""
+    def _compile_submit_aud():
+        ra = _t("compile", {"work_type": "aud-leadership"})
+        s = _t("submit", {"work_type": "aud-leadership",
+                          "prompt_md": "# 高层画像\n\n" + "口径条目。\n" * 200,
+                          "source_memory_ids": ra["source_ids_suggested"]})
+        assert s["ok"], s
+
+    _t("write", {"content": "给高层的汇报先结论后论据", "work_type": "周报",
+                 "audience": "高层", "purpose": "同步"})
+    _compile_submit_aud()
+    t1 = _t("task_start", {"brief": "任务一", "work_type": "周报", "audience": "高层"})
+    assert t1["audience_profile_md"]  # 首次全文注入
+    v = t1["audience_profile_version"]
+    # 同会话第二任务：申报同版本 → 短路（无 md）
+    t2 = _t("task_start", {"brief": "任务二", "work_type": "周报", "audience": "高层",
+                           "have_persona_version": 1,
+                           "have_audience_version": v})
+    assert t2.get("audience_profile_unchanged") is True
+    assert t2.get("audience_profile_version") == v
+    assert "audience_profile_md" not in t2
+    # 申报旧版本（画像重编后）→ 全文重注入附变更说明
+    _t("write", {"content": "高层偏好了结论表格式汇报", "work_type": "周报",
+                 "audience": "高层", "purpose": "同步"})
+    ra = _t("compile", {"work_type": "aud-leadership"})
+    s2 = _t("submit", {"work_type": "aud-leadership",
+                       "prompt_md": "# 高层画像 v2\n\n" + "新口径条目。\n" * 200,
+                       "source_memory_ids": ra["source_ids_suggested"]})
+    assert s2["ok"] and s2["version"] == 2
+    t3 = _t("task_start", {"brief": "任务三", "work_type": "周报", "audience": "高层",
+                           "have_persona_version": 1, "have_audience_version": v})
+    assert t3["audience_profile_md"]  # 版本变了 → 全文重注入
+    assert "变更为 v2" in t3.get("audience_profile_note", "")
+    # 未申报 → 全文照旧（宁重复不缺席）
+    t4 = _t("task_start", {"brief": "任务四", "work_type": "周报", "audience": "高层"})
+    assert t4["audience_profile_md"]
+
+
+def test_v065_have_audience_strict_coerce():
+    _t("write", {"content": "c", "work_type": "周报", "audience": "灵能监理司",
+                 "purpose": "同步"})
+    r = _t("task_start", {"brief": "b", "work_type": "周报", "audience": "高层",
+                          "have_audience_version": "true"})
+    assert r["ok"] is False and r.get("field") == "have_audience_version"
+    r2 = _t("task_start", {"brief": "b", "work_type": "周报", "audience": "高层",
+                           "have_audience_version": 0})
+    assert r2["ok"] is False

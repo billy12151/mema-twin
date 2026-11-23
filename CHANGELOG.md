@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [0.6.5] — 2026-11-23
+
+jingleAI 真实任务反馈第二弹：受众画像注入接入版本申报开关（persona 的 have_persona_version 同款范式，#895）。583+2 测试绿。
+
+### Added
+
+- **have_audience_version 申报短路**：task_start / task_resume / task_revise 加可选 `have_audience_version`——同会话已注入同版本受众画像时响应只回 `audience_profile_unchanged: true` + `audience_profile_version`（不重复注入全文）；版本变更 → 全文重注入附变更说明。单次 task_start 注入量实测省画像全文（2.4-4k 字符）。
+- 画像全文注入时响应带 `audience_profile_version`（此前无版本身份暴露，Agent 申报无从取值）。
+
+### Notes
+
+- 雏形注入（画像未编出时的证据垫底）与镜像降级读取无版本身份，不可申报、全文照旧；未申报 → 全文照旧（宁重复不缺席，#895 同款取舍）。
+- 回滚 0.6.5→0.6.4 安全（0.6.4 不读 have_audience_version，B8 会按 unknown field 打回——宿主降级时移除该参数即可）。
+
 ## [0.6.4] — 2026-11-23
 
 真实宿主（jingleAI task 1143 全链路实测）反馈优化，两处小修 + 一项内容治理（零代码）。583 测试绿。
