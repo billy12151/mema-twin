@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-11-26
+
+规则/playbook 分流治理（开发方案双轮评审后实施，mema #1731；twin 任务 #1162 交付）。背景：执行经验混进 persona、同一段偏好 33 工种扇出后被推翻无法回收（JoySpace 列宽案例）——根因是白天写入口与夜间编译侧的分流判据不同文。判据主轴换为**可移植性**：换宿主、换工具还成立吗？
+
+**运维须知（W1 不是零行为变更）**：persona 编译规则新增「只为产物层规则立条」后，每次重编会把工具条款剔除并在「版本间变更」标注「转 playbook / 技能文档候选」（晨报汇总不安置，需人工安置；playbook 溯源门要求任务 id，无溯源的进技能文档）。受众画像编译规则同款守门句关死 aud-engineering v10「列宽不可写」类事故路径。
+
+### Added
+
+- **W3 跨工种同文扇出提示**：write 响应新增 `cross_type_echo`（count/work_types/memory_ids 前 8）+ `echo_guidance`（软提示不拦截）——同一段文字已写在同受众 ≥2 个其他工种时当场可见（scope=audience 写入阈值 1，引导工种级/受众级二选一）；同受众长度窗内活跃行超 5000 回 `cross_type_echo_skipped=over_scan_cap`（不做部分检测）。与 add_local_evidence 同一 NFKC 词法去重键。
+- **W2.1 reflection 丢弃显式告知**：步骤已 done 再补 `step_update(done, reflection)` → no_op 响应 guidance 明示「本次 reflection 未写入」并指路 `tool_log(task_id, note)`；task_submit 带 steps 批量补打卡时，成功收口路径新增 `steps_reflection_not_written` 计数（被拒路径走 hint）——只对真带 reflection 的 no_op 计数。
+
+### Changed
+
+- **W1 判据单点真源+各处同文（纯文案）**：WRITE_GUIDANCE 重写为四步判据（可移植性 → 打回 → 拆出去处 → 一次性事实）；`_TYPE_RULES`/`_AUDIENCE_RULES` 补「只为产物层/口径类规则立条」（被剔除条款证据 id 仍照抄进 source_memory_ids，防永久增补注入）；`_PLAYBOOK_RULES` 分流判据补来源与可移植性；help 四处（task_submit/step_update/tool_log/task_evaluate）与 task_submit 响应 guidance 同步执行经验通道；skill/SKILL.md 分流节改五条路由（含「稿子会被打回的是规则，稿子没差、只是路走弯了的是 playbook」助记）；skill-governance/SKILL.md 与 scan.py SCHEDULED_TASKS_SPEC 真源同步（保守封套豁免句+晨报两项汇总）；README 四行 doc 镜像同步。
+- submit help 的 source_memory_ids 指针由 evidence_ids 修正为 source_ids_suggested（后者含缺正文 skipped 行——漏列会以增补形式永久注入，W1.2 下变成承重墙）。
+- `_cross_type_echo` 的 aud- 前缀排除加 LIKE ESCAPE 转义（裸 `_` 是单字符通配符，防未来 `aud*` 自建码被误排）。
+
+### Fixed（两轮 review，轮 2 对抗）
+
+- task_submit 成功收口路径丢批量 steps 的 no_op 提示（提示原挂在被拒路径，而全闭环任务的补打卡必然全 no_op——恰在最常触发处缺席）；noop 计数分列「带 reflection」子集，裸幂等打卡不再误报。
+- 方案 §六 T15 用例原文自相矛盾（aud- 行不计入时不可能产出 count==1 的回显），按规格语义勘误钉住并记入方案修订记录。
+
 ## [0.6.9] — 2026-11-23
 
 owner 提出：未知申报键警告的码表教学 note（~310 字符）在循环场景每次重复不划算。
