@@ -1,11 +1,11 @@
 ---
 name: mema-twin
-description: 个人分身：工作类偏好沉淀与 persona prompt 编译，经交付任务流注入执行；v0.4 起带执行计划层（两档路由、步骤打卡与防跳步门、open_questions 咨询 owner、执行经验 playbook 闭环）与升级提示。用户修改/审阅工作产物后，把其中可复用的偏好合并沉淀到 twin.write（禁止再同步本地记忆文档）；开工前 task_start 取分身 prompt 并建档；版本更新在用户要求或夜间编译定时任务自动执行时走 compile/submit（编译口径见 mema-twin-governance skill）。
+description: 个人分身：工作类偏好沉淀与 persona prompt 编译，经交付任务流注入执行；v0.4 起带执行计划层（两档路由、步骤打卡与防跳步门、open_questions 咨询 owner、执行经验 playbook 闭环）与升级提示。用户修改/审阅工作产物后，把其中的规则类偏好合并沉淀到 twin.write（执行经验走步骤记录→夜间 playbook，工具用法走该工具的技能文档；禁止再同步本地记忆文档）；开工前 task_start 取分身 prompt 并建档；版本更新在用户要求或夜间编译定时任务自动执行时走 compile/submit（编译口径见 mema-twin-governance skill）。
 ---
 
 # mema-twin 使用引导
 
-> 对齐服务端 **v0.6.3**。动作全集、入参与基础语义以 `twin(action="help")` 为准——**调用动作前先查一次 help**；v0.6 起可单查省上下文：`twin(action="help", data={"topic":"<动作名>"})`（全量模式不变，会话内查一次即可）。本文件不复述入参。下文只写三样：何时用哪个动作的路由、执行门、help 未覆盖或与实测不符的口径。
+> 对齐服务端 **v0.7.0**。动作全集、入参与基础语义以 `twin(action="help")` 为准——**调用动作前先查一次 help**；v0.6 起可单查省上下文：`twin(action="help", data={"topic":"<动作名>"})`（全量模式不变，会话内查一次即可）。本文件不复述入参。下文只写三样：何时用哪个动作的路由、执行门、help 未覆盖或与实测不符的口径。
 > **夜间治理/编译会话不需要本 skill**：twin_nightly_compile 两支线与 compile/submit 编译口径在 `mema-twin-governance` skill（唯一真源），本文件只留指向它的路由。
 >
 > **v0.6 增量**：① `data` 顶层未知键会被硬拒（附 `allowed`/`did_you_mean`——拼写错键看报错即自纠）；② 新动作 `evidence`：void 前定位 memory_id 用（只读，不回正文）；③ resolve 支持 `tickets` 批量裁定（多维未命中一次裁完）；④ plan_set 可传 `start_first=true` 省一次首步打卡；⑤ compile 响应带 `source_ids_suggested`，submit 直接复制。
@@ -32,8 +32,10 @@ description: 个人分身：工作类偏好沉淀与 persona prompt 编译，经
 ## 分流规则（先判这个，再选工具）
 
 - **事件/事实/进展**（做了什么、何时交付、结论是什么）→ `memory.remember`
-- **可复用的抽象**（偏好与规则：用语/详略/格式/口吻，结构习惯，开工前应确认的问题与材料）→ `twin(action="write")`，只收这三类；必带三字段 work_type / audience / purpose（选码见下节）。事件性内容不要走 twin.write
-- 拿不准时问自己："下次干同类活，这条还适用吗？"——适用就是偏好，只发生一次就是事件。混进事件记忆不会污染分身（无维度标签进不了 compile），但偏好漏存会让分身学不到
+- 先问可移植性：换宿主、换工具还成立吗？出现参数名、接口路径、调用步骤、报错处理、工具选路 → 不是规则，拆出去
+- **规则**（剩下的、不照做用户会打回的话）→ `twin(action="write")`，必带三字段 work_type / audience / purpose（选码见下节）。例外：工具名只是在说产物格式；你明确说过「以后动笔前都要这样做」的步骤
+- **执行经验**（为某目的用哪个工具、失败怎么降级、哪一步做法值得沿用）→ 步骤 reflection（迁 done 时带，一个任务通常 0–2 条）或 tool_log(task_id, note)，夜间评估提炼进 playbook；不要 write。工具自身的参数用法 → 该工具的技能文档。助记：稿子会被打回的是规则，稿子没差、只是路走弯了的是 playbook
+- **不限工种的口径类要求** → `scope="audience"` 写一条；格式与结构类不进受众画像，确实多工种需要时逐工种写
 - **禁止双写**：工作偏好 `twin.write` 自持（v0.5.0 起存 twin 自有库，不进 mema）；事件性事实仍走 mema `memory.remember`；同一条偏好不得同时写两处（拆分后 mema-twin 桶已冻结），也不要再同步到宿主的本地记忆文档/笔记。用时从 twin 取（task_start 自动注入，其他场景 `twin(action="get")`）
 - write 响应 `duplicate=true`（同 work_type 内容完全相同，词法去重）＝**幂等成功**——偏好已存在，勿重试、勿改写重发
 

@@ -109,7 +109,9 @@ SCHEDULED_TASKS_SPEC: dict = {
                                  "产出新版：素材为该类型全部在世证据（全量投影），与旧版本冲突以"
                                  "新证据为准，含义稳定表达自由，文末按变更分级列出版本间变更；"
                                  "保守封套：无证据动机时不做整体重组（吸收新证据、剔除作废条款、"
-                                 "预算合并照做），大重组留给用户在场的交互式编译")},
+                                 "预算合并照做），大重组留给用户在场的交互式编译；按编译规则"
+                                 "剔除工具用法条款属于允许的剔除动作，不受「无证据动机不重组」"
+                                 "限制")},
                 {"tool": "twin", "action": "submit",
                  "data": {"work_type": "<同 compile 的 code>", "prompt_md": "<编译产物>",
                           "source_memory_ids": "<compile 响应 source_ids_suggested 原样复制>",
@@ -122,7 +124,9 @@ SCHEDULED_TASKS_SPEC: dict = {
                                  "no_new_evidence（空转阻尼）——如实记录原因并跳过，不要为"
                                  "过门改产物（被拒时 active 未变、证据未消耗，次晚自动重试，"
                                  "连续被拒会在 status 的 nightly_rejected 累计）；"
-                                 "结束输出各类型前后版本号与吸收证据数汇总，"
+                                 "结束输出各类型前后版本号与吸收证据数、每个重编 persona 的"
+                                 "顶层条数前后变化、「版本间变更」里的「转 playbook / 技能"
+                                 "文档候选」清单（只汇总不安置）汇总，"
                                  "并附 status 里的 pending_count 与未收口任务数各一句；"
                                  "工具出错跳过并如实记录，同一项最多重试一次")},
                 {"tool": "twin", "action": "compile",

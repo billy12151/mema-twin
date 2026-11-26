@@ -776,7 +776,7 @@ def _action_step_update(data: dict) -> dict:
             outcome, err = apply_step_entries(conn, parsed, expect_task_id=task_id)
             if err is not None:
                 return err
-            results, applied, noop = outcome
+            results, applied, noop, _ = outcome
             conn.commit()
         finally:
             conn.close()
@@ -1156,7 +1156,9 @@ def _action_tool_log(data: dict) -> dict:
     finally:
         conn.close()
     return {"ok": True, "recorded": len(parsed),
-            "guidance": "已记录。只记失败/重试/降级与首次成功的非常规路径——常规重复成功不必记。"}
+            "guidance": ("已记录。只记失败/重试/降级与首次成功的非常规路径——常规重复"
+                         "成功不必记。带 task_id 的记录会进夜间评估（playbook 素材）；"
+                         "不带 task_id 的只留痕。")}
 
 
 # ---- 收口门 / task_close 批量跳过 / 深拷贝（task_actions 调用）----
