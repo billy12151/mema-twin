@@ -255,9 +255,17 @@ def _apply_step_transition(conn, step: dict, to: str, reason: str | None,
         # (step_id, status) 进程内记忆，服务重启清零（粗筛够用，精确账在
         # twin_audit 表里按 action=step_update 查）。
         n = _bump_noop(int(step["id"]), to)
-        return {"step_id": int(step["id"]), "task_id": task_id, "status": to,
-                "no_op": True, "consecutive_noop": n,
-                "guidance": _noop_guidance(int(step["id"]), to, n)}
+        out = {"step_id": int(step["id"]), "task_id": task_id, "status": to,
+               "no_op": True, "consecutive_noop": n,
+               "guidance": _noop_guidance(int(step["id"]), to, n)}
+        if reflection:
+            # W2.1（v0.7.0）：COALESCE 只在真实迁移时写 reflection，幂等分支不改库
+            # ——调用方带了的 reflection 会被静默丢弃，Agent 却以为记上了。显式
+            # 告知未写入并指路 tool_log（task_submit help 同口径）。
+            out["guidance"] += (f"本次 reflection 未写入：步骤已是 {to}"
+                                "——后补的反思改走 tool_log(outcome=success, "
+                                f"task_id={task_id}, note=…)。")
+        return out
     if to == "in_progress":
         gate = (_gate_blocking_questions(conn, task_id, int(step["id"]))
                 or _gate_dependencies(conn, step)
@@ -682,11 +690,15 @@ def apply_step_entries(conn, entries, expect_task_id: int) -> tuple:
     """单事务逐条迁移（三门/no_op/幂等与逐次调用同语义，批内状态演进可见）。
     任一条被拒 → conn.rollback() + 恢复 no_op 快照，返回 (None, error)——
     整笔原子（失败原子性强于逐条：逐条第 k 条被拒不回滚前 k-1 条）。
-    成功不 commit（事务边界归调用方），返回 ((results, applied, noop), None)；
-    applied=实际状态变更条数、noop=幂等 no_op 条数（分列防「applied=N 但零变更」）。
+    成功不 commit（事务边界归调用方），返回 ((results, applied, noop,
+    noop_reflection), None)；
+    applied=实际状态变更条数、noop=幂等 no_op 条数（分列防「applied=N 但零变更」）、
+    noop_reflection=其中调用方带了非空 reflection 的 no_op 条数（W2.1：这些
+    reflection 未写入，批量路径的逐条 guidance 会被 task_submit 吞掉，靠这个
+    计数在收口响应面上浮）。
     expect_task_id：批内所有 step 必属该任务（跨任务拒）。"""
     results: list[dict] = []
-    applied = noop = 0
+    applied = noop = noop_reflection = 0
     all_ids = [e["step_id"] for e in entries]
     snap = _noop_snapshot(all_ids)
 
@@ -733,6 +745,8 @@ def apply_step_entries(conn, entries, expect_task_id: int) -> tuple:
             results.append(branch)
             if branch.get("no_op"):
                 noop += 1
+                if (str(reflection) if reflection else "").strip():
+                    noop_reflection += 1
             else:
                 applied += 1
         except BaseException:
@@ -741,7 +755,7 @@ def apply_step_entries(conn, entries, expect_task_id: int) -> tuple:
             conn.rollback()
             _noop_restore(snap, all_ids)
             raise
-    return (results, applied, noop), None
+    return (results, applied, noop, noop_reflection), None
 
 
 def _action_step_update(data: dict) -> dict:

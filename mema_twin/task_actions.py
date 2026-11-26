@@ -598,6 +598,7 @@ def _action_task_submit(data: dict) -> dict:
     # 预检之前；与收口非同一事务（既有 task_submit 本就跨多连接）。steps 落库后
     # 的一切拒绝路径都带 steps_applied + 重试引导（打卡幂等，修正后直接重交）。
     steps_applied: int | None = None
+    steps_noop_reflection = 0
     steps_in = data.get("steps")
     if steps_in is not None:
         parsed, serr = exec_actions.parse_step_entries(steps_in)
@@ -611,9 +612,14 @@ def _action_task_submit(data: dict) -> dict:
             if serr is not None:
                 return serr  # 未落库：任务与步骤均不动，无漂移
             steps_applied = int(outcome[1])
+            steps_noop_reflection = int(outcome[3])
             sconn.commit()
         finally:
             sconn.close()
+
+    _dropped_note = (f"本次 steps 中 {steps_noop_reflection} 条为无变更打卡，所带 "
+                     "reflection 未写入（步骤已是 done）——后补反思改走 "
+                     "tool_log(task_id, note)。")
 
     def _with_steps(payload: dict) -> dict:
         if steps_applied is None:
@@ -623,6 +629,12 @@ def _action_task_submit(data: dict) -> dict:
         payload.setdefault("hint", "所附 steps 已落库（打卡幂等）——按 open_steps 清单"
                                    "补齐/修正后直接重试 task_submit，无需重新打卡"
                                    "（若计划已被重建，按新清单重新对账）")
+        if steps_noop_reflection:
+            # W2.1 同口径（轮2 A/B P1）：批量路径逐条 guidance 不上浮，幂等打卡
+            # 所带 reflection 被静默丢弃——被拒路径在 hint、成功路径在 guidance
+            # 显式计数并指路 tool_log。只对真带了 reflection 的 no_op 计数
+            # （轮2 A P2-1：裸幂等打卡不该背「reflection 未写入」的话术）
+            payload["hint"] += f"（{_dropped_note}）"
         return payload
     # 收口门预检（v0.4 P1）：建过计划且有未闭环步骤 → 拒绝（对账引导，把墙变对账
     # 机会）。此为快筛——真正的门在下方条件 UPDATE 的 NOT EXISTS 里原子复查
@@ -677,7 +689,15 @@ def _action_task_submit(data: dict) -> dict:
     out: dict = {"ok": True, "task_id": int(tid), "status": "submitted",
                  "guidance": ("已交付收口（task_submit 即终点）。用户对交付稿的修改与意见是"
                               "偏好信号：有反馈就 twin.write 沉淀（注明来源交付物）；"
-                              "需要返工走 task_revise 生成修订任务。")}
+                              "本次执行中没来得及记的路径与踩坑走 tool_log(task_id, note)"
+                              "——此时步骤都已 done，补 step_update(done) 带 reflection "
+                              "不会写入；需要返工走 task_revise 生成修订任务。")}
+    if steps_noop_reflection:
+        # W2.1 成功收口路径（轮2 A/B P1 双实锤）：全闭环任务的批量补打卡必然
+        # 全 no_op，逐条 guidance 被 steps 路径吞掉——丢弃告知在此上浮，
+        # 「交付时顺手补反思」恰是最自然的静默丢弃场景
+        out["steps_reflection_not_written"] = steps_noop_reflection
+        out["guidance"] += _dropped_note
     if steps_applied is not None:
         # 无 steps 时键缺席（缺位断言锁住，防「加键容易删键难」）
         out["steps_applied"] = steps_applied

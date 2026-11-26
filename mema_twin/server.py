@@ -75,7 +75,11 @@ _HELP_ENTRIES: dict[str, str] = {
              "落库后响应可能带 similar_existing（字面相似的既有偏好，ratio≥0.82，"
              "纯词法非语义判定，不拦截）与 orphan_pending_tickets（你此前被拒的"
              "挂票疑似已被本次取代——确认后 resolve(reject) 关闭，勿盲目关不同"
-             "维度的票）。维度值撞清单会整笔打回并附 all_values 全量与说明——"
+             "维度的票）。"
+             "同文已存在于 ≥2 个其他工种时回 cross_type_echo + echo_guidance"
+             "（软提示不拦截）；scope=audience 写入时，同文的工种级副本一并列出；"
+             "同受众长度相近的活跃行超过 5000 行时不检测，回 cross_type_echo_skipped。"
+             "维度值撞清单会整笔打回并附 all_values 全量与说明——"
              "可以直接写不预查清单；但先查 taxonomy 再写更优：拥有完整分类视野、"
              "自主对齐已有口径，owner 不需要被打断来裁值。",
     "status": "查看各 work_type 的 prompt 版本概况（v0.6.4 起版本/画像明细"

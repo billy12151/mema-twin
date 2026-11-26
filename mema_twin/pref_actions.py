@@ -97,6 +97,44 @@ def _rank_similar(new_text: str, items: list[dict], text_key: str,
     return sim
 
 
+# W3（v0.7.0）：跨工种同文扇出提示——同一段文字已写在同受众其他工种时写入
+# 当场可见（软提示不拦截；对「逐工种扇出」的动机案例只能告知代价，不能阻止）。
+# 阈值 ≥2 个其他工种（受众级写入阈值 1——工种级副本与受众级偏好该二选一）。
+_FANOUT_MIN_TYPES = 2
+# 比对窗帽：同受众活跃行数超大时跳过检测（回 cross_type_echo_skipped），
+# 不做部分检测——部分结果会误导「只有这几个工种有」。
+_FANOUT_SCAN_MAX = 5000
+
+
+def _cross_type_echo(conn, exclude_wt: str, audience_code: str,
+                     exclude_id: int, content: str) -> list[dict] | None:
+    """同受众其他工种里的同文行（None=超出比对窗跳过检测）。与 add_local_evidence
+    同一去重键 db._dedup_digest（NFKC+空白归一后 sha256，词法判定：措辞改一个字
+    即不命中）。aud- 受众级行与已 void 行不在比对集（status 过滤 + aud- 前缀
+    ESCAPE 转义排除——裸 _ 是 LIKE 单字符通配，不转义会误排未来 aud* 开头的
+    自建工种码）；受众列不相等不比对。比对窗=长度粗筛 n//4..n*4 内的活跃行数
+    （去重键规范化后长度几乎不变）。"""
+    n = len(content or "")
+    rows = conn.execute(
+        "SELECT memory_id, work_type, content FROM twin_evidence"
+        " WHERE status IN ('uncompiled','compiled') AND audience=?"
+        " AND work_type != ? AND work_type NOT LIKE 'aud\\-%' ESCAPE '\\'"
+        " AND memory_id != ?"
+        " AND LENGTH(content) BETWEEN ? AND ?"
+        " ORDER BY memory_id DESC LIMIT ?",
+        (audience_code, exclude_wt, exclude_id,
+         max(1, n // 4), n * 4, _FANOUT_SCAN_MAX + 1)).fetchall()
+    if len(rows) > _FANOUT_SCAN_MAX:
+        return None
+    digest = db._dedup_digest(content)
+    hits: list[dict] = []
+    for r in rows:
+        if db._dedup_digest(r["content"] or "") == digest:
+            hits.append({"memory_id": int(r["memory_id"]),
+                         "work_type": r["work_type"] or ""})
+    return hits
+
+
 def _similar_existing(conn, wt_code: str, exclude_id: int, new_text: str) -> list[dict]:
     """S7 相似提示（软通道）：difflib 字面相似度——纯词法非语义判定，不拦截
     不落票，落库后把「库里有长得像的」递给 Agent 自裁（是否 void 新写的）。
@@ -277,6 +315,40 @@ def _action_write(data: dict) -> dict:
             out["similar_existing"] = sim
         client_id = client or ""
         wt_code = dims["work_type"]["code"]
+        # W3 跨工种扇出提示（软提示不拦截）。插入点必须在 wt_code 赋值之后：
+        # 两个分支都要用，放 if audience_scoped 之后会在普通写入分支引用未定义名
+        # （NameError 穿出工具面——方案轮 1 P0 实锤）。duplicate=true 已提前返回，
+        # 走到这里必然是新写入行（exclude_id=mid 排除自身）。
+        echo = _cross_type_echo(conn, wt_code, dims["audience"]["code"],
+                                mid, content)
+        if echo is None:
+            out["cross_type_echo_skipped"] = "over_scan_cap"
+        else:
+            wt_list: list[str] = []
+            for h in echo:
+                if h["work_type"] not in wt_list:
+                    wt_list.append(h["work_type"])
+            need = 1 if audience_scoped else _FANOUT_MIN_TYPES
+            if len(wt_list) >= need:
+                out["cross_type_echo"] = {
+                    "count": len(wt_list),
+                    "work_types": wt_list[:8],
+                    "memory_ids": [h["memory_id"] for h in echo][:8],
+                }
+                if audience_scoped:
+                    out["echo_guidance"] = (
+                        "以下工种级偏好与本受众级偏好同文（见 memory_ids）。"
+                        "格式与结构类不进受众画像：本条若是格式类，保留工种级副本、"
+                        "void 本条；若是口径类，经用户确认后 void 工种级副本"
+                        "（void 不可逆；已编译过的副本会触发该类型夜间重编）")
+                else:
+                    out["echo_guidance"] = (
+                        f"同一段文字已写在 {len(wt_list)} 个其他工种"
+                        "（见 work_types/memory_ids）。口径类偏好（详略/口吻/禁忌/"
+                        "关注点）应收成受众级：scope=\"audience\" 写一条。格式类当前"
+                        "没有跨工种落点，逐工种写能让它生效，但一处更正须逐工种同步"
+                        "——写之前确认这条对每个工种都适用，且不含会随工具版本变的"
+                        "能力事实")
         if audience_scoped:
             zh = dims["audience"].get("label_zh") or dims["audience"]["raw"]
             hint = (f"已沉淀为对「{zh}」的受众级通用偏好（不绑定工作类型）；"
@@ -790,7 +862,8 @@ def _resolve_ticket(conn, pid, decision, code, new_type,
             if source_kind == "task_start":
                 out["content_source_note"] = (
                     "此快照来自 task_start 建档 brief，是任务描述不是偏好——"
-                    "照抄 write 会产出垃圾证据；仅当其中确有可复用的偏好时，"
+                    "照抄 write 会产出垃圾证据；仅当其中确有规则类偏好时"
+                    "（执行经验走步骤记录，工具用法走技能文档），"
                     "重写为偏好形式再 write（维度已合法化）")
             elif source_kind == "write" and decision != "reject":
                 out["content_source_note"] = ("此快照是偏好正文，可直接照抄 write"

@@ -127,7 +127,7 @@ for fallback and human review).
 
 | 动作 | 说明 |
 |------|------|
-| `write` | 沉淀一条工作偏好。必填 content/work_type/audience/purpose（未命中清单整笔打回+动态清单+裁定票据，问用户 map/canonicalize 后重试）；任务流内沉淀可传 `task_id`——缺省维度沿用该任务的三维度（scope=audience 时不继承 work_type；显式传入优先，响应 `dims_inherited` 列出继承项）；对某受众的通用偏好传 `scope=audience`（work_type 省略），进该受众画像；同 work_type 内容完全相同返回 `duplicate=true`（词法去重，幂等成功，勿重试） |
+| `write` | 沉淀一条工作偏好。必填 content/work_type/audience/purpose（未命中清单整笔打回+动态清单+裁定票据，问用户 map/canonicalize 后重试）；任务流内沉淀可传 `task_id`——缺省维度沿用该任务的三维度（scope=audience 时不继承 work_type；显式传入优先，响应 `dims_inherited` 列出继承项）；对某受众的通用偏好传 `scope=audience`（work_type 省略），进该受众画像；同 work_type 内容完全相同返回 `duplicate=true`（词法去重，幂等成功，勿重试）；同文已存在于 ≥2 个其他工种时回 `cross_type_echo`+`echo_guidance`（软提示不拦截），scope=audience 写入阈值 1，同受众活跃行超 5000 回 `cross_type_echo_skipped` |
 | `get` | 取某工作性质的 persona prompt（开工前调用）；可选 `version` 取历史版本全文；`aud-{受众}` 可读受众画像；读 active 时附未编译增补 persona_supplement（v0.4.8，指定历史版本/受众画像不附） |
 | `compile` | 取编译素材包（旧版本 prompt 编译参考 + **全部在世证据**（全量投影，v0.6 起超预算只警告不截断：`MEMA_TWIN_COMPILE_BUDGET_CHARS` 默认 60000，对齐 playbook 素材闸）+ 已作废条款清单 + 编译规则（稳定律/硬预算/变更分级）），独立会话执行、做完即弃；v0.6 响应附 `evidence_ids`/`source_ids_suggested`/`voided_ids` 结构化数组——submit 的 `source_memory_ids` 直接复制 `source_ids_suggested`，无需解析素材包正文 |
 | `submit` | 提交编译产物，落版本并写镜像（返回 `supersedes`），回写证据编译标记；`prompt_md` ≤100000 字符；夜间定时任务落版传 `origin=scheduled`（过**验证门**：素材回声/缺分区标题拒绝、无新证据空转阻尼拒绝，均在 status 的 nightly_rejected 累计；证据未全覆盖与交互式违规只警告） |
