@@ -58,6 +58,7 @@ description: 个人分身：工作类偏好沉淀与 persona prompt 编译，经
 - 要返工改稿 → `twin(action="task_revise")`（仅 submitted；brief/deliverable_md/revision_reason 至少其一）。revise 不恢复 todos，但会按 task_resume 同款重注入分身（persona + 未编译增补 + 受众画像 + playbook，v0.4.8 起）；子任务回 planning 重走并记 lineage：parent_task_id + iteration 递增，未完结步骤深拷贝到新 task_id
 - 中断/隔日继续 → `twin(action="task_resume")`（仅进行中 planning，自动恢复 todos 并再注入分身，同样带 persona_supplement 与同域 fallback）；不再做的进行中任务用 `twin(action="task_close")` 显式关闭（**关闭前先经用户确认**，不要自行清理）；失败必须显式标 `outcome=failed`（缺省 superseded），否则结果列与未完成任务无法区分
 - **同会话重复注入省 token**：同一会话再次 task_start/task_resume/task_revise 同 work_type，且上文注入返回的 persona_version 仍在场（未被上下文压缩）→ 传 `have_persona_version=<上文版本号>`，版本未变则不再重复注入全文；上文不可见就**不要传**（服务端会照常全文注入，宁可重复不可缺席）——**尤其 revise：跨会话返工是常态，别从任务行抄 persona_version 当 have 申报**（会短路掉全文注入，分身缺席）
+- **同会话第二次建档起 task_start 不回 `guidance`（v0.6.7 起）**：这是**省略不是出错**——task_id、persona 注入、persona_supplement、playbook 等其余字段照常返回，不要重试、不要当接口异常排查；首次建档仍带 guidance。
 - **受众画像同款短路（v0.6.8）**：响应带 `audience_profile_md` 时记下 `audience_profile_code` 与 `audience_profile_version`；同会话后续 task_start/task_resume/task_revise 涉及同受众时传 `have_audience_versions={"<受众裸码>": <版本>}`（aud-<合法裸码> 自动归一；中文名/别名不用于申报），版本未变则画像全文不再重复注入；上文不可见就不要传（宁重复不缺席）；键不合法不影响任务——`have_audience_versions_unknown` 警告的 ignored/total 每次都在，合法码清单仅本宿主首次警告全量附上、之后为一句话指针（实时清单可 `twin(action="taxonomy", kind="audience")` 随时重取；权威裸码以响应回显 `audience_profile_code` 为准）
 - write 响应提示"有偏好未编译" → **不要**立即 compile，也不要每写一条就播报：任务收尾（或用户问起）时非阻塞汇总一句（如"分身积累了 N 条新偏好，要不要现在整理？"）；是否整理由用户拍板，或交给夜间编译定时任务统一处理
 - v0.5.0 起 twin 不再产生 `mema_notices`（语义冲突检测随拆分退役，重复防线=写时词法去重 `duplicate=true`）——响应里见到该键属旧版残留，忽略
@@ -70,6 +71,7 @@ description: 个人分身：工作类偏好沉淀与 persona prompt 编译，经
 - `status` 稳定带 `plan_stats`，键名全集：tasks_total / tasks_planned / steps_total / steps_failed / steps_skipped / steps_backfilled / open_blocking_questions / tasks_unevaluated / tasks_submitted / submitted_with_plan（采纳率=后者÷前者，分母 0 无读数；历史 submitted 会稀释，看增量任务）/ tool_usage_total / tool_usage_fail / playbooks / **audit**（v0.4.6 起 action 级调用审计：total/failed/unreachable/fail_rate/last_24h/top_actions，`MEMA_TWIN_AUDIT=0` 关闭；unreachable 为 v0.4 历史冻结值，v0.5.0 起不再新增）/ **playbook_rejected**（明细数组 `[{key,count,last_check,last_at}]`，按 key 记落版被拒）
   - 顶层 `nightly_rejected` 才是「夜间拒绝落版计数」（键缺席即 0）；`plan_stats.playbook_rejected` 是**数组不是计数**，别按数字读
   - **status 判空**：`uncompiled` / `audience_stale` 返回 `{}`，`persona_stale` / `nightly_rejected` 是**键缺席**即空；plan_stats **可能整桶缺席**（仅 status 内部软失败时缺席，空库仍返回全零桶），其 `audit` / `playbook_rejected` 同理按「键缺席 或 空容器」处理——一律等价处理，别因为没看到键就以为字段缺失或去查源码
+  - **版本明细只回当前行（v0.6.7 起）**：各类型 `versions` 数组只含 active 当前版本，**不是历史丢失**；历史版本经 `twin(action="get", data={"work_type": ..., "version": N})` 按需查（带 version 时不附未编译增补）。
 - `status` 返回 scan_notice 时：按其 agent_instruction 询问用户是否创建/更新夜间任务（当前 spec 是单一任务 `twin_nightly_compile`，**从响应的 setup.tasks 取 spec 原文**建到宿主平台，不要凭记忆写）。处置口径四条：
   - **更新现有任务，不要再建第二个**：提醒是积压驱动的（v0.6.1）——有积压超 3 天未消化才出；缺评估支线的纯编译任务会让未评估任务积压不消化、持续提醒，升级成合并 spec（两支线：评估在前、编译在后）后按积压消化节奏自消失
   - 夜间任务的 prompt 指到 **`mema-twin-governance` skill**（夜间会话只读它）
