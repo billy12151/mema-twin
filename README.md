@@ -54,7 +54,8 @@ for fallback and human review).
   submit 回库，版本记录来源 memory ids 与编译模型。建议在强模型会话中执行编译。
 - **交付任务流（机制改造自 plan-mode；v0.3.8 删评审环）**：`planning → submitted
   （终态）` / superseded——task_submit 即交付收口并落盘审计文件，无评审环（评审
-  verdict 无下游消费者，用户反馈走对话 → twin.write 主路径）；task_resume（仅
+  verdict 无下游消费者，用户反馈走对话 → twin.write 主路径；判据：换一个需求、或换一个
+  项目仍适用、且非项目特有约定的写法才沉淀，业务口径与项目特有约定不沉淀）；task_resume（仅
   planning）恢复 todos 续作、task_revise（仅 submitted）返工记 lineage；
   task_start / task_resume / task_revise 即 persona prompt 注入点
   （v0.4.8 起 revise 链路同款注入 persona/未编译增补/受众画像/playbook）。
@@ -73,10 +74,12 @@ for fallback and human review).
   active 不变、证据未消耗、次晚自动重试）；**空转阻尼**：提交不含任何新证据且非 stale
   触发时拒绝（no_new_evidence，防版本号空转）；证据未全覆盖（类型=
   在世证据超集、画像=集合相等）与交互式违规只警告不拦。连续被拒不落版累计于 status 的
-  `nightly_rejected`（成功落版即清）——持续被拒与空转闭环的唯一出口信号。
+  `nightly_rejected`（成功落版即清）——持续被拒与空转闭环的唯一出口信号。工具参数残留
+  与链接只提醒不拦（v0.7.1：submit 响应 warnings 的「工具条款残留/工具条款提醒」
+  两提醒，两种来源照常落版）。
 - **全量投影编译**：compile 素材为该类型**全部在世证据**（不分编译状态，排除作废）——
   每版从头重编，弱底稿不遗传、证据库是唯一事实源；配套编译规则三件套：含义稳定表达自由
-  （证据未动的规则不得变含义，合并/条件化/重组自由）、硬预算（类型 8000 字符/60 条、
+  （证据未动的规则不得变含义，合并/条件化/重组自由）、硬预算（类型 10000 字符/70 条、
   画像 4000/40，超限强制合并淘汰并写明依据）、版本间变更分级（语义变更须归因证据 id 或
   预算）；v0.3.9 增简练优先（最小可执行表述，禁为省字符抽象掉动作/条件/例外）与素材包
   受众/用途维度标签。status 附带各版本体积曲线（size_chars）与 active 超预算标记。
@@ -127,10 +130,10 @@ for fallback and human review).
 
 | 动作 | 说明 |
 |------|------|
-| `write` | 沉淀一条工作偏好。必填 content/work_type/audience/purpose（未命中清单整笔打回+动态清单+裁定票据，问用户 map/canonicalize 后重试）；任务流内沉淀可传 `task_id`——缺省维度沿用该任务的三维度（scope=audience 时不继承 work_type；显式传入优先，响应 `dims_inherited` 列出继承项）；对某受众的通用偏好传 `scope=audience`（work_type 省略），进该受众画像；同 work_type 内容完全相同返回 `duplicate=true`（词法去重，幂等成功，勿重试）；同文已存在于 ≥2 个其他工种时回 `cross_type_echo`+`echo_guidance`（软提示不拦截），scope=audience 写入阈值 1，同受众活跃行超 5000 回 `cross_type_echo_skipped` |
+| `write` | 沉淀一条工作偏好。必填 content/work_type/audience/purpose（未命中清单整笔打回+动态清单+裁定票据，问用户 map/canonicalize 后重试）；任务流内沉淀可传 `task_id`——缺省维度沿用该任务的三维度（scope=audience 时不继承 work_type；显式传入优先，响应 `dims_inherited` 列出继承项）；对某受众的通用偏好传 `scope=audience`（work_type 省略），进该受众画像；同 work_type 内容完全相同返回 `duplicate=true`（词法去重，幂等成功，勿重试）；同文已存在于 ≥2 个其他工种时回 `cross_type_echo`+`echo_guidance`（软提示不拦截），scope=audience 写入阈值 1，同受众活跃行超 5000 回 `cross_type_echo_skipped`。判据：换一个需求、或换一个项目仍适用、且非项目特有约定才沉淀；业务口径与项目特有约定不沉淀 |
 | `get` | 取某工作性质的 persona prompt（开工前调用）；可选 `version` 取历史版本全文；`aud-{受众}` 可读受众画像；读 active 时附未编译增补 persona_supplement（v0.4.8，指定历史版本/受众画像不附） |
-| `compile` | 取编译素材包（旧版本 prompt 编译参考 + **全部在世证据**（全量投影，v0.6 起超预算只警告不截断：`MEMA_TWIN_COMPILE_BUDGET_CHARS` 默认 60000，对齐 playbook 素材闸）+ 已作废条款清单 + 编译规则（稳定律/硬预算/变更分级）），独立会话执行、做完即弃；v0.6 响应附 `evidence_ids`/`source_ids_suggested`/`voided_ids` 结构化数组——submit 的 `source_memory_ids` 直接复制 `source_ids_suggested`，无需解析素材包正文 |
-| `submit` | 提交编译产物，落版本并写镜像（返回 `supersedes`），回写证据编译标记；`prompt_md` ≤100000 字符；夜间定时任务落版传 `origin=scheduled`（过**验证门**：素材回声/缺分区标题拒绝、无新证据空转阻尼拒绝，均在 status 的 nightly_rejected 累计；证据未全覆盖与交互式违规只警告） |
+| `compile` | 取编译素材包（旧版本 prompt 编译参考 + **全部在世证据**（全量投影，v0.6 起超预算只警告不截断：`MEMA_TWIN_COMPILE_BUDGET_CHARS` 默认 60000，对齐 playbook 素材闸）+ 已作废条款清单 + 编译规则（稳定律/硬预算/变更分级）），独立会话执行、做完即弃；v0.6 响应附 `evidence_ids`/`source_ids_suggested`/`voided_ids` 结构化数组——submit 的 `source_memory_ids` 直接复制 `source_ids_suggested`，无需解析素材包正文；v0.7.1 起证据含工具参数片段/链接时响应附 `tool_clause_flags`（memory_id/level/kinds/snippets），素材包对应证据行尾带 `<!-- tool-flag -->` 标注 |
+| `submit` | 提交编译产物，落版本并写镜像（返回 `supersedes`），回写证据编译标记；`prompt_md` ≤100000 字符；夜间定时任务落版传 `origin=scheduled`（过**验证门**：素材回声/缺分区标题拒绝、无新证据空转阻尼拒绝，均在 status 的 nightly_rejected 累计；证据未全覆盖与交互式违规只警告；工具参数残留与链接只提醒不拦，v0.7.1） |
 | `rollback` | 回滚 persona 版本（零阻力）：`version` 省略回上一版，传 n 回指定版；不删历史、版本号不回收；目标已是 active 时返回 `already_active=true`（v0.6 显式 no-op 布尔，非错误） |
 | `status` | 版本概况（含体积/超预算标记）、受众画像（audience_profiles）与重抽象队列（audience_stale）、条款作废待重编（persona_stale）、未编译统计、pending 数量（归一门待裁票据）、夜间被拒计数（nightly_rejected）、进行中任务计数（open_tasks）、执行计划统计（plan_stats：任务/步骤各态/backfilled/open blocking 疑问/tool_usage/playbooks/playbook_rejected/采纳率 submitted_with_plan÷tasks_submitted——分母 0 无读数，历史 submitted 会稀释、看增量任务）、定时任务安装提醒 |
 | `taxonomy` | 列枚举清单（动态：含治理追加别名与自建 canonical；kind ∈ work_type/audience/purpose，v0.4.7 起**可传数组一次取多类或 `"all"`**——多类形状判别式=响应有无 `kinds` 键、顶层 count_total；`compact` 仅接受布尔 true） |
@@ -141,7 +144,7 @@ for fallback and human review).
 | `step_update` | 步骤状态机打卡（六态；to=in_progress 过三门：blocking 疑问→依赖→单一 in_progress）；done/failed 闭环（failed 必带 reflection；done 可带 reflection 记「下次怎么做」，夜间提炼进 playbook——须迁 done 那一次带，后补不写入（响应明示「未写入」并指路 tool_log）；pending 直跳标 backfilled 追认） |
 | `plan_revise` | 修订单次提交：steps_remove（仅 pending 且不被本代未删步骤依赖）/ steps_update（改 deps/状态走状态机）/ steps_add / answers（open_questions 写回解锁 blocking） |
 | `tool_log` | 批量记工具经验（v0.4.7 批量：entries 1..50 条；tool/purpose/outcome ∈ success/fail/degraded，可附 note/skill_digest；字段帽 tool≤100/purpose≤500/note≤500/skill_digest≤500）；带 task_id 的记录进 task_evaluate 素材（playbook 素材），不带 task_id 的只留痕——工具路径/踩坑类经验写 note，不要 twin.write |
-| `task_submit` | 提交交付稿并收口（**submit 即终点**，v0.3.8 无评审环），落盘 `deliverables/task-N.md`；建过计划的任务收口门拦未闭环步骤；未建计划的交付附经验流失提醒（advisory：执行经验不进 playbook，重复型工作下次先 plan_set）；outcome 自动 success；open blocking 疑问仅警告；交付后：用户对产物的反馈走 twin.write，本次执行中没来得及记的路径与踩坑走 tool_log(task_id, note)——此时步骤都已 done，补 step_update(done) 带 reflection 不会写入；v0.4.7 起可带 `steps`（同 step_update 批量结构且须属本任务）先补打卡再收口一次往返，steps 已落库后被拒时响应带 `steps_applied`，修正后直接重试无需重新打卡 |
+| `task_submit` | 提交交付稿并收口（**submit 即终点**，v0.3.8 无评审环），落盘 `deliverables/task-N.md`；建过计划的任务收口门拦未闭环步骤；未建计划的交付附经验流失提醒（advisory：执行经验不进 playbook，重复型工作下次先 plan_set）；outcome 自动 success；open blocking 疑问仅警告；交付后：用户对产物的反馈里，对写法的通用要求（换一个需求、或换一个项目仍适用、且非项目特有约定）走 twin.write 沉淀，本次需求的业务口径变更不沉淀，本次执行中没来得及记的路径与踩坑走 tool_log(task_id, note)——此时步骤都已 done，补 step_update(done) 带 reflection 不会写入；v0.4.7 起可带 `steps`（同 step_update 批量结构且须属本任务）先补打卡再收口一次往返，steps 已落库后被拒时响应带 `steps_applied`，修正后直接重试无需重新打卡 |
 | `task_resume` / `task_revise` / `task_close` | 续作进行中任务（仅 planning，恢复 todos + 深拷贝未完结计划到新 task_id）/ 已交付任务修订返工（仅 submitted，子任务回 planning 记 lineage + 同款深拷贝；v0.4.8 起按 task_resume 同款注入 persona/未编译增补/受众画像/playbook，不恢复 todos）/ 显式关闭进行中任务（outcome=failed\|superseded，未闭环步骤批量 skipped(closed)） |
 | `task_evaluate` | 打包水位后已闭环任务的执行记录（reflection/tool_log/步骤路径）出 playbook 素材包（夜间任务调用；水位单调，可显式补评估） |
 | `playbook_submit` / `playbook_rollback` | playbook 落版（origin=scheduled 过验证门：溯源/素材回声 G1/无标题 G2/空转阻尼；交互式只警告）与回滚（省略 version 回上一版） |

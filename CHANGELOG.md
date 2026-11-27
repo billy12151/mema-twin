@@ -2,9 +2,21 @@
 
 ## [Unreleased]
 
-## [0.7.1] — 2026-11-27
+## [0.7.1] — 2026-11-27（2026-11-28 扩充：沉淀质量治理）
 
-skill 文档补齐两条已上线行为口径（纯文案，服务端行为无变更）：同会话第二次建档起 `task_start` 不回 `guidance`（**省略非出错**，首次建档仍带）；`status` 的版本明细只回 active 当前行（**非历史丢失**），历史版本经 `get(version=N)` 按需查。`make install-skill` 同步三宿主副本。
+沉淀质量治理（owner 2026-11-28 批准按方案实施；开发方案 v1.3 存 mema #1741，两轮四路独立评审）。**宿主适配须知**：submit 响应 warnings 可能出现 `[验证门:工具条款残留]` / `[验证门:工具条款提醒]`——**只提醒不拦，照常落版**；compile 响应可能带 `tool_clause_flags`（证据含工具参数/链接片段的标注）；persona 硬预算放宽为 **10000 字符 / 70 条**（画像维持 4000/40）；task_submit guidance 文案变更（写法类才沉淀）。
+
+### Added
+
+- **W3 工具参数确定性检测**（新模块 `mema_twin/toolcheck.py`）：compile 时对每条证据扫描工具参数片段（硬档）与链接/内部域名（软档），命中条目写入响应 `tool_clause_flags` 并在素材包证据行尾加 `<!-- tool-flag: hard|soft -->` 标注；submit 落版前对产物正文做同样扫描，硬档（工具条款残留）与软档（工具条款提醒）都进 warnings、**两种来源照常落版**（D9：不做夜间硬拒——#951「质量类交互不配阻断」/#956「不给落版加前置门」）。检测要点：只豁免 `<!-- src: … -->` 归因注释（容忍空白/等号变体）；先命中先占位、类序 url→inner→http→kv→bool→kebab_dot→camel 防双报；camel 白名单 9 项；kebab 扩展名豁免；环视词边界防中文紧贴漏报；帽=每证据 snippets ≤3、flags ≤12 条超出记 `flags_total`。存量回归基线（2026-11-28 对生产库只读实测，终版规则）：非 void 证据 149 条命中 12（硬 7 软 5）、在用正文 20 份命中 9 行（硬 6 软 3），逐行人工复核全部为参数/调用示例或合法例外。
+- **W2 建议作废清单（文案）**：夜编晨报「建议作废」五类（通篇业务口径 / 被同源合并完全覆盖 / 被新证据取代 / 纯工具条款 / 拆半丢弃的业务半句），只汇总不安置；gov SKILL ②第 5 条冲突裁定改为「先判断关系」（收窄/特例→合成一条带适用条件的规则；否定→取新并注明；两型之外回落以新为准）。
+
+### Changed
+
+- **W1 沉淀判据同文（纯文案，十处）**：新判据「换一个需求、或换一个项目仍适用、且非项目特有约定的产出物写法才沉淀；本需求本项目的事实（含项目特有写法约定）不沉淀」——WRITE_GUIDANCE 第②步追加一问（在「会打回」之后、④ 清单复检）、第④步扩写；_TYPE_RULES/_AUDIENCE_RULES 各新增一条并补守门句（工具标注处理、合并留痕、变更节不复述参数名）；task_submit guidance 与 server help（task_submit/task_revise）同步；skill/SKILL.md 分流规则新增条（:36 加「判据见下条」指向）与 :44/:46/:57/:80 对齐；README :57/:130/:132-133/:144 同步；scan.py spec compile/submit instruction 同步（宿主 prompt 不自动跟随，需按新 spec 重建宿主定时任务）。
+- **W4 persona 硬预算放宽**：`BUDGET_TYPE_CHARS` 8000→**10000**、`BUDGET_TYPE_RULES` 60→**70**（D1a，产地=装下现状与待吸收）；画像 4000/40 不放宽（D1b）。背景：product_doc v17–v22 六版 60 条顶格、v23 59 条/7995 字符，夜编自报「下一条新证据起必须走交互式整体重组」。
+- **W5 skill 版本戳挪位**：`make install-skill` 的版本戳从文件首行挪到 frontmatter 之后——此前戳行顶掉 frontmatter，ZCode 读到的 mema-twin description 为空（governance 副本无戳故正常）；`make check-skill` 新增首行 frontmatter 校验（新旧两种戳格式去戳后 diff 均等价，只有首行校验能抓退化）。
+- skill 文档补齐两条已上线行为口径（纯文案，服务端行为无变更）：同会话第二次建档起 `task_start` 不回 `guidance`（**省略非出错**，首次建档仍带）；`status` 的版本明细只回 active 当前行（**非历史丢失**），历史版本经 `get(version=N)` 按需查。`make install-skill` 同步三宿主副本。
 
 ## [0.7.0] — 2026-11-26
 

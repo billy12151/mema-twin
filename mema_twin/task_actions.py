@@ -687,11 +687,13 @@ def _action_task_submit(data: dict) -> dict:
     finally:
         conn.close()
     out: dict = {"ok": True, "task_id": int(tid), "status": "submitted",
-                 "guidance": ("已交付收口（task_submit 即终点）。用户对交付稿的修改与意见是"
-                              "偏好信号：有反馈就 twin.write 沉淀（注明来源交付物）；"
-                              "本次执行中没来得及记的路径与踩坑走 tool_log(task_id, note)"
-                              "——此时步骤都已 done，补 step_update(done) 带 reflection "
-                              "不会写入；需要返工走 task_revise 生成修订任务。")}
+                 "guidance": ("已交付收口（task_submit 即终点）。用户对交付稿的修改与意见"
+                              "里，对写法的通用要求（换一个需求、或换一个项目仍适用、且非"
+                              "项目特有约定）是偏好信号：twin.write 沉淀（注明来源交付物）；"
+                              "本次需求的业务口径变更不沉淀；本次执行中没来得及记的路径与"
+                              "踩坑走 tool_log(task_id, note)——此时步骤都已 done，补 "
+                              "step_update(done) 带 reflection 不会写入；需要返工走 "
+                              "task_revise 生成修订任务。")}
     if steps_noop_reflection:
         # W2.1 成功收口路径（轮2 A/B P1 双实锤）：全闭环任务的批量补打卡必然
         # 全 no_op，逐条 guidance 被 steps 路径吞掉——丢弃告知在此上浮，

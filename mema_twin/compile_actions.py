@@ -12,7 +12,7 @@ import json
 import os
 import re
 
-from . import db, flow, identity, store, taxonomy, templates
+from . import db, flow, identity, store, taxonomy, templates, toolcheck
 from .pref_actions import _mark_persona_stale
 
 # v0.6 B6：persona 素材包软闸（不截断——全量投影拍板 v0.3.7 不破）。默认对齐
@@ -149,6 +149,23 @@ def _action_compile(data: dict) -> dict:
             voided = db.voided_evidence(conn, code)
     finally:
         conn.close()
+    # v0.7.1 W3.2（沉淀质量治理）：toolcheck 标注——命中的证据条目写 tool_flag
+    # （templates.compile_prompt_material 渲染成行尾 <!-- tool-flag -->），响应带
+    # tool_clause_flags。帽（方案 §3 W3.2）：每证据 snippets ≤3（单条 ≤40 已在
+    # toolcheck 截）、flags 按证据条数 ≤12，超出部分时 flags_total 记命中证据总数。
+    # _read_evidence_rows 被 task_actions 复用，标注只能加在这里不能加在那里。
+    tool_flags: list[dict] = []
+    for e in evidence:
+        hs = toolcheck.scan(e.get("content") or "")
+        if not hs:
+            continue
+        e["tool_flag"] = "hard" if any(h["level"] == "hard" for h in hs) else "soft"
+        tool_flags.append({
+            "memory_id": int(e["id"]),
+            "level": e["tool_flag"],
+            "kinds": sorted({h["kind"] for h in hs}),
+            "snippets": [h["snippet"] for h in hs[:3]],
+        })
     if aud is not None:
         at = taxonomy.by_code("audience", aud)
         title_zh = at.zh if at else aud
@@ -187,6 +204,12 @@ def _action_compile(data: dict) -> dict:
     out["source_ids_suggested"] = ([int(e["id"]) for e in evidence]
                                    + [int(s["memory_id"]) for s in skipped])
     out["voided_ids"] = [int(r["memory_id"]) for r in (voided or [])]
+    if tool_flags:
+        if len(tool_flags) > 12:
+            out["tool_clause_flags"] = tool_flags[:12]
+            out["flags_total"] = len(tool_flags)
+        else:
+            out["tool_clause_flags"] = tool_flags
     # v0.6 B6：软闸只警告不截断（超闸 = 证据堆积信号，处置建议随 warnings 进场）
     budget, env_warn = _compile_budget()
     if env_warn:
@@ -293,10 +316,38 @@ def _gate_check(conn, code: str, prompt_md: str,
                 f"[验证门:证据未全覆盖] 该工作性质仍有 {len(missing)} 条在世证据未被本版吸收"
                 f"（missing_ids={missing}；可能是编译会话漏列，也可能是素材包生成后新写入"
                 "了证据）：它们将继续以增补注入，且夜间任务会因未编译数>0 重复编译本类型")
+    # v0.7.1 W3.3（沉淀质量治理 D9）：工具参数残留与链接只提醒不拦——
+    # 硬档（参数片段）与软档（链接/内部域名）都进 warnings，两种 origin 照常落版；
+    # 「验证门被拒不改产物」不适用于这两条（spec/gov SKILL 已写明显式口径）。
+    hits = toolcheck.scan(prompt_md)
+    hard = [h for h in hits if h["level"] == "hard"]
+    soft = [h for h in hits if h["level"] == "soft"]
+    if hard:
+        warnings.append(_render_violation({
+            "check": "tool_clause_residue",
+            "detail": _format_tool_hits(hard)}))
+    if soft:
+        warnings.append(_render_violation({
+            "check": "tool_clause_soft",
+            "detail": _format_tool_hits(soft)}))
     return violations, warnings
 
 
-_GATE_CHECK_NAMES = {"material_echo": "素材回声", "no_headings": "缺分区标题"}
+_GATE_CHECK_NAMES = {"material_echo": "素材回声", "no_headings": "缺分区标题",
+                     "tool_clause_residue": "工具条款残留",
+                     "tool_clause_soft": "工具条款提醒"}
+
+
+def _format_tool_hits(hits: list[dict], cap: int = 8) -> str:
+    """submit 提醒 detail：最多列 8 项，溢出时注明总项数与总行数。"""
+    shown = "；".join(f"L{h['line']} {h['kind']}「{h['snippet']}」"
+                      for h in hits[:cap])
+    if len(hits) > cap:
+        lines = len({h["line"] for h in hits})
+        more = f"（共 {len(hits)} 项 / {lines} 行，仅列前 {cap} 项）"
+    else:
+        more = ""
+    return shown + more
 
 
 def _render_violation(v: dict) -> str:

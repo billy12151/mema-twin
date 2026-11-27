@@ -101,7 +101,10 @@ _HELP_ENTRIES: dict[str, str] = {
                "传 aud-{受众} 取受众画像素材包（该受众全部证据）。"
                "响应附 evidence_ids/source_ids_suggested/voided_ids 结构化数组"
                "——submit 的 source_memory_ids 直接复制 source_ids_suggested"
-               "（在世全集，含缺正文 skipped 行），无需解析素材包正文。",
+               "（在世全集，含缺正文 skipped 行），无需解析素材包正文。"
+               "响应可能带 tool_clause_flags（证据含工具参数片段/链接的标注：memory_id/"
+               "level/kinds/snippets，素材包对应证据行尾有 <!-- tool-flag --> 标记）"
+               "——参数片段不进 persona，按编译规则拆半；链接只是提醒。",
     "submit": "提交编译产物落版本并写文件镜像。必填 work_type/prompt_md（≤100000 字符）；"
               "建议带 source_memory_ids（从 compile 响应 source_ids_suggested 复制——"
               "不是 evidence_ids，后者缺缺正文 skipped 行，漏列会以增补形式永久注入）"
@@ -110,8 +113,9 @@ _HELP_ENTRIES: dict[str, str] = {
               "夜间定时任务落版必传 origin=scheduled（其余场景不要传），落版前过验证门"
               "（素材回声/分区标题未过拒绝且 active 不变、证据不动；无新证据可吸收时空转阻尼"
               "拒绝落版——两者都会在 status 的 nightly_rejected 累计显示）；交互式 submit "
-              "只警告不拦；证据未全覆盖只出警告；work_type 传 aud-{受众} 即受众画像落版"
-              "（derived，不消耗证据）。",
+              "只警告不拦；证据未全覆盖只出警告；工具条款残留（tool_clause_residue）与"
+              "工具条款提醒（tool_clause_soft）对两种来源都只提醒不拦，照常落版；"
+              "work_type 传 aud-{受众} 即受众画像落版（derived，不消耗证据）。",
     "rollback": "回滚 persona 版本（零阻力：无确认、无警告）。work_type 必填；"
                 "version 省略回上一版本、传 n 回指定版本；不删历史（retired 可再激活），"
                 "版本号不回收（下次 submit 继续 MAX+1）。已是 active 版本时返回 "
@@ -183,9 +187,10 @@ _HELP_ENTRIES: dict[str, str] = {
                    "可带 todos/session/note；可带 steps（v0.4.7，同 step_update "
                    "批量结构且须属本任务）：先补打卡再收口一次往返——steps 已落库"
                    "后被拒时响应带 steps_applied，修正后直接重试，无需重新打卡。"
-                   "交付后：用户对产物的反馈走 twin.write；本次执行中没来得及记的"
-                   "路径与踩坑走 tool_log(task_id, note)——此时步骤都已 done，"
-                   "补 step_update(done) 带 reflection 不会写入。",
+                   "交付后：用户对产物的反馈里，对写法的通用要求（换一个需求、或换一个"
+                   "项目仍适用、且非项目特有约定）走 twin.write 沉淀，本次需求的业务口径"
+                   "变更不沉淀；本次执行中没来得及记的路径与踩坑走 tool_log(task_id, note)"
+                   "——此时步骤都已 done，补 step_update(done) 带 reflection 不会写入。",
     "task_resume": "续作进行中任务（仅 planning，可中断可继续）。task_id；恢复 todos、"
                    "新建 planning 任务并再注入 persona"
                    "（含未编译增补 persona_supplement 与无专属 persona 时的"
@@ -204,7 +209,9 @@ _HELP_ENTRIES: dict[str, str] = {
                    "have_audience_versions 申报口径同 task_start（键=受众裸码），"
                    "同款告诫：跨会话返工上文不可见就不要申报——从旧响应抄号申报会"
                    "短路掉全文注入。"
-                   "修订反馈中的可复用偏好走 twin.write 沉淀。",
+                   "修订反馈中的可复用偏好走 twin.write 沉淀"
+                   "（写法类才写：换一个需求、或换一个项目仍适用、且非项目特有约定；"
+                   "本次需求的业务口径变更不沉淀）。",
     "task_close": "显式关闭进行中任务（仅 planning），历史保留可审计。"
                   "可选 outcome ∈ failed|superseded（缺省 superseded）——"
                   "失败要显式标 failed，否则结果列与未完成任务无法区分；"
