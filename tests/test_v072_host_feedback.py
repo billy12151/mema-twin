@@ -217,6 +217,23 @@ def test_pb_note_with_tools_passed_reports_gap():
     assert "强烈建议" not in r["playbook_note"]
 
 
+def test_t5b_required_vs_checked_three_states(env_or_none=None):
+    _mk_global_pb("# global\n- 工具 `write`：保存交付稿。 <!-- task: 1 -->\n")
+    # 未传：required=true（字面义）、checked 缺席
+    r1 = server._twin_impl("task_start", {"brief": "B", "work_type": "test_report",
+                                          "audience": "self", "purpose": "sync_info",
+                                          "client": "zcode"})
+    assert r1["available_tools_required"] is True
+    assert "available_tools_checked" not in r1
+    # 已传：checked=true、required 不再置位（jingleAI 0.7.4 反馈的字段修正）
+    r2 = server._twin_impl("task_start", {"brief": "B", "work_type": "test_report",
+                                          "audience": "self", "purpose": "sync_info",
+                                          "available_tools": ["write"], "client": "zcode"})
+    assert r2.get("available_tools_checked") is True
+    assert "available_tools_required" not in r2
+    assert "tool_gap" not in r2
+
+
 def test_pb_note_without_tools_keeps_advice(env_or_none=None):
     _mk_global_pb("# global\n- 工具 `write`：保存交付稿。 <!-- task: 1 -->\n")
     r = server._twin_impl("task_start", {"brief": "B", "work_type": "test_report",
@@ -264,3 +281,4 @@ def test_pb_note_no_panel_with_tools_reports_not_compared(env_or_none=None):
     assert r["ok"]
     assert "工具面板比对未执行" in r["playbook_note"]
     assert "tool_gap" not in r
+    assert "available_tools_checked" not in r  # 未比对 = checked 不置

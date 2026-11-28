@@ -563,14 +563,19 @@ def inject_playbook(conn, out: dict, code: str | None, data: dict) -> None:
         note += ("此 playbook 尚无任何使用记录，工具路径未在本宿主验证过——开工前逐条"
                  "核对工具面板中的工具是否可用；缺失的走条目内的降级链，并把缺口"
                  " tool_log 记录。" + advise_at)
-        out["available_tools_required"] = True
+        if not has_at:
+            # v0.7.5：required 语义收紧为字面义——仅本次未传才置位（已传时置位会
+            # 被只看字段的宿主误读成「要求再传一次」，jingleAI 0.7.4 实测反馈）；
+            # 已传的比对状态见下方 available_tools_checked
+            out["available_tools_required"] = True
     elif same_client:
         note += "本宿主近期验证过此路径，可直接参考。"
     else:
         note += ("注意：此 playbook 最近由其他宿主使用，工具可用性可能不同——开工前"
                  "逐条核对工具面板中的工具是否可用；缺失的走条目内的降级链，并把缺口"
                  " tool_log 记录。" + advise_at)
-        out["available_tools_required"] = True
+        if not has_at:
+            out["available_tools_required"] = True
     out["playbook_md"] = pb["content_md"]
     out["playbook_note"] = note
     available = data.get("available_tools")
@@ -592,8 +597,10 @@ def inject_playbook(conn, out: dict, code: str | None, data: dict) -> None:
             # 已传 available_tools 的回执句（owner 指出：传了还劝「下次传」，
             # 句子没跟着状态走）
             out["playbook_note"] += "已按本宿主工具面板比对，缺口见 tool_gap。"
+            out["available_tools_checked"] = True
         elif needed:
             out["playbook_note"] += "已按本宿主工具面板比对，面板条目均已在场（无缺口）。"
+            out["available_tools_checked"] = True
         else:
             out["playbook_note"] += "该 playbook 无工具面板条目，工具面板比对未执行。"
     conn.execute("UPDATE twin_playbooks SET last_used_client=?, last_used_at=?"

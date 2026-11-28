@@ -32,6 +32,16 @@ owner 指出：宿主已传 available_tools 且服务端已回 tool_gap 时，pl
 
 纯 SKILL 文档修复（服务端行为无变更，wheel 与 0.7.3 代码一致）：0.7.3 的 playbook_note 两态回执没同步到 SKILL——`playbook_md` 条目原写「有 `available_tools_required` 就在下次 task_start 传 available_tools」，但 0.7.3 起**本次已传时** `available_tools_required` 照样置位且 note 已是比对回执，照旧文案会引导宿主白传一次。改为两态表述：传了→看回执（缺口见 tool_gap / 无缺口无需再传）；没传→note 劝传，下次补传即可。
 
+## [0.7.5] — 2026-11-28
+
+jingleAI 0.7.4 实测反馈（不阻断级）：`available_tools_required: true` 在已传 available_tools 时仍置位，只看字段不看 note 的宿主会误读成「要求再传一次」。
+
+### Changed（宿主适配须知：required 语义收紧）
+
+- **`available_tools_required` 语义收紧为字面义**：仅本次未传 available_tools 时置位（=确实待补传）；**已传后不再置位**——已有宿主以它为「要传」信号的，修正后不再重传（期望行为，note 回执兜底）。
+- **新增 `available_tools_checked: true`**：本次已传且面板比对执行后置位（缺口见 `tool_gap`，无缺口=面板均已在场）；playbook 无工具面板条目时不置（note 明示「比对未执行」）。
+- 三态速查：`required=true`=本次未传 / `checked=true`=已传已比对 / 两键皆无=未比对或无 playbook。空数组 `[]` 视为未传（0.7.3 起既有口径不变）。SKILL playbook_md 条已同步三态表述。
+
 ## [Unreleased]
 
 ## [0.7.1] — 2026-11-27（2026-11-28 扩充：沉淀质量治理）
