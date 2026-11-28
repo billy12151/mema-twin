@@ -16,6 +16,18 @@ jingleAI 全链路实测（19 次调用）反馈四项修复。**宿主适配须
 
 - help task_start/task_resume/task_revise 的 fallback 描述同步两档口径（此前三处会在零证据场景误导宿主把 fallback_persona_md 缺席当故障排查）；README 同域 fallback 节与 task_start 表格行同步。
 
+## [0.7.3] — 2026-11-28
+
+owner 指出：宿主已传 available_tools 且服务端已回 tool_gap 时，playbook_note 末尾仍写「强烈建议：下次 task_start 传 available_tools」——句子没跟着状态走。
+
+### Changed
+
+- **playbook_note 尾句跟随 available_tools 状态**：已传 → 追加比对回执「已按本宿主工具面板比对，缺口见 tool_gap。」（有缺口）或「…面板条目均已在场（无缺口）。」（全命中）；未传 → 保留原「强烈建议」句。task_start/task_resume/task_revise 三通道一致（同函数）。边界：playbook 无工具面板条目时明示「工具面板比对未执行」。
+
+### Fixed
+
+- playbook 无工具面板条目且宿主已传 available_tools 时，不再有「传了还劝传」的自相矛盾提示（此前任何状态都无条件附建议句）。
+
 ## [Unreleased]
 
 ## [0.7.1] — 2026-11-27（2026-11-28 扩充：沉淀质量治理）

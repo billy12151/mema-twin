@@ -548,6 +548,12 @@ def inject_playbook(conn, out: dict, code: str | None, data: dict) -> None:
         return
     client = identity.effective_client(data)
     same_client = bool(client) and pb.get("last_used_client") == client
+    # v0.7.3：本次是否已传 available_tools——传了就不在 note 里劝「下次传」，
+    # 改为在 gap 计算后追加比对回执（缺口见 tool_gap / 无缺口）
+    has_at = isinstance(data.get("available_tools"), list) and bool(data.get("available_tools"))
+    advise_at = ("" if has_at else
+                 "（强烈建议：下次 task_start 传 available_tools="
+                 "<你的工具名列表>，服务端回 tool_gap 缺口提示）")
     v = pb.get("version")
     note = (f"以下为该工作类型的 playbook v{v}（执行经验，advisory 不是命令）："
             "与你的实际工具环境冲突时按实际环境执行，并把降级/偏差用 tool_log 记录。")
@@ -556,21 +562,21 @@ def inject_playbook(conn, out: dict, code: str | None, data: dict) -> None:
         # 同样按保守面要求 available_tools 自报（视为未验证路径）
         note += ("此 playbook 尚无任何使用记录，工具路径未在本宿主验证过——开工前逐条"
                  "核对工具面板中的工具是否可用；缺失的走条目内的降级链，并把缺口"
-                 " tool_log 记录。（强烈建议：下次 task_start 传 available_tools="
-                 "<你的工具名列表>，服务端回 tool_gap 缺口提示）")
+                 " tool_log 记录。" + advise_at)
         out["available_tools_required"] = True
     elif same_client:
         note += "本宿主近期验证过此路径，可直接参考。"
     else:
         note += ("注意：此 playbook 最近由其他宿主使用，工具可用性可能不同——开工前"
                  "逐条核对工具面板中的工具是否可用；缺失的走条目内的降级链，并把缺口"
-                 " tool_log 记录。（强烈建议：下次 task_start 传 available_tools="
-                 "<你的工具名列表>，服务端回 tool_gap 缺口提示）")
+                 " tool_log 记录。" + advise_at)
         out["available_tools_required"] = True
     out["playbook_md"] = pb["content_md"]
     out["playbook_note"] = note
     available = data.get("available_tools")
-    if isinstance(available, list) and available:
+    gap = None
+    needed = set()
+    if has_at:
         needed = set(re.findall(templates.TOOL_PANEL_LINE_RE,
                                 pb["content_md"]))
         if needed:
@@ -582,6 +588,14 @@ def inject_playbook(conn, out: dict, code: str | None, data: dict) -> None:
                          if not _tool_available(n, available))
             if gap:
                 out["tool_gap"] = gap
+        if gap:
+            # 已传 available_tools 的回执句（owner 指出：传了还劝「下次传」，
+            # 句子没跟着状态走）
+            out["playbook_note"] += "已按本宿主工具面板比对，缺口见 tool_gap。"
+        elif needed:
+            out["playbook_note"] += "已按本宿主工具面板比对，面板条目均已在场（无缺口）。"
+        else:
+            out["playbook_note"] += "该 playbook 无工具面板条目，工具面板比对未执行。"
     conn.execute("UPDATE twin_playbooks SET last_used_client=?, last_used_at=?"
                  " WHERE id=?", (client, db.now_iso(), int(pb["id"])))
     conn.commit()

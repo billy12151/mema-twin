@@ -181,3 +181,86 @@ def test_t6_docs_consistent():
         open(REPO / "mema_twin" / "server.py", encoding="utf-8").read())
     assert "分两档" in readme and "fallback_pointer" in readme
     assert "0 个时打回并提示先 task_start 建档" in server._HELP_ENTRIES["plan_set"]
+
+
+# ---- 0.7.3：playbook_note 尾句跟随 available_tools 状态 ----
+
+def _mk_global_pb(conn_md):
+    conn = db.connect()
+    try:
+        conn.execute(
+            "INSERT INTO twin_playbooks(key, version, content_md, status, created_at)"
+            " VALUES('global', 1, ?, 'active', ?)", (conn_md, db.now_iso()))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_pb_note_with_tools_passed_reports_receipt():
+    _mk_global_pb("# global\n- 工具 `write`：保存交付稿。 <!-- task: 1 -->\n")
+    r = server._twin_impl("task_start", {"brief": "B", "work_type": "test_report",
+                                         "audience": "self", "purpose": "sync_info",
+                                         "available_tools": ["write"], "client": "zcode"})
+    assert r["ok"] and "tool_gap" not in r          # write 已在场 → 无缺口
+    assert "已按本宿主工具面板比对" in r["playbook_note"]
+    assert "缺口见 tool_gap" not in r["playbook_note"]
+    assert "强烈建议" not in r["playbook_note"]      # 传了不再劝下次传
+
+
+def test_pb_note_with_tools_passed_reports_gap():
+    _mk_global_pb("# global\n- 工具 `OfficeCLI`：预览编辑。 <!-- task: 1 -->\n")
+    r = server._twin_impl("task_start", {"brief": "B", "work_type": "test_report",
+                                         "audience": "self", "purpose": "sync_info",
+                                         "available_tools": ["write"], "client": "zcode"})
+    assert r["ok"] and r["tool_gap"] == ["OfficeCLI"]
+    assert "已按本宿主工具面板比对，缺口见 tool_gap。" in r["playbook_note"]
+    assert "强烈建议" not in r["playbook_note"]
+
+
+def test_pb_note_without_tools_keeps_advice(env_or_none=None):
+    _mk_global_pb("# global\n- 工具 `write`：保存交付稿。 <!-- task: 1 -->\n")
+    r = server._twin_impl("task_start", {"brief": "B", "work_type": "test_report",
+                                         "audience": "self", "purpose": "sync_info",
+                                         "client": "zcode"})
+    assert r["ok"] and "tool_gap" not in r
+    assert "强烈建议：下次 task_start 传 available_tools" in r["playbook_note"]
+
+def test_pb_note_same_client_with_tools_reports_receipt(env_or_none=None):
+    # same_client 分支（本无劝传句）同样追加比对回执
+    _mk_global_pb("# global\n- 工具 `write`：保存交付稿。 <!-- task: 1 -->\n")
+    conn = db.connect()
+    try:
+        conn.execute("UPDATE twin_playbooks SET last_used_client='zcode'"
+                     " WHERE key='global'")
+        conn.commit()
+    finally:
+        conn.close()
+    r = server._twin_impl("task_start", {"brief": "B", "work_type": "test_report",
+                                         "audience": "self", "purpose": "sync_info",
+                                         "available_tools": ["write"], "client": "zcode"})
+    assert r["ok"] and "tool_gap" not in r
+    assert "本宿主近期验证过此路径" in r["playbook_note"]
+    assert "已按本宿主工具面板比对，面板条目均已在场（无缺口）。" in r["playbook_note"]
+
+
+def test_pb_note_resume_with_tools_reports_receipt(env_or_none=None):
+    # resume 通道透传 available_tools → 回执照追加
+    _mk_global_pb("# global\n- 工具 `write`：保存交付稿。 <!-- task: 1 -->\n")
+    t = _mk_task("test_report")
+    r = server._twin_impl("task_resume", {"task_id": t["id"],
+                                          "available_tools": ["write"],
+                                          "client": "zcode"})
+    assert r["ok"]
+    assert "已按本宿主工具面板比对" in r["playbook_note"]
+    assert "缺口见 tool_gap" not in r["playbook_note"]
+
+
+def test_pb_note_no_panel_with_tools_reports_not_compared(env_or_none=None):
+    # 边界：playbook 无工具面板条目 → 明示「未比对」而非静默
+    _mk_global_pb("# global\n无面板条目。\n")
+    r = server._twin_impl("task_start", {"brief": "B", "work_type": "test_report",
+                                         "audience": "self", "purpose": "sync_info",
+                                         "available_tools": ["write"], "client": "zcode"})
+    assert r["ok"]
+    assert "工具面板比对未执行" in r["playbook_note"]
+    assert "tool_gap" not in r
