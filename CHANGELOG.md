@@ -28,6 +28,10 @@ owner 指出：宿主已传 available_tools 且服务端已回 tool_gap 时，pl
 
 - playbook 无工具面板条目且宿主已传 available_tools 时，不再有「传了还劝传」的自相矛盾提示（此前任何状态都无条件附建议句）。
 
+## [0.7.4] — 2026-11-28
+
+纯 SKILL 文档修复（服务端行为无变更，wheel 与 0.7.3 代码一致）：0.7.3 的 playbook_note 两态回执没同步到 SKILL——`playbook_md` 条目原写「有 `available_tools_required` 就在下次 task_start 传 available_tools」，但 0.7.3 起**本次已传时** `available_tools_required` 照样置位且 note 已是比对回执，照旧文案会引导宿主白传一次。改为两态表述：传了→看回执（缺口见 tool_gap / 无缺口无需再传）；没传→note 劝传，下次补传即可。
+
 ## [Unreleased]
 
 ## [0.7.1] — 2026-11-27（2026-11-28 扩充：沉淀质量治理）
