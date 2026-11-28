@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.7.2] — 2026-11-28
+
+jingleAI 全链路实测（19 次调用）反馈四项修复。**宿主适配须知**：①taxonomy `compact` 非布尔值由「静默按 false 返回完整投影」改为 **invalid_input 打回**（此前 help 就写打回，本次实现对齐）；②全新工种（0 在世证据）task_start/task_resume/task_revise 不再注入同域 fallback 全文（实测会议纪要模板注入测试报告构成失真），改为返回 `fallback_pointer`（新数据键，{work_type, version, domain}）+ `fallback_persona_note`（含 donor 实名与 get 指路）；有在世证据的工种行为不变。645 测试绿。**发版顺序**：先 bump 三件套再 `make install-skill`（版本戳取自 pyproject，顺序反了 check-skill 抓不到——v0.7.0 教训）。
+
+### Changed
+
+- **taxonomy compact 非布尔硬拒**（F1）：`"true"`/`1` 等非布尔 → invalid_input（field=compact）；布尔 false/null 等于未传=完整版——help「非布尔会被打回」的旧承诺本次兑现（start_first 同款句式）。
+- **全新工种 fallback 指针化**（F3）：0 在世证据 → 不注同域全文（口径可能不适用，实测失真），回 `fallback_pointer` + note（donor 实名 + get 指路，指针自足照 v0.6.9 先例）；有在世证据（类型在积累）维持全文垫底；task_start/task_resume/task_revise 三通道一致；playbook 注入不受影响（独立通道）。
+- **kind 报错补指路**（F2）：传工种 code 当 kind（如 `["work_report"]`）的报错追加「数组元素是 kind 名，不是工种 code；查某工种的枚举清单用 kind='work_type'」。
+- **help plan_set 措辞对齐实测**（F4）：「0 个或多个 planning 任务时打回并附清单」→「0 个时打回并提示先 task_start 建档；多个时打回并附 planning 任务清单」。
+- **SKILL.md 补 v0.7.0 新字段说明**（F4）：write 条补 `cross_type_echo`/`echo_guidance`、task_submit 条补 `steps_reflection_not_written`；fallback 条改两档表述并补 `fallback_pointer`。
+
+### Fixed
+
+- help task_start/task_resume/task_revise 的 fallback 描述同步两档口径（此前三处会在零证据场景误导宿主把 fallback_persona_md 缺席当故障排查）；README 同域 fallback 节与 task_start 表格行同步。
+
 ## [Unreleased]
 
 ## [0.7.1] — 2026-11-27（2026-11-28 扩充：沉淀质量治理）

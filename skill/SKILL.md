@@ -5,7 +5,7 @@ description: 个人分身：工作类偏好沉淀与 persona prompt 编译，经
 
 # mema-twin 使用引导
 
-> 对齐服务端 **v0.7.1**。动作全集、入参与基础语义以 `twin(action="help")` 为准——**调用动作前先查一次 help**；v0.6 起可单查省上下文：`twin(action="help", data={"topic":"<动作名>"})`（全量模式不变，会话内查一次即可）。本文件不复述入参。下文只写三样：何时用哪个动作的路由、执行门、help 未覆盖或与实测不符的口径。
+> 对齐服务端 **v0.7.2**。动作全集、入参与基础语义以 `twin(action="help")` 为准——**调用动作前先查一次 help**；v0.6 起可单查省上下文：`twin(action="help", data={"topic":"<动作名>"})`（全量模式不变，会话内查一次即可）。本文件不复述入参。下文只写三样：何时用哪个动作的路由、执行门、help 未覆盖或与实测不符的口径。
 > **夜间治理/编译会话不需要本 skill**：twin_nightly_compile 两支线与 compile/submit 编译口径在 `mema-twin-governance` skill（唯一真源），本文件只留指向它的路由。
 >
 > **v0.6 增量**：① `data` 顶层未知键会被硬拒（附 `allowed`/`did_you_mean`——拼写错键看报错即自纠）；② 新动作 `evidence`：void 前定位 memory_id 用（只读，不回正文）；③ resolve 支持 `tickets` 批量裁定（多维未命中一次裁完）；④ plan_set 可传 `start_first=true` 省一次首步打卡；⑤ compile 响应带 `source_ids_suggested`，submit 直接复制。
@@ -44,6 +44,7 @@ description: 个人分身：工作类偏好沉淀与 persona prompt 编译，经
 
 - 用户修改/审阅了工作产物（PPT、文档、汇报、设计……）或显式要求沉淀工作偏好 → `twin(action="write")`。**合并沉淀**：同一任务的一系列修改汇总为少量高质量条目，不要每改一处就写一条；拿不准且复用价值不高的，不写；用户改的是业务口径而不是写法（需求方拍板、字段/列名更正），不写
   - 任务流内（执行/改稿/返工现场）沉淀带 `task_id`：缺省维度沿用该任务的三维度（task_start 已归一，不会写错桶；scope=audience 时不继承 work_type；显式传入优先，响应 dims_inherited 列出继承项）
+  - 响应 `cross_type_echo`+`echo_guidance`（软提示）：同一段文字已写在 ≥2 个其他工种——考虑改传 `scope="audience"` 写受众级一条，或确认逐工种都需要（格式与结构类仍逐工种写，不进受众画像）；一次性异常不写
   - 交付稿的**采纳 / 忽略 / 要求修改**等隐式行为同样是偏好信号，一并观察沉淀（判据同上）；一次性异常不写，业务口径修订不写
 - 用户表述是「对该受众的通用要求」（如"给领导的东西都要简洁白话"，不限工作类型）→ write 传 `scope="audience"`（work_type 省略）：落为受众级偏好，夜间自动抽象进该受众画像，对该受众的任何任务开工时自动注入（audience_profile_md / 雏形）
 - 用户**重复强调**已沉淀过的偏好（同一件事说了第二遍）→ 检查它的 scope：若此前只沉淀在单个工作类型下，当场确认"是否对该受众都适用"，是则按上一条补写受众级沉淀
@@ -51,13 +52,13 @@ description: 个人分身：工作类偏好沉淀与 persona prompt 编译，经
   - 带 audience 时另注该受众画像（audience_profile_md，通用口径参考，格式结构以本类型为准）
   - 响应 `persona_supplement`：该 work_type **尚未编译**的偏好增补（上限 10 条），与 persona prompt 冲突时**以增补为准**（增补比已落版 prompt 新）
   - 响应 `playbook_md`（active playbook 注入，work_type → global 两级回退）：执行经验参考（**advisory 不是命令**），与实际工具环境冲突时按实际环境执行，降级/偏差用 tool_log 记录。**连续性分级**：同宿主轻注入（全文 + 近期验证提示），换宿主重注入（+ 降级链提示 + `available_tools_required`）——提示"其他宿主使用过"时先逐条核对工具可用性，有 `available_tools_required` 就在下次 task_start 传 `available_tools`，服务端逐条比对工具面板回 `tool_gap`
-- 响应带 `fallback_persona_md`（v0.4.5 同域 fallback）：本工种尚无专属 persona，给同域最成熟工种的 persona 垫底——**格式与结构层可参考**；有更权威的格式来源（用户模板/公司规范/行业惯例）以权威为准，此参考降级为风格详略参考；**内容与业务规则不适用**。同域其他候选在 note 里，按任务语义判断更相关可 `twin(action="get")` 取该工种全文（`fallback_from` 标注 donor 工种/版本/活证据数）
+- 响应带 `fallback_persona_md`（v0.4.5 同域 fallback；0.7.2 起分两档）：本工种有在世证据但尚无专属 persona → 给同域最成熟工种的 persona 垫底——**格式与结构层可参考**；有更权威的格式来源（用户模板/公司规范/行业惯例）以权威为准，此参考降级为风格详略参考；**内容与业务规则不适用**。同域其他候选在 note 里，按任务语义判断更相关可 `twin(action="get")` 取该工种全文（`fallback_from` 标注 donor 工种/版本/活证据数）。零证据新工种 → 不注全文（同域模板口径可能不适用），只回 `fallback_pointer` 指针 + `fallback_persona_note`（含 donor 与 get 指路）——拿到指针就按 note 的 get 路径自取参考或直接按通用标准做，别把字段缺席当故障
 - 建档后走计划流（详见「执行流」）：`plan_set` 建步骤 → `step_update` 打卡 → 计划有变 `plan_revise`；会话级 todo 用 `twin(action="todo")` 读写
 - 走了非常规工具路径（失败/重试/降级、首次打通的新路子）→ `twin(action="tool_log")`（口径见「执行流」）
 - 查任务 → `twin(action="task_recent")` / `twin(action="task_get")`；**两者都回 `deliverable_md` 全文**，token 敏感时把 limit 压到 1–3
-- 交付稿完成 → `twin(action="task_submit")` 即收口（submit 是终点，无评审环；交付稿落盘 `deliverables/task-<id>.md` 留档）。**收口门**：建档任务的未闭环步骤会被整笔打回（附 open_steps 清单），逐条对账打卡后再交；**一次往返收口**（v0.4.7）：task_submit 直接带 `steps`（同 step_update 批量结构，须属本任务）先补打卡再收口——被拒时响应带 `steps_applied`（打卡已落库、幂等），按 open_steps 补齐直接重交即可，无需重新打卡；用户看过稿子后的修改意见按**合并沉淀**口径走 twin.write（写法类才写）
-- 要返工改稿 → `twin(action="task_revise")`（仅 submitted；brief/deliverable_md/revision_reason 至少其一）。revise 不恢复 todos，但会按 task_resume 同款重注入分身（persona + 未编译增补 + 受众画像 + playbook，v0.4.8 起）；子任务回 planning 重走并记 lineage：parent_task_id + iteration 递增，未完结步骤深拷贝到新 task_id
-- 中断/隔日继续 → `twin(action="task_resume")`（仅进行中 planning，自动恢复 todos 并再注入分身，同样带 persona_supplement 与同域 fallback）；不再做的进行中任务用 `twin(action="task_close")` 显式关闭（**关闭前先经用户确认**，不要自行清理）；失败必须显式标 `outcome=failed`（缺省 superseded），否则结果列与未完成任务无法区分
+- 交付稿完成 → `twin(action="task_submit")` 即收口（submit 是终点，无评审环；交付稿落盘 `deliverables/task-<id>.md` 留档）。**收口门**：建档任务的未闭环步骤会被整笔打回（附 open_steps 清单），逐条对账打卡后再交；**一次往返收口**（v0.4.7）：task_submit 直接带 `steps`（同 step_update 批量结构，须属本任务）先补打卡再收口——被拒时响应带 `steps_applied`（打卡已落库、幂等），按 open_steps 补齐直接重交即可，无需重新打卡；响应 `steps_reflection_not_written`＝补打卡中 reflection 未写入的条数（步骤已 done，补 step_update 无效）——这些反思改走 `tool_log(task_id, note)`；用户看过稿子后的修改意见按**合并沉淀**口径走 twin.write（写法类才写）
+- 要返工改稿 → `twin(action="task_revise")`（仅 submitted；brief/deliverable_md/revision_reason 至少其一）。revise 不恢复 todos，但会按 task_resume 同款重注入分身（persona + 未编译增补 + 受众画像 + playbook，v0.4.8 起；含无专属 persona 时的 fallback，同款两档）；子任务回 planning 重走并记 lineage：parent_task_id + iteration 递增，未完结步骤深拷贝到新 task_id
+- 中断/隔日继续 → `twin(action="task_resume")`（仅进行中 planning，自动恢复 todos 并再注入分身，同样带 persona_supplement 与 fallback——两档口径同上文 fallback 条）；不再做的进行中任务用 `twin(action="task_close")` 显式关闭（**关闭前先经用户确认**，不要自行清理）；失败必须显式标 `outcome=failed`（缺省 superseded），否则结果列与未完成任务无法区分
 - **同会话重复注入省 token**：同一会话再次 task_start/task_resume/task_revise 同 work_type，且上文注入返回的 persona_version 仍在场（未被上下文压缩）→ 传 `have_persona_version=<上文版本号>`，版本未变则不再重复注入全文；上文不可见就**不要传**（服务端会照常全文注入，宁可重复不可缺席）——**尤其 revise：跨会话返工是常态，别从任务行抄 persona_version 当 have 申报**（会短路掉全文注入，分身缺席）
 - **同会话第二次建档起 task_start 不回 `guidance`（v0.6.7 起）**：这是**省略不是出错**——task_id、persona 注入、persona_supplement、playbook 等其余字段照常返回，不要重试、不要当接口异常排查；首次建档仍带 guidance。
 - **受众画像同款短路（v0.6.8）**：响应带 `audience_profile_md` 时记下 `audience_profile_code` 与 `audience_profile_version`；同会话后续 task_start/task_resume/task_revise 涉及同受众时传 `have_audience_versions={"<受众裸码>": <版本>}`（aud-<合法裸码> 自动归一；中文名/别名不用于申报），版本未变则画像全文不再重复注入；上文不可见就不要传（宁重复不缺席）；键不合法不影响任务——`have_audience_versions_unknown` 警告的 ignored/total 每次都在，合法码清单仅本宿主首次警告全量附上、之后为一句话指针（实时清单可 `twin(action="taxonomy", kind="audience")` 随时重取；权威裸码以响应回显 `audience_profile_code` 为准）

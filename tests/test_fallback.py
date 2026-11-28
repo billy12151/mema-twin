@@ -64,6 +64,7 @@ def test_no_persona_same_domain_injects_most_mature(env):
     _mk_persona(env, "meeting_minutes", 3, md="# meeting_minutes v3\nB")
     _mk_evidence(env, "work_report", 5)
     _mk_evidence(env, "meeting_minutes", 2)
+    _mk_evidence(env, "comm_copy", 1)  # 目标工种有在世证据→全文路径
     r = _start("comm_copy")  # 记录与同步，无专属
     assert r["ok"]
     assert r["fallback_from"]["work_type"] == "work_report"  # 活证据多者
@@ -118,6 +119,7 @@ def test_custom_code_with_domain_lends_out(env):
         conn.close()
     _mk_persona(env, "my_rpt", 1, md="# my_rpt\nX")
     _mk_evidence(env, "my_rpt", 3)
+    _mk_evidence(env, "comm_copy", 1)
     r = _start("comm_copy")
     assert r["ok"] and r["fallback_from"]["work_type"] == "my_rpt"
 
@@ -133,6 +135,7 @@ def test_void_evidence_excluded_flips_donor(env):
     _mk_persona(env, "meeting_minutes", 1)
     _mk_evidence(env, "work_report", 3)
     _mk_evidence(env, "meeting_minutes", 2)
+    _mk_evidence(env, "comm_copy", 1)
     r1 = _start("comm_copy")
     assert r1["fallback_from"]["work_type"] == "work_report"
     conn = db.connect()
@@ -153,6 +156,7 @@ def test_tiebreak_version_then_code(env):
     _mk_persona(env, "comm_copy_tmp", 1)  # 占位防命中，无此码——跳过
     _mk_evidence(env, "work_report", 4)
     _mk_evidence(env, "meeting_minutes", 4)
+    _mk_evidence(env, "comm_copy", 1)
     r = _start("comm_copy")
     # 证据数并列(4=4)、版本并列(2=2) → code 字典序最大 work_report
     assert r["fallback_from"]["work_type"] == "work_report"
@@ -163,6 +167,7 @@ def test_tiebreak_version_higher_wins(env):
     _mk_persona(env, "meeting_minutes", 9)
     _mk_evidence(env, "work_report", 4)
     _mk_evidence(env, "meeting_minutes", 4)
+    _mk_evidence(env, "comm_copy", 1)
     r = _start("comm_copy")
     assert r["fallback_from"]["work_type"] == "meeting_minutes"  # 版本高者
 
@@ -174,6 +179,7 @@ def test_resume_symmetric_injection(env):
                       "matched_by": "exact_or_alias"}})
     _mk_persona(env, "work_report", 1, md="# work_report v1\nresume-ref")
     _mk_evidence(env, "work_report", 2)
+    _mk_evidence(env, "comm_copy", 1)
     r = server._twin_impl("task_resume", {"task_id": t["id"]})
     assert r["ok"]
     assert r.get("fallback_persona_md") == "# work_report v1\nresume-ref"
@@ -182,6 +188,7 @@ def test_resume_symmetric_injection(env):
 def test_have_version_does_not_shortcut_fallback(env):
     _mk_persona(env, "work_report", 1)
     _mk_evidence(env, "work_report", 1)
+    _mk_evidence(env, "comm_copy", 1)
     r = server._twin_impl("task_start", {
         "brief": "B", "work_type": "comm_copy", "have_persona_version": 7})
     assert r["ok"] and "fallback_persona_md" in r  # 申报机制不作用于 fallback
@@ -197,6 +204,7 @@ def test_candidate_missing_twin_types_row_falls_back_to_taxonomy(env):
         conn.close()
     _mk_persona(env, "work_report", 1)
     _mk_evidence(env, "work_report", 1)
+    _mk_evidence(env, "comm_copy", 1)
     r = _start("comm_copy")
     assert r["ok"] and r["fallback_from"]["work_type"] == "work_report"
 
@@ -205,6 +213,7 @@ def test_donor_single_snapshot_no_second_read(env):
     # 注入文本 = 候选 SELECT 快照（P3-1：不二次读库，无并发换版错位面）
     _mk_persona(env, "work_report", 1, md="# snapshot\ndonor text")
     _mk_evidence(env, "work_report", 1)
+    _mk_evidence(env, "comm_copy", 1)
     md = task_actions._fallback_payload("comm_copy")
     assert md["fallback_persona_md"] == "# snapshot\ndonor text"
     # 快照后再改库不影响已返回的注入物
@@ -227,6 +236,7 @@ def test_candidates_all_listed_per_line(env):
               "official_doc", "test_report"):
         _mk_persona(env, w, 1)
         _mk_evidence(env, w, 1)
+    _mk_evidence(env, "comm_copy", 1)
     r = _start("comm_copy")
     assert r["ok"]
     note = r["fallback_persona_note"]
@@ -244,6 +254,7 @@ def test_supplement_coexists_with_fallback_elif_branch(env, monkeypatch):
                             "persona_supplement_note": "stub 注入"})
     _mk_persona(env, "work_report", 1, md="# wr\n")
     _mk_evidence(env, "work_report", 2)
+    _mk_evidence(env, "comm_copy", 1)
     r = _start("comm_copy")
     assert r["ok"]
     assert r["persona_supplement"] == ["本工种未编译偏好一条"]  # 走的确实是 elif 分支
@@ -279,6 +290,7 @@ def test_domain_whitespace_normalized(env):
     _mk_evidence(env, "my_daily", 5)
     _mk_persona(env, "work_report", 1)
     _mk_evidence(env, "work_report", 1)
+    _mk_evidence(env, "comm_copy", 1)
     r = _start("comm_copy")
     assert r["ok"] and r["fallback_from"]["work_type"] == "my_daily"  # 证据最多者不再被空格否决
 
@@ -298,6 +310,7 @@ def test_empty_prompt_md_candidate_skipped(env):
     _mk_evidence(env, "work_report", 5)
     _mk_persona(env, "meeting_minutes", 1)
     _mk_evidence(env, "meeting_minutes", 1)
+    _mk_evidence(env, "comm_copy", 1)
     r = _start("comm_copy")
     assert r["ok"] and r["fallback_from"]["work_type"] == "meeting_minutes"
 

@@ -354,6 +354,21 @@ def _fallback_payload(code: str | None) -> dict:
                       key=lambda w: (counts.get(w, 0), int(cands[w]["version"]), w))
         donor = cands[donor_w]
         donor_n = counts.get(donor_w, 0)
+        # v0.7.2 F3：全新工种（0 在世证据）不注入全文垫底——同域模板口径可能
+        # 不适用（jingleAI 实测 test_report 被注 meeting_minutes 全文），只给
+        # 指针不失真；有在世证据（类型在积累）才维持全文。donor 信息保留在
+        # 指针与 note（自足：上下文压缩后仍知 get 谁，照 v0.6.9 指针先例）。
+        if not db.alive_evidence(conn, code):
+            ptr_note = (
+                f"本工种（{_wt_label_zh(conn, code)}）尚无 persona 与在世证据，未注入"
+                f"同域工种「{_wt_label_zh(conn, donor_w)}（{donor_w}）」v{donor['version']}"
+                f"的垫底模板——其口径可能不适用本工种；确需格式参考可 "
+                f'twin(action="get", data={{"work_type": "{donor_w}"}}) 取全文，'
+                "业务口径以本任务为准。本工种攒够证据后会有专属 persona。")
+            return {"fallback_pointer": {"work_type": donor_w,
+                                         "version": int(donor["version"]),
+                                         "domain": my_domain},
+                    "fallback_persona_note": ptr_note}
         others = sorted((w for w in cands if w != donor_w),
                         key=lambda w: (-counts.get(w, 0), -int(cands[w]["version"]), w))
         note = (

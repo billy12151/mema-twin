@@ -91,10 +91,12 @@ for fallback and human review).
   作废证据（行级、全链路排除、不可逆）；曾入编译的证据被作废触发 `persona_stale`
   夜间自动重编，受众侧经 audience_stale 计数差重抽象；素材包常驻「已作废条款」节
   防旧版参考带回作废条款。status 附 open_tasks 治理计数。
-- **同域 fallback 注入（v0.4.5，#956 F4 拍板）**：该工种尚无专属 persona 时，
-  task_start/task_resume 注入同域最成熟工种（活证据最多，tie-break 版本→code）
-  的 persona 全文垫底 + 其余同域候选各一行摘要 + 降级声明（格式结构可参考、
-  有权威来源以权威为准、内容业务规则不适用）；专属 persona 落版（含 mirror
+- **同域 fallback 注入（v0.4.5，#956 F4 拍板；0.7.2 起分两档）**：该工种尚无专属
+  persona 时按有无在世证据分档——有在世证据：task_start/task_resume 注入同域最成熟
+  工种（活证据最多，tie-break 版本→code）的 persona 全文垫底 + 其余同域候选各一行
+  摘要 + 降级声明（格式结构可参考、有权威来源以权威为准、内容业务规则不适用）；零证据
+  新工种：不注全文（同域模板口径可能不适用），只回 `fallback_pointer` 指针 +
+  `fallback_persona_note`（含 donor 实名与 get 指路）。专属 persona 落版（含 mirror
   降级读到）自动退出。三层注入链自洽：受众层迁口径 → 域层借格式结构 →
   工种层专属。custom 码按 domain 判定（canonicalize 入口归一空白）。
 - **执行计划层（v0.4）**：建档任务默认走计划（两档路由：无重复执行价值的一次性事务
@@ -139,7 +141,7 @@ for fallback and human review).
 | `taxonomy` | 列枚举清单（动态：含治理追加别名与自建 canonical；kind ∈ work_type/audience/purpose，v0.4.7 起**可传数组一次取多类或 `"all"`**——多类形状判别式=响应有无 `kinds` 键、顶层 count_total；`compact` 仅接受布尔 true） |
 | `pending` / `resolve` | 归一门待裁票据的查看与治理（map=归一并进别名表 / canonicalize=立新码入列（带 description 选码说明；与现有值相似需 confirm 二次确认）/ reject=不入体系且不得重试原值）；pending 的 `status` ∈ pending\|mapped\|canonicalized\|rejected（其余打回），items 带 `content_preview`/`content_chars`/`client`（v0.6.2 票据快照：被拒写入的正文全文在 resolve 响应按需取，3 步闭环零丢失）；v0.6 resolve 支持 `tickets=[...]` 批量裁定（1..20 条，与单条互斥；confirm 预扫摘出疑似重复票不进事务，余票单事务全落/全回滚带 `failed_index`） |
 | `evidence` | v0.6 新增：列偏好证据索引（只读，定位 `memory_id` 用，不回正文全文）；`status` ∈ uncompiled\|compiled\|void、`work_type`、`limit`（默认 50 上限 200） |
-| `task_start` | 开工建档并注入 persona prompt + 未编译增补 + active playbook（连续性分级）；`have_persona_version` 申报同会话已注入版本，未变则省略重复注入；带 audience 时注入受众画像 `audience_profile_md`/雏形（v0.6.8：`have_audience_versions`={受众裸码: 版本} 同款申报短路，aud-<合法裸码> 自动归一、中文名/别名不用于申报，未识别键软忽略并回 `have_audience_versions_unknown` 警告——ignored/total 每次都在，合法码清单仅宿主首次全量附上、之后指针，可 taxonomy(kind=audience) 实时重取）；audience/purpose 可选，给了值必须在清单内；可选 `available_tools`（工具名列表，服务端与 playbook 工具面板比对回 `tool_gap`）；该工种尚无专属 persona 时注入**同域 fallback**（v0.4.5：同域最成熟工种 persona 全文垫底 + 其余候选摘要 + 降级声明，专属落版自动退出） |
+| `task_start` | 开工建档并注入 persona prompt + 未编译增补 + active playbook（连续性分级）；`have_persona_version` 申报同会话已注入版本，未变则省略重复注入；带 audience 时注入受众画像 `audience_profile_md`/雏形（v0.6.8：`have_audience_versions`={受众裸码: 版本} 同款申报短路，aud-<合法裸码> 自动归一、中文名/别名不用于申报，未识别键软忽略并回 `have_audience_versions_unknown` 警告——ignored/total 每次都在，合法码清单仅宿主首次全量附上、之后指针，可 taxonomy(kind=audience) 实时重取）；audience/purpose 可选，给了值必须在清单内；可选 `available_tools`（工具名列表，服务端与 playbook 工具面板比对回 `tool_gap`）；该工种尚无专属 persona 时按有无在世证据分两档注入**同域 fallback**（v0.4.5：有证据→同域最成熟工种 persona 全文垫底 + 其余候选摘要 + 降级声明；0.7.2：零证据新工种只回 `fallback_pointer` 指针不注全文，专属落版自动退出） |
 | `plan_set` | 建档任务列步骤计划（v0.4 执行计划层）：steps（title/depends_on）+ open_questions（可标 blocking），直接放行开工；重复调用即重排（未完结步骤标 skipped(replanned)，done 保留）；v0.6 可选 `start_first=true`——计划落库即把无依赖且未被 blocking 锚定的首步标 in_progress（省一次 step_update 往返；全部首步被锚定时响应 `start_first_skipped=true` 说明原因） |
 | `step_update` | 步骤状态机打卡（六态；to=in_progress 过三门：blocking 疑问→依赖→单一 in_progress）；done/failed 闭环（failed 必带 reflection；done 可带 reflection 记「下次怎么做」，夜间提炼进 playbook——须迁 done 那一次带，后补不写入（响应明示「未写入」并指路 tool_log）；pending 直跳标 backfilled 追认） |
 | `plan_revise` | 修订单次提交：steps_remove（仅 pending 且不被本代未删步骤依赖）/ steps_update（改 deps/状态走状态机）/ steps_add / answers（open_questions 写回解锁 blocking） |
@@ -209,7 +211,8 @@ uv venv && uv pip install -e ".[test]"
 3. 响应 prose 键域冻结（B7）：新增动作的说明文字键只准复用
    guidance/hint/note/next/session_note/warnings/stall_advisory/twin_notices 或既有
    `*_note`/`scan_notice` 家族（persona_supplement_note/audience_profile_note/
-   fallback_persona_note/playbook_note 等已在产，豁免列举），不准发明新键族。
+   fallback_persona_note/playbook_note 等已在产，豁免列举），不准发明新键族；
+   结构化数据键（如 fallback_from/fallback_pointer）不在 prose 冻结范围。
 
 环境变量：
 

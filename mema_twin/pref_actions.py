@@ -672,8 +672,16 @@ def _action_taxonomy(data: dict) -> dict:
     v0.4.7：kind 可传数组一次取多类或 'all' 取全部（判别式=响应有无 kinds 键，
     数组传 1 个元素也走 kinds 形状）；compact=true 精简投影（code/zh/aliases 前 5，
     砍 domain/en/is_custom——归一引导靠 aliases，完整版仍是唯一全量面）。"""
+    # v0.7.2 F1：compact 在场非布尔 → 打回（对齐 help 旧承诺；"true"/1 静默当
+    # false 会偷偷返回完整投影，宿主以为省了 token 实则没省）。null/缺省=未传
+    # 放行；布尔 false=显式要完整版，放行（照 start_first 同款句式）。
+    compact_raw = data.get("compact")
+    if compact_raw is not None and not isinstance(compact_raw, bool):
+        return {"ok": False, "error": "invalid_input", "field": "compact",
+                "reason": "compact 仅接受布尔 true；传 \"true\"/1 等非布尔会被打回"
+                          "——省 token 请传布尔 true（false/null=要完整版，等于未传）"}
     kind_raw = data.get("kind")
-    compact = data.get("compact") is True  # 严格布尔："false" 字符串不当作 true
+    compact = compact_raw is True
     multi = False
     if isinstance(kind_raw, list):
         kinds = [str(k).strip() for k in kind_raw if str(k).strip()]
@@ -690,7 +698,10 @@ def _action_taxonomy(data: dict) -> dict:
     bad = [k for k in kinds if k not in taxonomy.KINDS]
     if bad or not kinds:
         return {"ok": False, "error": "invalid_input", "field": "kind",
-                "reason": f"expected one of {taxonomy.KINDS}（或数组/'all'），收到 {bad or kind_raw!r}"}
+                "reason": f"expected one of {taxonomy.KINDS}（或数组/'all'），收到 "
+                          f"{bad or kind_raw!r}——数组元素是 kind 名（work_type/"
+                          "audience/purpose），不是工种 code；查某工种的枚举清单"
+                          "用 kind='work_type'"}
     seen: set = set()
     kinds = [k for k in kinds if not (k in seen or seen.add(k))]
 
